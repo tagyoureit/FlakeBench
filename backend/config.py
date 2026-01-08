@@ -1,0 +1,158 @@
+"""
+Application Configuration using Pydantic Settings
+
+Loads configuration from environment variables with sensible defaults.
+"""
+
+from typing import List
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """
+    Application settings loaded from environment variables.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
+    )
+
+    # ========================================================================
+    # Snowflake Connection Settings
+    # ========================================================================
+    SNOWFLAKE_ACCOUNT: str = "your_account.region"
+    SNOWFLAKE_USER: str = "your_username"
+    SNOWFLAKE_PASSWORD: str = ""
+    SNOWFLAKE_WAREHOUSE: str = "COMPUTE_WH"
+    SNOWFLAKE_DATABASE: str = "UNISTORE_BENCHMARK"
+    SNOWFLAKE_SCHEMA: str = "PUBLIC"
+    SNOWFLAKE_ROLE: str = "ACCOUNTADMIN"
+
+    # Connector-level timeouts (seconds).
+    #
+    # These limit how long the Snowflake Python connector will block on login/network/socket
+    # operations. Keeping these bounded helps ensure `uvicorn --reload` can shut down cleanly
+    # even if Snowflake connectivity is degraded.
+    SNOWFLAKE_CONNECT_LOGIN_TIMEOUT: int = 15
+    SNOWFLAKE_CONNECT_NETWORK_TIMEOUT: int = 15
+    SNOWFLAKE_CONNECT_SOCKET_TIMEOUT: int = 15
+
+    # Benchmark/workload connector timeouts (seconds).
+    #
+    # These apply to the per-test pool used by workload workers. They should be
+    # high enough that we observe warehouse-side queueing/slowdowns instead of
+    # client-side timeouts.
+    SNOWFLAKE_BENCHMARK_CONNECT_LOGIN_TIMEOUT: int = 15
+    SNOWFLAKE_BENCHMARK_CONNECT_NETWORK_TIMEOUT: int = 60
+    SNOWFLAKE_BENCHMARK_CONNECT_SOCKET_TIMEOUT: int = 60
+
+    # Optional key-pair authentication
+    SNOWFLAKE_PRIVATE_KEY_PATH: str = ""
+    SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: str = ""
+
+    # ========================================================================
+    # Postgres Connection Settings
+    # ========================================================================
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DATABASE: str = "benchmark"
+    POSTGRES_USER: str = "postgres"
+    POSTGRES_PASSWORD: str = ""
+
+    # If True, attempt to connect/init the Postgres pool during FastAPI startup.
+    # Default is False so local development doesn't error/hang when Postgres isn't running.
+    POSTGRES_CONNECT_ON_STARTUP: bool = False
+
+    # Snowflake Postgres interface
+    SNOWFLAKE_POSTGRES_HOST: str = ""
+    SNOWFLAKE_POSTGRES_PORT: int = 5432
+    SNOWFLAKE_POSTGRES_DATABASE: str = ""
+    SNOWFLAKE_POSTGRES_USER: str = ""
+    SNOWFLAKE_POSTGRES_PASSWORD: str = ""
+
+    # CrunchyData
+    CRUNCHYDATA_HOST: str = ""
+    CRUNCHYDATA_PORT: int = 5432
+    CRUNCHYDATA_DATABASE: str = ""
+    CRUNCHYDATA_USER: str = ""
+    CRUNCHYDATA_PASSWORD: str = ""
+
+    # ========================================================================
+    # Application Settings
+    # ========================================================================
+    APP_HOST: str = "127.0.0.1"
+    APP_PORT: int = 8000
+    APP_DEBUG: bool = True
+    APP_RELOAD: bool = True
+
+    # ========================================================================
+    # WebSocket Settings
+    # ========================================================================
+    WS_PING_INTERVAL: int = 30
+    WS_PING_TIMEOUT: int = 10
+
+    # ========================================================================
+    # Connection Pool Settings
+    # ========================================================================
+    SNOWFLAKE_POOL_SIZE: int = 5
+    SNOWFLAKE_MAX_OVERFLOW: int = 10
+    SNOWFLAKE_POOL_TIMEOUT: int = 30
+    SNOWFLAKE_POOL_RECYCLE: int = 3600
+    # Limit how many blocking Snowflake connect() calls we run concurrently.
+    SNOWFLAKE_POOL_MAX_PARALLEL_CREATES: int = 8
+
+    # Thread executors:
+    # - Results pool: persistence + UI reads from results tables
+    # - Benchmark pool: workload execution against the selected warehouse
+    #
+    # NOTE: The Snowflake Python connector is synchronous; we run it in a thread pool.
+    # To avoid client-side queueing (which hides DB-side queueing), the benchmark executor
+    # must have enough threads to match requested concurrency.
+    SNOWFLAKE_RESULTS_EXECUTOR_MAX_WORKERS: int = 16
+    SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS: int = 256
+
+    POSTGRES_POOL_MIN_SIZE: int = 5
+    POSTGRES_POOL_MAX_SIZE: int = 20
+
+    # ========================================================================
+    # Test Execution Settings
+    # ========================================================================
+    DEFAULT_TEST_DURATION: int = 300
+    DEFAULT_CONCURRENCY: int = 10
+    DEFAULT_WAREHOUSE_SIZE: str = "XSMALL"
+
+    METRICS_INTERVAL_SECONDS: int = 1
+    METRICS_BUFFER_SIZE: int = 1000
+
+    # ========================================================================
+    # Storage Settings
+    # ========================================================================
+    RESULTS_DATABASE: str = "UNISTORE_BENCHMARK"
+    RESULTS_SCHEMA: str = "TEST_RESULTS"
+
+    TEMP_DIR: str = "/tmp/unistore_benchmark"
+
+    # ========================================================================
+    # Security Settings
+    # ========================================================================
+    CORS_ORIGINS: List[str] = ["http://localhost:8000", "http://127.0.0.1:8000"]
+    SECRET_KEY: str = "your_secret_key_here_change_this_in_production"
+
+    # ========================================================================
+    # Logging Settings
+    # ========================================================================
+    LOG_LEVEL: str = "INFO"
+    LOG_FILE: str = "unistore_benchmark.log"
+    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+    # ========================================================================
+    # Feature Flags
+    # ========================================================================
+    ENABLE_INTERACTIVE_TABLES: bool = False
+    ENABLE_POSTGRES: bool = True
+    ENABLE_COST_ESTIMATION: bool = True
+    ENABLE_QUERY_PROFILING: bool = True
+
+
+# Create global settings instance
+settings = Settings()

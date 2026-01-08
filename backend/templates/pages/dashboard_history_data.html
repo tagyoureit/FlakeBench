@@ -1,0 +1,263 @@
+{% if is_htmx %}
+{% extends "partials/content_only.html" %}
+{% else %}
+{% extends "base.html" %}
+{% endif %}
+
+{% block title %}Query Data - Unistore Benchmark{% endblock %}
+
+{% block content %}
+<div
+    x-data="historyData()"
+    data-test-id="{{ test_id or '' }}"
+    data-kinds="{{ kinds or '' }}"
+    data-snowsight-org-account="{{ snowsight_org_account_path or '' }}"
+>
+    <div class="card">
+        <div class="card-title">Query Data</div>
+        <div style="color: #6b7280;">
+            Drilldown into per-operation query executions captured during the test run.
+        </div>
+        <div style="margin-top: 0.75rem; display:flex; gap: 0.5rem; flex-wrap: wrap;">
+            <a class="btn btn-secondary" :href="testId ? `/dashboard/history/${testId}` : '/history'">
+                Back to History View
+            </a>
+            <a class="btn btn-secondary" :href="testId ? `/dashboard/${testId}` : '/dashboard'">
+                Open Live Dashboard
+            </a>
+        </div>
+        <div style="margin-top: 0.75rem; color: #6b7280;" x-show="kinds && kinds.length">
+            <strong>Query kinds:</strong> <span x-text="kinds"></span>
+        </div>
+        <div x-show="!snowsightBaseUrl" style="margin-top: 0.75rem; color: #6b7280;">
+            Snowsight links are unavailable (could not resolve organization/account).
+            You can still copy <code>QUERY_ID</code>.
+        </div>
+    </div>
+
+    <div x-show="error" class="alert alert-error">
+        <strong>Failed to load query executions.</strong>
+        <span x-text="error"></span>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Executions</div>
+        <div class="text-sm text-gray-600" style="margin-top: -0.25rem;">
+            Default sort: <code>SF_EXECUTION_MS</code> (server-side SQL execution time).
+        </div>
+
+        <div class="table" style="margin-top: 1rem;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Query Kind</th>
+                        <th class="text-right">SQL Exec (ms)</th>
+                        <th class="text-right">End-to-end (ms)</th>
+                        <th class="text-right">Rows</th>
+                        <th>Snowsight</th>
+                        <th>Snowflake Query ID</th>
+                        <th>Started</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-if="loading">
+                        <tr>
+                            <td colspan="7" style="padding: 1rem;">
+                                {% include "components/loading_spinner.html" %}
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-for="row in rows" :key="row.execution_id">
+                        <tr>
+                            <td x-text="row.query_kind"></td>
+                            <td class="text-right" x-text="formatMs(row.sf_execution_ms)"></td>
+                            <td class="text-right" x-text="formatMs(row.app_elapsed_ms)"></td>
+                            <td class="text-right" x-text="row.rows_affected ?? ''"></td>
+                            <td>
+                                <template x-if="snowsightUrl(row)">
+                                    <a
+                                        class="btn btn-primary btn-sm"
+                                        :href="snowsightUrl(row)"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                    >
+                                        Open
+                                    </a>
+                                </template>
+                                <template x-if="!snowsightUrl(row) && isSnowflakeQuery(row)">
+                                    <button
+                                        type="button"
+                                        class="btn btn-secondary btn-sm"
+                                        @click="copyQueryId(row.query_id)"
+                                        title="This will copy QUERY_ID."
+                                    >
+                                        Copy ID
+                                    </button>
+                                </template>
+                            </td>
+                            <td style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">
+                                <span x-text="row.query_id"></span>
+                            </td>
+                            <td x-text="formatTimestamp(row.start_time)"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+
+        <div x-show="!loading && !error && rows.length === 0" class="alert alert-info">
+            No query executions found for this filter.
+        </div>
+
+        <div class="flex justify-between items-center mt-4" x-show="totalPages > 1">
+            <button
+                type="button"
+                class="btn btn-secondary"
+                @click="previousPage"
+                :disabled="page === 1 || loading"
+            >
+                Previous
+            </button>
+            <span class="text-sm text-gray-600">
+                Page <span x-text="page"></span> of <span x-text="totalPages"></span>
+            </span>
+            <button
+                type="button"
+                class="btn btn-secondary"
+                @click="nextPage"
+                :disabled="page === totalPages || loading"
+            >
+                Next
+            </button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function historyData() {
+    return {
+        testId: null,
+        kinds: "",
+        snowsightOrgAccount: "",
+        snowsightBaseUrl: "",
+        rows: [],
+        error: null,
+        loading: false,
+        page: 1,
+        pageSize: 50,
+        totalPages: 1,
+
+        init() {
+            const el = this.$el;
+            this.testId = (el && el.dataset ? el.dataset.testId : "") || null;
+            this.kinds = (el && el.dataset ? el.dataset.kinds : "") || "";
+            this.snowsightOrgAccount =
+                (el && el.dataset ? el.dataset.snowsightOrgAccount : "") || "";
+            if (this.snowsightOrgAccount) {
+                this.snowsightBaseUrl = `https://app.snowflake.com/${this.snowsightOrgAccount}/#/compute/history/queries/`;
+            }
+            this.load();
+        },
+
+        formatMs(v) {
+            const n = typeof v === "number" ? v : Number(v);
+            if (!Number.isFinite(n)) return "";
+            return n.toFixed(2);
+        },
+
+        formatTimestamp(v) {
+            if (!v) return "";
+            try {
+                return new Date(v).toLocaleString();
+            } catch {
+                return String(v);
+            }
+        },
+
+        isSnowflakeQuery(row) {
+            const qid = row && row.query_id ? String(row.query_id) : "";
+            if (!qid) return false;
+            return !qid.startsWith("LOCAL_");
+        },
+
+        snowsightUrl(row) {
+            if (!this.snowsightBaseUrl) return "";
+            if (!this.isSnowflakeQuery(row)) return "";
+            const qid = row && row.query_id ? String(row.query_id) : "";
+            if (!qid) return "";
+            return `${this.snowsightBaseUrl}${encodeURIComponent(qid)}`;
+        },
+
+        async copyQueryId(queryId) {
+            const qid = queryId != null ? String(queryId) : "";
+            if (!qid) return;
+            try {
+                if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(qid);
+                } else {
+                    window.prompt("Copy QUERY_ID:", qid);
+                }
+            } catch (e) {
+                window.prompt("Copy QUERY_ID:", qid);
+            }
+        },
+
+        buildUrl() {
+            const params = new URLSearchParams({
+                page: String(this.page),
+                page_size: String(this.pageSize),
+                kinds: this.kinds || "",
+                // Default sort is SF_EXECUTION_MS (descending: slowest first).
+                sort: "sf_execution_ms",
+                direction: "desc",
+            });
+            return this.testId ? `/api/tests/${this.testId}/query-executions?${params}` : null;
+        },
+
+        async load() {
+            const url = this.buildUrl();
+            if (!url) return;
+
+            this.loading = true;
+            this.error = null;
+            this.rows = [];
+
+            try {
+                const resp = await fetch(url);
+                if (!resp.ok) {
+                    const payload = await resp.json().catch(() => ({}));
+                    const detail = payload && payload.detail ? payload.detail : null;
+                    throw new Error(
+                        (detail && (detail.message || detail.detail || detail)) ||
+                        `Failed to load query executions (HTTP ${resp.status})`
+                    );
+                }
+                const data = await resp.json();
+                this.rows = data.results || [];
+                this.totalPages = data.total_pages || 1;
+            } catch (e) {
+                this.error = e && e.message ? e.message : String(e);
+            } finally {
+                this.loading = false;
+            }
+        },
+
+        previousPage() {
+            if (this.page <= 1) return;
+            this.page -= 1;
+            this.load();
+        },
+
+        nextPage() {
+            if (this.page >= this.totalPages) return;
+            this.page += 1;
+            this.load();
+        },
+    };
+}
+</script>
+{% endblock %}
+
+

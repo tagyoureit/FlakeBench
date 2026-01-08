@@ -1,0 +1,88 @@
+# ============================================================================
+# TEMPLATE METADATA
+# ============================================================================
+name: "High Concurrency Stress Test"
+description: "Stress test with 100+ concurrent connections to find breaking points"
+version: "1.0"
+category: "STRESS"
+
+# ============================================================================
+# High Concurrency Stress Test Template
+# Tests system behavior under high concurrent load
+# ============================================================================
+
+# Table configuration
+table:
+  name: "stress_test"
+  table_type: "HYBRID"
+  database: "UNISTORE_BENCHMARK"
+  schema: "PUBLIC"
+  
+  columns:
+    id: "NUMBER PRIMARY KEY"
+    data_blob: "VARCHAR(1000)"
+    counter: "NUMBER"
+    timestamp: "TIMESTAMP_NTZ"
+  
+  primary_key:
+    - "id"
+  
+  indexes:
+    - name: "idx_counter"
+      columns:
+        - "counter"
+  
+  initial_row_count: 500000
+
+# Warehouse configuration
+warehouse:
+  size: "2XLARGE"
+  name: "STRESS_WH"
+  auto_suspend: 60
+  auto_resume: true
+  
+  multi_cluster:
+    enabled: true
+    min_clusters: 2
+    max_clusters: 10
+    scaling_policy: "STANDARD"
+
+# Workload configuration
+workload:
+  type: "OLTP"
+  read_weight: 0.6
+  write_weight: 0.4
+
+# Load pattern - step increases
+load_pattern:
+  type: "STEP"
+  target_ops_per_second: 1000
+  num_steps: 5
+  step_duration_seconds: 120  # 2 minutes per step
+
+# Test parameters
+test:
+  duration_seconds: 600  # 10 minutes
+  concurrent_connections: 100
+  warmup_seconds: 30
+  think_time_ms: 10
+  
+  # Performance targets (expected degradation under stress)
+  targets:
+    min_ops_per_second: 500
+    max_p95_latency_ms: 2000
+    max_p99_latency_ms: 5000
+    max_error_rate_percent: 5.0
+
+# Connection pool settings
+connection_pool:
+  pool_size: 100
+  max_overflow: 50
+  timeout_seconds: 120
+
+# Reporting
+report:
+  save_results: true
+  generate_charts: true
+  export_format: "CSV"
+  include_warehouse_stats: true

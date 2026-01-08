@@ -1,0 +1,99 @@
+# ============================================================================
+# TEMPLATE METADATA
+# ============================================================================
+name: "OLTP Simple Workload"
+description: "Basic transactional workload with point lookups, inserts, and updates"
+version: "1.0"
+category: "OLTP"
+
+# ============================================================================
+# OLTP Simple Workload Template
+# Basic transactional workload for testing point lookups and single-row operations
+# ============================================================================
+
+# Table configuration
+table:
+  name: "oltp_test"
+  table_type: "HYBRID"  # Use Hybrid for low-latency OLTP
+  database: "UNISTORE_BENCHMARK"
+  schema: "PUBLIC"
+  
+  # Schema definition
+  columns:
+    id: "NUMBER PRIMARY KEY"
+    customer_id: "NUMBER"
+    region: "STRING"
+    status: "STRING"
+    amount: "NUMBER(10,2)"
+    created_at: "TIMESTAMP_NTZ"
+    updated_at: "TIMESTAMP_NTZ"
+  
+  # Hybrid table configuration
+  primary_key:
+    - "id"
+  
+  indexes:
+    - name: "idx_customer"
+      columns:
+        - "customer_id"
+        - "status"
+      include_columns:
+        - "amount"
+        - "region"
+    
+    - name: "idx_region_status"
+      columns:
+        - "region"
+        - "status"
+  
+  # Initial data
+  initial_row_count: 100000
+
+# Warehouse configuration
+warehouse:
+  size: "MEDIUM"
+  name: "BENCHMARK_WH"
+  auto_suspend: 60
+  auto_resume: true
+
+# Workload configuration
+workload:
+  type: "OLTP"
+  read_weight: 0.7   # 70% reads
+  write_weight: 0.3  # 30% writes
+  
+  # Write operations distribution
+  insert_weight: 0.6
+  update_weight: 0.3
+  delete_weight: 0.1
+
+# Load pattern
+load_pattern:
+  type: "STEADY"
+  target_ops_per_second: 500
+  
+# Test parameters
+test:
+  duration_seconds: 300  # 5 minutes
+  concurrent_connections: 20
+  warmup_seconds: 30
+  think_time_ms: 0  # No think time for OLTP
+  
+  # Performance targets
+  targets:
+    min_ops_per_second: 400
+    max_p95_latency_ms: 50
+    max_p99_latency_ms: 100
+    max_error_rate_percent: 1.0
+
+# Connection pool settings
+connection_pool:
+  pool_size: 20
+  max_overflow: 10
+  timeout_seconds: 30
+
+# Reporting
+report:
+  save_results: true
+  generate_charts: true
+  export_format: "CSV"

@@ -1,0 +1,111 @@
+# ============================================================================
+# TEMPLATE METADATA
+# ============================================================================
+name: "Mixed OLTP + OLAP Workload"
+description: "Realistic production workload with both transactional and analytical queries"
+version: "1.0"
+category: "MIXED"
+
+# ============================================================================
+# Mixed Workload Template
+# Realistic workload combining OLTP and OLAP patterns
+# ============================================================================
+
+# Table configuration
+table:
+  name: "mixed_test"
+  table_type: "HYBRID"  # Hybrid supports both patterns
+  database: "UNISTORE_BENCHMARK"
+  schema: "PUBLIC"
+  
+  # Schema definition
+  columns:
+    id: "NUMBER PRIMARY KEY"
+    customer_id: "NUMBER"
+    order_id: "NUMBER"
+    product_id: "NUMBER"
+    region: "STRING"
+    status: "STRING"
+    amount: "NUMBER(10,2)"
+    quantity: "NUMBER"
+    created_at: "TIMESTAMP_NTZ"
+    updated_at: "TIMESTAMP_NTZ"
+  
+  # Hybrid table configuration
+  primary_key:
+    - "id"
+  
+  indexes:
+    - name: "idx_customer_order"
+      columns:
+        - "customer_id"
+        - "order_id"
+      include_columns:
+        - "amount"
+        - "status"
+    
+    - name: "idx_region_date"
+      columns:
+        - "region"
+        - "created_at"
+  
+  # Initial data
+  initial_row_count: 1000000  # 1M rows
+
+# Warehouse configuration
+warehouse:
+  size: "LARGE"
+  name: "MIXED_WH"
+  auto_suspend: 120
+  auto_resume: true
+  
+  multi_cluster:
+    enabled: true
+    min_clusters: 1
+    max_clusters: 5
+    scaling_policy: "STANDARD"
+
+# Workload configuration
+workload:
+  type: "MIXED"
+  oltp_weight: 0.7  # 70% OLTP operations
+  olap_weight: 0.3  # 30% OLAP queries
+
+# Load pattern - realistic time-of-day
+load_pattern:
+  type: "REALISTIC"
+  target_ops_per_second: 200
+  peak_start_hour: 9   # 9 AM
+  peak_end_hour: 17    # 5 PM
+  off_peak_multiplier: 0.3
+
+# Test parameters
+test:
+  duration_seconds: 900  # 15 minutes
+  concurrent_connections: 30
+  warmup_seconds: 60
+  think_time_ms: 100
+  
+  # Performance targets
+  targets:
+    min_ops_per_second: 150
+    max_p95_latency_ms: 500
+    max_p99_latency_ms: 2000
+    max_error_rate_percent: 1.0
+
+# Connection pool settings
+connection_pool:
+  pool_size: 30
+  max_overflow: 20
+  timeout_seconds: 60
+
+# Reporting
+report:
+  save_results: true
+  generate_charts: true
+  export_format: "CSV"
+  metrics:
+    - "throughput"
+    - "latency_percentiles"
+    - "error_rate"
+    - "warehouse_utilization"

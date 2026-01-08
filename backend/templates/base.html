@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Unistore Performance Benchmark{% endblock %}</title>
+    
+    <link rel="stylesheet" href="/static/css/app.css">
+    
+    <script src="/static/js/htmx.min.js"></script>
+    <script src="/static/js/ws.js"></script>
+    <script src="/static/js/toast.js"></script>
+    <script defer src="/static/js/templates_manager.js"></script>
+    <script defer src="/static/js/dashboard.js"></script>
+    <script defer src="/static/js/alpine.min.js"></script>
+    <script src="/static/js/chart.min.js"></script>
+    
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    {% include 'components/navbar.html' %}
+    
+    <main id="main-content" hx-history-elt>
+        <div class="container">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    <div
+        id="toast-container"
+        class="toast-container"
+        aria-live="polite"
+        aria-atomic="true"
+    ></div>
+    
+    {% include 'components/footer.html' %}
+    
+    <script>
+        function updateActiveNavbarTab() {
+            const currentPath = window.location.pathname;
+            const links = document.querySelectorAll('.navbar nav a[href]');
+
+            links.forEach((link) => {
+                const href = link.getAttribute('href');
+                if (!href) return;
+
+                let hrefPath;
+                try {
+                    hrefPath = new URL(href, window.location.origin).pathname;
+                } catch {
+                    return;
+                }
+
+                const isMatch = currentPath === hrefPath || currentPath.startsWith(hrefPath + '/');
+
+                link.classList.toggle('active', isMatch);
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', updateActiveNavbarTab);
+        document.body.addEventListener('htmx:afterSwap', function(event) {
+            updateActiveNavbarTab();
+            // Initialize Alpine components in swapped content (avoid double-init on initial load).
+            if (window.Alpine && event.detail && event.detail.target) {
+                setTimeout(() => {
+                    window.Alpine.initTree(event.detail.target);
+                }, 0);
+            }
+        });
+        document.body.addEventListener('htmx:historyRestore', updateActiveNavbarTab);
+        window.addEventListener('popstate', updateActiveNavbarTab);
+    </script>
+
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>

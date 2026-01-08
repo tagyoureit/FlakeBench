@@ -1,0 +1,33 @@
+<nav class="navbar">
+    <div class="container">
+        <div class="brand">
+            <a href="/templates">⚡ Unistore Benchmark</a>
+        </div>
+        <nav>
+            <a href="/templates" 
+               hx-get="/templates"
+               hx-target="#main-content"
+               hx-swap="innerHTML"
+               hx-push-url="true"
+               class="{{ 'active' if request.path == '/templates' else '' }}">
+                Templates
+            </a>
+            <a href="/comparison" 
+               hx-get="/comparison"
+               hx-target="#main-content"
+               hx-swap="innerHTML"
+               hx-push-url="true"
+               class="{{ 'active' if request.path == '/comparison' else '' }}">
+                Compare Results
+            </a>
+            <a href="/history" 
+               hx-get="/history"
+               hx-target="#main-content"
+               hx-swap="innerHTML"
+               hx-push-url="true"
+               class="{{ 'active' if request.path == '/history' else '' }}">
+                History
+            </a>
+        </nav>
+    </div>
+</nav>

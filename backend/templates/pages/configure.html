@@ -1,0 +1,1225 @@
+{% if is_htmx %}
+{% extends "partials/content_only.html" %}
+{% else %}
+{% extends "base.html" %}
+{% endif %}
+
+{% block title %}Template Editor - Unistore Benchmark{% endblock %}
+
+{% block content %}
+<div x-data="testConfiguration()" x-cloak>
+    <!-- Initial load state (prevents "defaults then fill in later" flicker) -->
+    <div x-show="isInitializing" class="card">
+        <div class="flex items-center gap-3">
+            <span class="loading-spinner" style="border-top-color: var(--primary); border-color: rgba(59, 130, 246, 0.2);"></span>
+            <div>
+                <div class="font-semibold">Loading configuration…</div>
+                <div class="text-sm text-gray-600">Applying template and fetching warehouses</div>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="!isInitializing">
+    <div class="card">
+        <div
+            class="card-title"
+            x-text="isReadOnly ? 'Template Details' : (mode === 'edit' ? 'Edit Template' : 'New Template')"
+        ></div>
+        <p x-show="!hasResults">Design a test configuration template. Templates can be run multiple times to compare results.</p>
+
+        <div x-show="error" class="alert alert-error mt-4">
+            <strong>Unable to load Snowflake data.</strong>
+            <span x-text="error"></span>
+            <div class="mt-2 text-sm">
+                If this looks like a Snowflake connectivity issue, connect to VPN / allowlist your IP and refresh.
+            </div>
+        </div>
+        
+        <div x-show="loadedTemplate && !hasResults && !isReadOnly" class="alert alert-success mt-4">
+            <strong>Editing Template:</strong> <span x-text="loadedTemplate?.template_name"></span>
+        </div>
+
+        <div x-show="loadedTemplate && isReadOnly" class="alert alert-info mt-4">
+            <strong>Viewing Template:</strong> <span x-text="loadedTemplate?.template_name"></span>
+        </div>
+        
+        <div x-show="hasResults" class="alert alert-warning mt-4">
+            <strong>⚠️ Template has test results</strong><br>
+            This template has been used <span x-text="loadedTemplate?.usage_count"></span> time(s) and can no longer be edited. 
+            You can <strong>copy</strong> it to create an editable version or <strong>delete</strong> it (which will remove all test results).
+        </div>
+
+        <!-- Results warehouse guardrail -->
+        <div
+            x-show="!hasResults && resultsWarehouse && config.warehouse_name && String(config.warehouse_name).trim().toUpperCase() === resultsWarehouse"
+            class="alert alert-warning mt-4"
+        >
+            <strong>⚠️ Execution warehouse cannot be your results warehouse</strong><br>
+            This template is currently set to run on <code x-text="config.warehouse_name"></code>, which matches your results warehouse (<code x-text="resultsWarehouse"></code>).
+            Please choose a different warehouse before saving or running.
+        </div>
+    </div>
+
+    <form @submit.prevent="submitTest">
+        <fieldset :disabled="isSaving || isReadOnly">
+        <!-- Template Metadata Section (moved to top for better visibility) -->
+        <div class="card">
+            <div class="card-title">Template Metadata</div>
+            
+            <div class="form-group">
+                <label class="form-label">Template Name *</label>
+                <input type="text" class="form-input" x-model="config.template_name" placeholder="e.g., Hybrid Table - 100 Concurrent Mixed Workload" required>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Description</label>
+                <textarea class="form-textarea" x-model="config.description" placeholder="Describe what this template tests..."></textarea>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Table Configuration</div>
+            
+            <div class="form-group">
+                <label class="form-label">Table Type</label>
+                <select class="form-select" x-model="config.table_type">
+                    <option value="STANDARD">Standard Table</option>
+                    <option value="HYBRID">Hybrid Table</option>
+                    <option value="INTERACTIVE">Interactive Table (Preview)</option>
+                    <option value="POSTGRES">Postgres</option>
+                    <option value="SNOWFLAKE_POSTGRES">Snowflake via Postgres Protocol</option>
+                </select>
+                <small class="form-text">Choose the table type to benchmark</small>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="form-group">
+                    <label class="form-label">Database</label>
+                    <input type="text" class="form-input" x-model="config.database" placeholder="e.g., UNISTORE_BENCHMARK" required>
+                    <small class="form-text">Target database name</small>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Schema</label>
+                    <input type="text" class="form-input" x-model="config.schema" placeholder="e.g., PUBLIC" required>
+                    <small class="form-text">Target schema name</small>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Table Name</label>
+                    <input type="text" class="form-input" x-model="config.table_name" placeholder="e.g., benchmark_test_001" required>
+                    <small class="form-text">Table to create/test</small>
+                </div>
+            </div>
+
+            <div class="alert alert-info mt-3">
+                <strong>Full Table Name:</strong> <code x-text="config.database + '.' + config.schema + '.' + config.table_name"></code>
+            </div>
+
+            <div class="form-group" x-show="config.table_type === 'STANDARD' || config.table_type === 'INTERACTIVE'">
+                <label class="form-label">Clustering Keys (comma-separated)</label>
+                <input type="text" class="form-input" x-model="config.clustering_keys" placeholder="e.g., date, customer_id">
+                <small class="form-text">Optional: Improve query performance by clustering</small>
+            </div>
+
+            <div x-show="config.table_type === 'HYBRID'">
+                <div class="form-group">
+                    <label class="form-label">Primary Key (comma-separated)</label>
+                    <input type="text" class="form-input" x-model="config.primary_key" placeholder="e.g., id">
+                    <small class="form-text">Required for Hybrid tables</small>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" x-model="config.add_indexes"> Add Secondary Indexes
+                    </label>
+                </div>
+
+                <div x-show="config.add_indexes" class="mt-3">
+                    <template x-for="(index, idx) in config.indexes" :key="idx">
+                        <div class="border p-3 mb-3 rounded">
+                            <div class="flex justify-between items-center mb-2">
+                                <h4 class="font-semibold">Index <span x-text="idx + 1"></span></h4>
+                                <button type="button" class="btn btn-error btn-sm" @click="removeIndex(idx)">Remove</button>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Index Columns (comma-separated)</label>
+                                <input type="text" class="form-input" x-model="index.columns" placeholder="e.g., customer_id, region">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">INCLUDE Columns (optional)</label>
+                                <input type="text" class="form-input" x-model="index.include" placeholder="e.g., status, amount">
+                            </div>
+                        </div>
+                    </template>
+                    <button type="button" class="btn btn-secondary" @click="addIndex">+ Add Index</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card" x-show="config.table_type !== 'POSTGRES' && config.table_type !== 'SNOWFLAKE_POSTGRES' && config.table_type !== 'CRUNCHYDATA'">
+            <div class="card-title">Warehouse Configuration</div>
+            
+            <div class="form-group">
+                <label class="form-label">Warehouse Mode</label>
+                <select class="form-select" x-model="config.warehouse_mode">
+                    <option value="EXISTING">Use Existing Warehouse</option>
+                    <option value="CREATE_NEW">Create New Warehouse for Test</option>
+                </select>
+                <small class="form-text">Use existing warehouse or create temporary one for testing</small>
+            </div>
+
+            <div x-show="config.warehouse_mode === 'EXISTING'">
+                <div class="form-group">
+                    <label class="form-label">Select Warehouse</label>
+                    <select id="warehouse-select" class="form-select" x-model="config.warehouse_name" @change="loadWarehouseDetails">
+                        <option value="">-- Select a warehouse --</option>
+                        <template x-for="wh in availableWarehouses" :key="wh.name">
+                            <option :value="String(wh.name || '')" x-text="wh.name + ' (' + wh.size + ', ' + wh.state + ')'"></option>
+                        </template>
+                    </select>
+                    <small class="form-text">Select existing warehouse - size and settings will be auto-populated</small>
+                </div>
+                
+                <div x-show="config.warehouse_name" class="alert alert-info mt-3">
+                    <strong>Warehouse Details:</strong><br>
+                    <span x-show="selectedWarehouseDetails">
+                        <strong>Name:</strong> <span x-text="selectedWarehouseDetails?.name || config.warehouse_name"></span><br>
+                        <strong>Size:</strong> <span x-text="selectedWarehouseDetails?.size"></span><br>
+                        <strong>State:</strong> <span x-text="selectedWarehouseDetails?.state"></span><br>
+                        <strong>Type:</strong> <span x-text="selectedWarehouseDetails?.type"></span><br>
+                        
+                        <!-- Multi-Cluster Warehouse Details -->
+                        <span x-show="selectedWarehouseDetails?.max_cluster_count > 1">
+                            <hr style="margin: 8px 0;">
+                            <strong>Multi-Cluster Configuration:</strong><br>
+                            &nbsp;&nbsp;• Min Clusters: <span x-text="selectedWarehouseDetails?.min_cluster_count"></span><br>
+                            &nbsp;&nbsp;• Max Clusters: <span x-text="selectedWarehouseDetails?.max_cluster_count"></span><br>
+                            &nbsp;&nbsp;• Scaling Policy: <span x-text="selectedWarehouseDetails?.scaling_policy"></span><br>
+                            &nbsp;&nbsp;• Currently Started: <span x-text="selectedWarehouseDetails?.started_clusters"></span> cluster(s)<br>
+                        </span>
+                        
+                        <!-- Single Cluster -->
+                        <span x-show="selectedWarehouseDetails?.max_cluster_count === 1">
+                            <strong>Multi-Cluster:</strong> <span class="text-muted">Not Enabled (Single Cluster)</span><br>
+                        </span>
+                        
+                        <!-- Auto-Suspend/Resume Settings -->
+                        <hr style="margin: 8px 0;">
+                        <strong>Auto Settings:</strong><br>
+                        &nbsp;&nbsp;• Auto-Suspend: <span x-text="selectedWarehouseDetails?.auto_suspend ? selectedWarehouseDetails.auto_suspend + ' seconds' : 'Disabled'"></span><br>
+                        &nbsp;&nbsp;• Auto-Resume: <span x-text="selectedWarehouseDetails?.auto_resume ? 'Enabled' : 'Disabled'"></span><br>
+                    </span>
+                </div>
+            </div>
+
+            <div x-show="config.warehouse_mode === 'CREATE_NEW'">
+                <div class="alert alert-info mb-3">
+                    <strong>New Warehouse:</strong> A temporary warehouse will be created with the settings below and dropped after the test completes.
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">New Warehouse Name</label>
+                    <input type="text" class="form-input" x-model="config.new_warehouse_name" placeholder="e.g., BENCHMARK_TEST_WH">
+                    <small class="form-text">Name for the temporary warehouse (will be auto-suffixed with timestamp)</small>
+                </div>
+            </div>
+            
+            <div class="form-group" x-show="config.warehouse_mode === 'CREATE_NEW'">
+                <label class="form-label">Warehouse Size</label>
+                <select class="form-select" x-model="config.warehouse_size">
+                    <option value="XSMALL">X-Small</option>
+                    <option value="SMALL">Small</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LARGE">Large</option>
+                    <option value="XLARGE">X-Large</option>
+                    <option value="2XLARGE">2X-Large</option>
+                    <option value="3XLARGE">3X-Large</option>
+                    <option value="4XLARGE">4X-Large</option>
+                </select>
+                <small class="form-text">Size for new warehouse</small>
+            </div>
+
+            <div x-show="config.warehouse_mode === 'CREATE_NEW'">
+                <div class="form-group">
+                    <label class="form-label">
+                        <input type="checkbox" x-model="config.multi_cluster"> Enable Multi-Cluster Warehouse
+                    </label>
+                    <small class="form-text">Enable multi-cluster for new warehouse</small>
+                </div>
+
+                <div x-show="config.multi_cluster">
+                    <div class="form-group">
+                        <label class="form-label">Min Clusters</label>
+                        <input type="number" class="form-input" x-model.number="config.min_clusters" min="1" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Max Clusters</label>
+                        <input type="number" class="form-input" x-model.number="config.max_clusters" min="1" max="10">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Scaling Policy</label>
+                        <select class="form-select" x-model="config.scaling_policy">
+                            <option value="STANDARD">Standard (fastest)</option>
+                            <option value="ECONOMY">Economy (cost-effective)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card" x-show="config.table_type === 'POSTGRES' || config.table_type === 'SNOWFLAKE_POSTGRES' || config.table_type === 'CRUNCHYDATA'">
+            <div class="card-title">Warehouse Configuration</div>
+            <div class="alert alert-info">
+                Warehouse selection is not used for Postgres-based templates. Results are still recorded to Snowflake using the `.env` `SNOWFLAKE_WAREHOUSE`.
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Test Parameters</div>
+            
+            <div class="form-group">
+                <label class="form-label">Test Duration (seconds)</label>
+                <input type="number" class="form-input" x-model.number="config.duration" min="10" max="3600">
+                <small class="form-text">How long to run the test (10-3600 seconds)</small>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Concurrent Connections</label>
+                <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" max="1000">
+                <small class="form-text">Number of parallel workers (1-1000)</small>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Workload Type</label>
+                <select class="form-select" x-model="config.workload_type">
+                    <option value="READ_ONLY">Read Only - Point lookups and scans</option>
+                    <option value="WRITE_ONLY">Write Only - Inserts and updates</option>
+                    <option value="READ_HEAVY">Read Heavy - 80% reads, 20% writes</option>
+                    <option value="WRITE_HEAVY">Write Heavy - 20% reads, 80% writes</option>
+                    <option value="MIXED">Mixed - 50% reads, 50% writes</option>
+                    <option value="CUSTOM">Custom - Define your own queries</option>
+                </select>
+            </div>
+
+            <div class="btn-group mt-2">
+                <button
+                    type="button"
+                    class="btn btn-secondary"
+                    :disabled="aiSqlAdjustLoading"
+                    @click="aiAdjustCustomSql()"
+                >
+                    <span class="loading-spinner" x-show="aiSqlAdjustLoading"></span>
+                    <span x-text="aiSqlAdjustLoading ? 'Adjusting…' : 'AI Adjust 4 SQL Statements (Preview)'"></span>
+                </button>
+            </div>
+
+            <!-- Query Preview Section -->
+            <div class="mt-4" x-show="config.workload_type !== 'CUSTOM'">
+                <div class="alert alert-info">
+                    <strong>Query Preview</strong> - Queries are generated dynamically based on detected table columns.
+                    For range scans, the runner prefers a time-based scan (if a timestamp/date column exists) and falls back to an ID range scan.
+                </div>
+                
+                <!-- READ_ONLY queries -->
+                <div x-show="config.workload_type === 'READ_ONLY'" class="mt-3">
+                    <h4 class="text-sm font-semibold mb-2">Point Lookup Query (50%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id = ?</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (50%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>-- If time column detected:
+SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE &lt;TIME_COLUMN&gt; &gt;= ?
+ORDER BY &lt;TIME_COLUMN&gt; DESC LIMIT 100
+
+-- Otherwise:
+SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id BETWEEN ? AND ? + 100
+ORDER BY id LIMIT 100</code></pre>
+                </div>
+                
+                <!-- WRITE_ONLY queries -->
+                <div x-show="config.workload_type === 'WRITE_ONLY'" class="mt-3">
+                    <h4 class="text-sm font-semibold mb-2">Insert Query (70%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (30%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+SET data = ?, timestamp = CURRENT_TIMESTAMP 
+WHERE id = ?</code></pre>
+                </div>
+                
+                <!-- READ_HEAVY queries -->
+                <div x-show="config.workload_type === 'READ_HEAVY'" class="mt-3">
+                    <h4 class="text-sm font-semibold mb-2">Point Lookup Query (40%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id = ?</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (40%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id BETWEEN ? AND ? + 100
+ORDER BY id LIMIT 100</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Insert Query (15%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (5%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+SET data = ?, timestamp = CURRENT_TIMESTAMP 
+WHERE id = ?</code></pre>
+                </div>
+                
+                <!-- WRITE_HEAVY queries -->
+                <div x-show="config.workload_type === 'WRITE_HEAVY'" class="mt-3">
+                    <h4 class="text-sm font-semibold mb-2">Insert Query (60%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (20%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+SET data = ?, timestamp = CURRENT_TIMESTAMP 
+WHERE id = ?</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Point Lookup Query (10%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id = ?</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (10%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id BETWEEN ? AND ? + 100
+ORDER BY id LIMIT 100</code></pre>
+                </div>
+                
+                <!-- MIXED queries -->
+                <div x-show="config.workload_type === 'MIXED'" class="mt-3">
+                    <h4 class="text-sm font-semibold mb-2">Point Lookup Query (25%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id = ?</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (25%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+WHERE id BETWEEN ? AND ? + 100
+ORDER BY id LIMIT 100</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Insert Query (35%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
+                    
+                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (15%)</h4>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
+SET data = ?, timestamp = CURRENT_TIMESTAMP 
+WHERE id = ?</code></pre>
+                </div>
+            </div>
+
+            <!-- Custom Queries -->
+            <div class="mt-4" x-show="config.workload_type === 'CUSTOM'">
+                <div class="alert alert-info">
+                    <strong>Custom Queries</strong> - Provide your own SQL templates. Use <code>{table}</code> as placeholder for the full table name.
+                </div>
+
+                <div class="form-group">
+                    <div class="flex items-center justify-between gap-3">
+                        <label class="form-label mb-0">Point Lookup Query (SELECT)</label>
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-gray-600">%</span>
+                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_point_lookup_pct" min="0" max="100">
+                        </div>
+                    </div>
+                    <textarea class="form-textarea" x-model="config.custom_point_lookup_query" placeholder="SELECT * FROM {table} WHERE id = ?"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <div class="flex items-center justify-between gap-3">
+                        <label class="form-label mb-0">Range Scan Query (SELECT)</label>
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-gray-600">%</span>
+                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_range_scan_pct" min="0" max="100">
+                        </div>
+                    </div>
+                    <textarea class="form-textarea" x-model="config.custom_range_scan_query" placeholder="SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <div class="flex items-center justify-between gap-3">
+                        <label class="form-label mb-0">Insert Query (INSERT)</label>
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-gray-600">%</span>
+                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_insert_pct" min="0" max="100">
+                        </div>
+                    </div>
+                    <textarea class="form-textarea" x-model="config.custom_insert_query" placeholder="INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <div class="flex items-center justify-between gap-3">
+                        <label class="form-label mb-0">Update Query (UPDATE)</label>
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-gray-600">%</span>
+                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_update_pct" min="0" max="100">
+                        </div>
+                    </div>
+                    <textarea class="form-textarea" x-model="config.custom_update_query" placeholder="UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?"></textarea>
+                </div>
+
+                <div class="alert alert-info mt-3">
+                    <strong>Total must equal 100%.</strong>
+                    Current total:
+                    <code x-text="(Number(config.custom_point_lookup_pct || 0) + Number(config.custom_range_scan_pct || 0) + Number(config.custom_insert_pct || 0) + Number(config.custom_update_pct || 0)) + '%'"></code>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Think Time (ms)</label>
+                <input type="number" class="form-input" x-model.number="config.think_time" min="0" max="10000">
+                <small class="form-text">Delay between operations to simulate user think time</small>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Warmup Period (seconds)</label>
+                <input type="number" class="form-input" x-model.number="config.warmup" min="0" max="300">
+                <small class="form-text">Time to warm up caches before measurement starts</small>
+            </div>
+
+            <div
+                class="form-group"
+                x-show="config.table_type !== 'POSTGRES' && config.table_type !== 'SNOWFLAKE_POSTGRES' && config.table_type !== 'CRUNCHYDATA'"
+            >
+                <label class="form-label">
+                    <input type="checkbox" x-model="config.use_cached_result">
+                    Use Snowflake result cache (<code>USE_CACHED_RESULT</code>)
+                </label>
+                <small class="form-text">
+                    If enabled, identical SELECT statements may return cached results. Disable to force query execution each time.
+                </small>
+            </div>
+        </div>
+
+        <div class="btn-group" x-show="!isReadOnly">
+            <button
+                type="submit"
+                class="btn btn-primary"
+                :disabled="isSaving"
+            >
+                <span class="loading-spinner" x-show="isSaving"></span>
+                <span x-text="isSaving ? (mode === 'edit' ? 'Updating…' : 'Saving…') : (mode === 'edit' ? 'Update Template' : 'Save Template')"></span>
+            </button>
+            <button type="button" class="btn btn-secondary" @click="cancel">Cancel</button>
+        </div>
+        </fieldset>
+    </form>
+
+    <!-- AI workload preparation (persisted; never generated at runtime) -->
+    <div x-show="!hasResults && !isReadOnly" class="card">
+        <div class="card-title">AI Workload Preparation</div>
+        <p class="text-sm text-gray-700">
+            Generates and persists large value pools (via Snowflake <code>SAMPLE</code>) and stores metadata on the template.
+            No AI calls occur during benchmark execution.
+        </p>
+
+        <div x-show="!loadedTemplate" class="alert alert-info mt-3">
+            <strong>Save the template first.</strong>
+            This step writes value pools to Snowflake (<code>TEMPLATE_VALUE_POOLS</code>) and updates the saved template config.
+        </div>
+
+        <div x-show="aiPrepError" class="alert alert-error mt-3">
+            <strong>AI preparation failed.</strong>
+            <span x-text="aiPrepError"></span>
+        </div>
+
+        <div x-show="aiPrepResult" class="alert alert-info mt-3">
+            <div class="text-sm">
+                <div><strong>Status:</strong> <span x-text="aiPrepResult?.message || ''"></span></div>
+                <div class="mt-1">
+                    <strong>AI available:</strong>
+                    <span x-text="aiPrepResult?.ai_available ? 'Yes' : 'No'"></span>
+                    <span x-show="!aiPrepResult?.ai_available && aiPrepResult?.ai_error">
+                        • <strong>Reason:</strong> <span x-text="aiPrepResult?.ai_error || ''"></span>
+                    </span>
+                </div>
+                <div class="mt-1" x-show="aiPrepResult?.pool_id">
+                    <strong>Pool ID:</strong> <code x-text="aiPrepResult?.pool_id || ''"></code>
+                </div>
+                <div class="mt-1" x-show="aiPrepResult?.key_column">
+                    <strong>Key column:</strong> <code x-text="aiPrepResult?.key_column || ''"></code>
+                </div>
+                <div class="mt-1" x-show="aiPrepResult?.time_column">
+                    <strong>Time column:</strong> <code x-text="aiPrepResult?.time_column || ''"></code>
+                </div>
+                <div class="mt-2" x-show="aiPrepResult?.pools">
+                    <strong>Pools:</strong>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto mt-1"><code x-text="JSON.stringify(aiPrepResult?.pools || {}, null, 2)"></code></pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="btn-group mt-3">
+            <button
+                type="button"
+                class="btn btn-primary"
+                :disabled="aiPrepLoading || !loadedTemplate"
+                @click="prepareAiWorkload()"
+            >
+                <span class="loading-spinner" x-show="aiPrepLoading"></span>
+                <span x-text="aiPrepLoading ? 'Preparing…' : 'Prepare AI Workload (Pools + Metadata)'"></span>
+            </button>
+            <button
+                type="button"
+                class="btn btn-secondary"
+                :disabled="aiPrepLoading"
+                @click="reloadTemplate()"
+            >
+                Refresh Template
+            </button>
+        </div>
+    </div>
+    
+    <!-- Actions when template has results -->
+    <div x-show="hasResults || isReadOnly" class="card">
+        <div class="btn-group">
+            <button type="button" class="btn btn-primary" @click="copyTemplate">
+                Copy Template
+            </button>
+            <button type="button" class="btn btn-danger" @click="deleteTemplateWithResults">
+                Delete Template & Results
+            </button>
+            <button type="button" class="btn btn-secondary" @click="cancel">
+                Back to Templates
+            </button>
+        </div>
+    </div>
+</div>
+    </div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function testConfiguration() {
+    return {
+        config: {
+            table_type: 'STANDARD',
+            database: 'UNISTORE_BENCHMARK',
+            schema: 'PUBLIC',
+            table_name: '',
+            clustering_keys: '',
+            primary_key: '',
+            add_indexes: false,
+            indexes: [],
+            warehouse_mode: 'EXISTING',
+            warehouse_name: '',
+            new_warehouse_name: '',
+            warehouse_size: 'MEDIUM',
+            multi_cluster: false,
+            min_clusters: 1,
+            max_clusters: 3,
+            scaling_policy: 'STANDARD',
+            duration: 300,
+            concurrent_connections: 10,
+            workload_type: 'MIXED',
+            think_time: 0,
+            warmup: 30,
+            use_cached_result: true,
+            custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
+            custom_range_scan_query:
+                'SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100',
+            custom_insert_query:
+                'INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
+            custom_update_query:
+                'UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?',
+            custom_point_lookup_pct: 25,
+            custom_range_scan_pct: 25,
+            custom_insert_pct: 35,
+            custom_update_pct: 15,
+            template_name: '',
+            description: ''
+        },
+        loadedTemplate: null,
+        availableWarehouses: [],
+        selectedWarehouseDetails: null,
+        resultsWarehouse: null,
+        mode: 'new', // 'new', 'edit', or 'view'
+        hasResults: false, // true if template has been used
+        isReadOnly: false,
+        isInitializing: true,
+        isSaving: false,
+        error: null,
+        aiPrepLoading: false,
+        aiPrepError: null,
+        aiPrepResult: null,
+        aiSqlAdjustLoading: false,
+
+        nextTickAsync() {
+            return new Promise((resolve) => this.$nextTick(resolve));
+        },
+        
+        async init() {
+            this.isInitializing = true;
+            this.error = null;
+
+            // Check URL params for mode
+            const urlParams = new URLSearchParams(window.location.search);
+            const urlMode = urlParams.get('mode');
+            if (urlMode === 'new') {
+                this.mode = 'new';
+            }
+            if (urlMode === 'view') {
+                this.mode = 'view';
+                this.isReadOnly = true;
+            }
+
+            // Prefer URL-based editing (robust across reloads / desktop wrapper),
+            // fall back to localStorage (legacy behavior from templates list).
+            const templateId = urlParams.get('template_id');
+            if (templateId) {
+                try {
+                    const resp = await fetch(`/api/templates/${encodeURIComponent(templateId)}`);
+                    if (resp.ok) {
+                        const template = await resp.json();
+                        this.loadedTemplate = template;
+                        this.hasResults = (template.usage_count || 0) > 0;
+                        // If template has results, it cannot be edited (force read-only).
+                        // If URL mode explicitly requests view, also force read-only.
+                        if (this.hasResults || this.mode === 'view') {
+                            this.mode = 'view';
+                            this.isReadOnly = true;
+                        } else {
+                            this.mode = 'edit';
+                            this.isReadOnly = false;
+                        }
+                        this.config = { ...this.config, ...(template.config || {}) };
+                        if (this.config.warehouse_name) {
+                            this.config.warehouse_name = String(this.config.warehouse_name).trim();
+                        }
+                        // Backwards compatible default: if not present, treat as TRUE.
+                        // Coerce to a boolean for the checkbox UI.
+                        if (this.config.use_cached_result == null) {
+                            this.config.use_cached_result = true;
+                        } else {
+                            const v = String(this.config.use_cached_result).trim().toLowerCase();
+                            this.config.use_cached_result = !['0', 'false', 'no', 'off'].includes(v);
+                        }
+                        this.config.template_name = template.template_name;
+                        this.config.description = template.description;
+                        this.aiPrepResult = (this.config && this.config.ai_workload) ? { message: 'Loaded from template', ...this.config.ai_workload } : null;
+                        this.aiPrepError = null;
+                        // Clear any stale localStorage selection so it can't override URL intent.
+                        localStorage.removeItem('selectedTemplate');
+                    } else {
+                        const payload = await resp.json().catch(() => ({}));
+                        const detail = payload && payload.detail ? payload.detail : null;
+                        this.error =
+                            (detail && (detail.message || detail.detail || detail)) ||
+                            `Failed to load template (HTTP ${resp.status})`;
+                        console.warn('Failed to load template by id:', templateId, resp.status, this.error);
+                    }
+                } catch (error) {
+                    console.error('Failed to load template by id:', error);
+                    this.error = error?.message || String(error);
+                }
+            }
+            
+            // Load template if editing
+            const templateStr = this.loadedTemplate ? null : localStorage.getItem('selectedTemplate');
+            if (templateStr) {
+                try {
+                    const template = JSON.parse(templateStr);
+                    this.loadedTemplate = template;
+                    this.hasResults = (template.usage_count || 0) > 0;
+                    if (this.hasResults || this.mode === 'view') {
+                        this.mode = 'view';
+                        this.isReadOnly = true;
+                    } else {
+                        this.mode = 'edit';
+                        this.isReadOnly = false;
+                    }
+                    // Load config from template
+                    this.config = { ...this.config, ...(template.config || {}) };
+                    if (this.config.warehouse_name) {
+                        this.config.warehouse_name = String(this.config.warehouse_name).trim();
+                    }
+                    this.config.template_name = template.template_name;
+                    this.config.description = template.description;
+                    localStorage.removeItem('selectedTemplate');
+                } catch (error) {
+                    console.error('Failed to load template:', error);
+                }
+            }
+
+            // If this is a Postgres-based template type, clear warehouse fields to avoid
+            // accidentally persisting/using the results warehouse as an "execution" warehouse.
+            if (
+                this.config.table_type === 'POSTGRES' ||
+                this.config.table_type === 'SNOWFLAKE_POSTGRES' ||
+                this.config.table_type === 'CRUNCHYDATA'
+            ) {
+                this.config.warehouse_mode = 'EXISTING';
+                this.config.warehouse_name = '';
+                this.selectedWarehouseDetails = null;
+            }
+
+            // Load warehouses before enabling the form so users don't start editing
+            // and then have dropdowns/details change underneath them.
+            try {
+                await this.loadWarehouses();
+            } finally {
+                this.isInitializing = false;
+            }
+        },
+        
+        async loadWarehouses() {
+            try {
+                const [warehousesResp, infoResp] = await Promise.all([
+                    // Include all warehouses so we can display (and warn about) templates
+                    // that were previously saved with the results warehouse.
+                    fetch('/api/warehouses/'),
+                    fetch('/api/info'),
+                ]);
+                if (warehousesResp.ok) {
+                    const allWarehouses = await warehousesResp.json();
+                    const info = infoResp.ok ? await infoResp.json() : {};
+                    this.resultsWarehouse = String(info.results_warehouse || '').trim().toUpperCase() || null;
+
+                    this.availableWarehouses = allWarehouses || [];
+
+                    const normalize = (v) => String(v || '').trim().toUpperCase();
+
+                    // Choose desired warehouse:
+                    // - If template provided one and it exists, use canonical option value.
+                    // - If it doesn't exist, fall back to first available.
+                    let desiredWarehouseName = '';
+                    const selectedNorm = normalize(this.config.warehouse_name);
+                    if (selectedNorm) {
+                        const match = (this.availableWarehouses || []).find(
+                            (w) => normalize(w?.name) === selectedNorm,
+                        );
+                        desiredWarehouseName = match?.name || '';
+                    }
+                    if (!desiredWarehouseName && this.availableWarehouses.length > 0) {
+                        desiredWarehouseName = this.availableWarehouses[0].name;
+                    }
+
+                    // Important: set x-model value only after options are rendered,
+                    // otherwise the browser may keep showing the placeholder even though
+                    // the value is set and details load correctly.
+                    await this.nextTickAsync();
+                    // Some browsers require an additional tick before <select> option values are stable.
+                    await this.nextTickAsync();
+
+                    this.config.warehouse_name = desiredWarehouseName;
+
+                    // Force DOM select value to match (in case x-model updates before options settle).
+                    await this.nextTickAsync();
+                    const selectEl = document.getElementById('warehouse-select');
+                    if (selectEl) {
+                        selectEl.value = desiredWarehouseName;
+                    }
+
+                    if (!this.config.warehouse_name) {
+                        this.selectedWarehouseDetails = null;
+                        return;
+                    }
+                    await this.loadWarehouseDetails();
+                } else {
+                    const payload = await warehousesResp.json().catch(() => ({}));
+                    const detail = payload && payload.detail ? payload.detail : null;
+                    this.error =
+                        (detail && (detail.message || detail.detail || detail)) ||
+                        `Failed to load warehouses (HTTP ${warehousesResp.status})`;
+                    console.error('Failed to load warehouses', this.error);
+                }
+            } catch (error) {
+                console.error('Error loading warehouses:', error);
+                this.error = error?.message || String(error);
+            }
+        },
+        
+        async loadWarehouseDetails() {
+            if (!this.config.warehouse_name) {
+                this.selectedWarehouseDetails = null;
+                return;
+            }
+            
+            try {
+                const response = await fetch(
+                    `/api/warehouses/${encodeURIComponent(this.config.warehouse_name)}`,
+                );
+                if (response.ok) {
+                    this.selectedWarehouseDetails = await response.json();
+                    
+                    // Normalize warehouse size from Snowflake format (e.g., "X-Large") to our format (e.g., "XLARGE")
+                    const sizeMap = {
+                        'X-Small': 'XSMALL',
+                        'Small': 'SMALL',
+                        'Medium': 'MEDIUM',
+                        'Large': 'LARGE',
+                        'X-Large': 'XLARGE',
+                        '2X-Large': '2XLARGE',
+                        '3X-Large': '3XLARGE',
+                        '4X-Large': '4XLARGE'
+                    };
+                    
+                    // Auto-populate warehouse configuration
+                    this.config.warehouse_size = sizeMap[this.selectedWarehouseDetails.size] || this.selectedWarehouseDetails.size;
+                    this.config.multi_cluster = this.selectedWarehouseDetails.max_cluster_count > 1;
+                    this.config.min_clusters = this.selectedWarehouseDetails.min_cluster_count;
+                    this.config.max_clusters = this.selectedWarehouseDetails.max_cluster_count;
+                    this.config.scaling_policy = this.selectedWarehouseDetails.scaling_policy || 'STANDARD';
+                } else {
+                    console.error('Failed to load warehouse details');
+                }
+            } catch (error) {
+                console.error('Error loading warehouse details:', error);
+            }
+        },
+        
+        clearTemplate() {
+            this.loadedTemplate = null;
+            this.resetConfig();
+        },
+        
+        addIndex() {
+            this.config.indexes.push({
+                columns: '',
+                include: ''
+            });
+        },
+        
+        removeIndex(idx) {
+            this.config.indexes.splice(idx, 1);
+        },
+        
+        async submitTest() {
+            if (this.isSaving) {
+                return;
+            }
+            if (this.isReadOnly) {
+                return;
+            }
+            if (!this.config.template_name) {
+                window.toast.warning('Please provide a template name');
+                return;
+            }
+            if (this.config.workload_type === 'CUSTOM') {
+                const total =
+                    Number(this.config.custom_point_lookup_pct || 0) +
+                    Number(this.config.custom_range_scan_pct || 0) +
+                    Number(this.config.custom_insert_pct || 0) +
+                    Number(this.config.custom_update_pct || 0);
+                if (total !== 100) {
+                    window.toast.warning(
+                        `Custom query percentages must sum to 100 (currently ${total}).`,
+                    );
+                    return;
+                }
+            }
+
+            const tableType = String(this.config.table_type || '').trim().toUpperCase();
+            const isPostgres =
+                tableType === 'POSTGRES' ||
+                tableType === 'SNOWFLAKE_POSTGRES' ||
+                tableType === 'CRUNCHYDATA';
+
+            const selectedWh = String(this.config.warehouse_name || '').trim().toUpperCase();
+            if (!isPostgres && this.resultsWarehouse && selectedWh === this.resultsWarehouse) {
+                window.toast.warning(
+                    `This template is configured to run on ${selectedWh}, which is also your results warehouse (${this.resultsWarehouse}). Please choose a different warehouse before saving.`,
+                );
+                return;
+            }
+            
+            this.isSaving = true;
+            try {
+                const templateData = {
+                    template_name: this.config.template_name,
+                    description: this.config.description || null,
+                    config: this.config
+                };
+                
+                let response;
+                if (this.mode === 'edit' && this.loadedTemplate) {
+                    // Update existing template
+                    response = await fetch(`/api/templates/${this.loadedTemplate.template_id}`, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(templateData)
+                    });
+                } else {
+                    // Create new template
+                    response = await fetch('/api/templates/', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(templateData)
+                    });
+                }
+                
+                if (response.ok) {
+                    const createdOrUpdated = await response.json().catch(() => null);
+                    const successMessage =
+                        this.mode === 'edit'
+                            ? 'Template updated successfully.'
+                            : 'Template created successfully.';
+                    if (this.mode !== 'edit' && createdOrUpdated && createdOrUpdated.template_id) {
+                        // Stay on configure to allow AI preparation before first run.
+                        window.toast.queueNext('success', successMessage);
+                        window.location.href = `/configure?template_id=${encodeURIComponent(createdOrUpdated.template_id)}`;
+                    } else {
+                        window.toast.queueNext('success', successMessage);
+                        window.location.href = '/templates';
+                    }
+                } else {
+                    const error = await response.json().catch(() => ({}));
+                    const detail = error && error.detail ? error.detail : null;
+                    window.toast.error(
+                        'Error saving template: ' +
+                            (detail?.message || detail?.detail || detail || 'Unknown error'),
+                    );
+                }
+            } catch (error) {
+                console.error('Failed to save template:', error);
+                window.toast.error('Failed to save template: ' + (error?.message || error));
+            } finally {
+                this.isSaving = false;
+            }
+        },
+
+        async reloadTemplate() {
+            if (!this.loadedTemplate || !this.loadedTemplate.template_id) return;
+            try {
+                const resp = await fetch(`/api/templates/${encodeURIComponent(this.loadedTemplate.template_id)}`);
+                if (!resp.ok) {
+                    return;
+                }
+                const template = await resp.json();
+                this.loadedTemplate = template;
+                this.hasResults = (template.usage_count || 0) > 0;
+                this.config = { ...this.config, ...(template.config || {}) };
+                this.config.template_name = template.template_name;
+                this.config.description = template.description;
+                this.aiPrepResult = (this.config && this.config.ai_workload) ? { message: 'Loaded from template', ...this.config.ai_workload } : null;
+                this.aiPrepError = null;
+            } catch (e) {
+                console.warn('Failed to reload template:', e);
+            }
+        },
+
+        async prepareAiWorkload() {
+            if (!this.loadedTemplate || !this.loadedTemplate.template_id) {
+                window.toast.warning('Save the template first, then run AI preparation.');
+                return;
+            }
+            if (this.hasResults) {
+                window.toast.warning(
+                    'This template has results and cannot be modified. Copy it first.',
+                );
+                return;
+            }
+            this.aiPrepLoading = true;
+            this.aiPrepError = null;
+            try {
+                const resp = await fetch(`/api/templates/${encodeURIComponent(this.loadedTemplate.template_id)}/ai/prepare`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                });
+                const payload = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    const detail = payload && payload.detail ? payload.detail : null;
+                    this.aiPrepError =
+                        (detail && (detail.message || detail.detail || detail)) ||
+                        `Failed (HTTP ${resp.status})`;
+                    return;
+                }
+                this.aiPrepResult = payload;
+                // Reload template config so persisted metadata is reflected locally.
+                await this.reloadTemplate();
+            } catch (e) {
+                this.aiPrepError = e?.message || String(e);
+            } finally {
+                this.aiPrepLoading = false;
+            }
+        },
+
+        async aiAdjustCustomSql() {
+            // Preview-only: updates the 4 custom SQL statements + %s in the UI.
+            // No DB writes occur until the user saves the template.
+            this.aiSqlAdjustLoading = true;
+            try {
+                const resp = await fetch('/api/templates/ai/adjust-sql', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ config: this.config }),
+                });
+                const payload = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    const detail = payload && payload.detail ? payload.detail : null;
+                    window.toast.error(
+                        'AI SQL adjustment failed: ' +
+                            (detail?.message || detail?.detail || detail || `HTTP ${resp.status}`),
+                    );
+                    return;
+                }
+
+                // Apply adjustments locally
+                this.config.workload_type = 'CUSTOM';
+                this.config.custom_point_lookup_query = payload.custom_point_lookup_query || '';
+                this.config.custom_range_scan_query = payload.custom_range_scan_query || '';
+                this.config.custom_insert_query = payload.custom_insert_query || '';
+                this.config.custom_update_query = payload.custom_update_query || '';
+                this.config.custom_point_lookup_pct = Number(payload.custom_point_lookup_pct || 0);
+                this.config.custom_range_scan_pct = Number(payload.custom_range_scan_pct || 0);
+                this.config.custom_insert_pct = Number(payload.custom_insert_pct || 0);
+                this.config.custom_update_pct = Number(payload.custom_update_pct || 0);
+
+                // Store column map + ai_workload metadata in config (will persist on save).
+                if (payload.columns) {
+                    this.config.columns = payload.columns;
+                }
+                if (payload.ai_workload) {
+                    this.config.ai_workload = payload.ai_workload;
+                }
+
+                const summary = payload.summary || 'AI SQL adjustment completed.';
+                const level = String(payload.toast_level || 'success').toLowerCase();
+                if (level === 'warning') {
+                    window.toast.warning(summary);
+                } else {
+                    window.toast.success(summary);
+                }
+            } catch (e) {
+                window.toast.error('AI SQL adjustment failed: ' + (e?.message || e));
+            } finally {
+                this.aiSqlAdjustLoading = false;
+            }
+        },
+        
+        cancel() {
+            window.location.href = '/templates';
+        },
+        
+        async copyTemplate() {
+            if (!this.loadedTemplate) return;
+            
+            const newTemplate = {
+                ...this.loadedTemplate,
+                template_name: this.loadedTemplate.template_name + ' (Copy)',
+                template_id: undefined,
+                created_at: undefined,
+                updated_at: undefined,
+                usage_count: 0
+            };
+            
+            try {
+                const response = await fetch('/api/templates/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(newTemplate)
+                });
+                
+                if (response.ok) {
+                    const created = await response.json().catch(() => null);
+                    if (created && created.template_id) {
+                        window.toast.queueNext('success', 'Template copied successfully.');
+                        // Open the newly created template in editable mode (your choice A).
+                        window.location.href = `/configure?template_id=${encodeURIComponent(created.template_id)}`;
+                        return;
+                    }
+                    window.toast.queueNext('success', 'Template copied successfully.');
+                    window.location.href = '/templates';
+                } else {
+                    window.toast.error('Failed to copy template');
+                }
+            } catch (error) {
+                console.error('Error copying template:', error);
+                window.toast.error('Error copying template');
+            }
+        },
+        
+        async deleteTemplateWithResults() {
+            if (!this.loadedTemplate) return;
+            
+            const confirmMsg = `Delete "${this.loadedTemplate.template_name}" and all ${this.loadedTemplate.usage_count} test results? This cannot be undone.`;
+            const confirmed = await window.toast.confirm(confirmMsg, {
+                confirmText: 'Delete',
+                confirmVariant: 'danger',
+                timeoutMs: 10_000,
+            });
+            if (!confirmed) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/templates/${this.loadedTemplate.template_id}`, {
+                    method: 'DELETE'
+                });
+                
+                if (response.ok) {
+                    window.toast.queueNext('success', 'Template and results deleted.');
+                    window.location.href = '/templates';
+                } else {
+                    window.toast.error('Failed to delete template');
+                }
+            } catch (error) {
+                console.error('Error deleting template:', error);
+                window.toast.error('Error deleting template');
+            }
+        },
+        
+        async resetConfig() {
+            const confirmed = await window.toast.confirm('Reset all configuration?', {
+                confirmText: 'Reset',
+                confirmVariant: 'primary',
+                timeoutMs: 10_000,
+            });
+            if (confirmed) {
+                this.config = {
+                    table_type: 'STANDARD',
+                    database: 'UNISTORE_BENCHMARK',
+                    schema: 'PUBLIC',
+                    table_name: '',
+                    clustering_keys: '',
+                    primary_key: '',
+                    add_indexes: false,
+                    indexes: [],
+                    warehouse_mode: 'EXISTING',
+                    warehouse_name: 'COMPUTE_WH',
+                    new_warehouse_name: '',
+                    warehouse_size: 'MEDIUM',
+                    multi_cluster: false,
+                    min_clusters: 1,
+                    max_clusters: 3,
+                    scaling_policy: 'STANDARD',
+                    duration: 300,
+                    concurrent_connections: 10,
+                    workload_type: 'MIXED',
+                    think_time: 0,
+                    warmup: 30,
+                    custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
+                    custom_range_scan_query:
+                        'SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100',
+                    custom_insert_query:
+                        'INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
+                    custom_update_query:
+                        'UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?',
+                    custom_point_lookup_pct: 25,
+                    custom_range_scan_pct: 25,
+                    custom_insert_pct: 35,
+                    custom_update_pct: 15,
+                    test_name: '',
+                    description: '',
+                    save_as_template: false,
+                    template_name: '',
+                    template_description: ''
+                };
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

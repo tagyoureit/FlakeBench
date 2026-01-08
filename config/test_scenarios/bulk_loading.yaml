@@ -1,0 +1,87 @@
+# ============================================================================
+# TEMPLATE METADATA
+# ============================================================================
+name: "Bulk Loading Performance Test"
+description: "Test bulk insert performance with large batches"
+version: "1.0"
+category: "BULK_LOAD"
+
+# ============================================================================
+# Bulk Loading Performance Test Template
+# Tests data ingestion and batch write performance
+# ============================================================================
+
+# Table configuration
+table:
+  name: "bulk_load_test"
+  table_type: "STANDARD"  # Standard for bulk loading
+  database: "UNISTORE_BENCHMARK"
+  schema: "PUBLIC"
+  
+  columns:
+    id: "NUMBER"
+    event_type: "STRING"
+    user_id: "NUMBER"
+    session_id: "STRING"
+    payload: "VARIANT"
+    timestamp: "TIMESTAMP_NTZ"
+  
+  clustering_keys:
+    - "timestamp"
+    - "event_type"
+  
+  data_retention_days: 1
+  
+  initial_row_count: 0  # Start empty
+
+# Warehouse configuration - large for bulk operations
+warehouse:
+  size: "XLARGE"
+  name: "BULK_LOAD_WH"
+  auto_suspend: 120
+  auto_resume: true
+
+# Workload configuration
+workload:
+  type: "WRITE_ONLY"
+  read_weight: 0.0
+  write_weight: 1.0
+  
+  # Bulk insert configuration
+  batch_size: 10000  # 10k rows per batch
+
+# Load pattern - burst to simulate batch ingestion
+load_pattern:
+  type: "BURST"
+  target_ops_per_second: 5   # 5 batches/sec baseline
+  burst_multiplier: 10       # 50 batches/sec during burst
+  burst_duration_seconds: 20
+  burst_interval_seconds: 60
+
+# Test parameters
+test:
+  duration_seconds: 300  # 5 minutes
+  concurrent_connections: 5  # Few connections for bulk
+  warmup_seconds: 15
+  think_time_ms: 200
+  
+  # Performance targets
+  targets:
+    min_ops_per_second: 3
+    min_rows_per_second: 30000  # 3 ops * 10k rows
+    max_p95_latency_ms: 3000
+    max_p99_latency_ms: 5000
+    max_error_rate_percent: 1.0
+
+# Connection pool settings
+connection_pool:
+  pool_size: 5
+  max_overflow: 5
+  timeout_seconds: 300
+
+# Reporting
+report:
+  save_results: true
+  generate_charts: true
+  export_format: "CSV"
+  include_ingest_stats: true

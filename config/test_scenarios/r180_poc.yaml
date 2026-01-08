@@ -1,0 +1,347 @@
+# ============================================================================
+# TEMPLATE METADATA
+# ============================================================================
+name: "R180 POC - SAPE Events Processing"
+description: "POC scenario: Raw events → Hybrid staging (current year) → Standard archive → Views"
+version: "1.0"
+category: "POC"
+
+# ============================================================================
+# R180 POC - SAPE Events Processing Template
+# Realistic POC scenario for processing SAPE events with hybrid staging and standard archive
+# ============================================================================
+
+# Multi-table scenario
+tables:
+  # Raw events table - landing zone
+  - name: "sape_events_raw"
+    table_type: "STANDARD"
+    database: "R180_POC"
+    schema: "RAW"
+    
+    columns:
+      event_id: "STRING"
+      event_type: "STRING"
+      student_id: "STRING"
+      teacher_id: "STRING"
+      school_id: "STRING"
+      district_id: "STRING"
+      assessment_id: "STRING"
+      score: "NUMBER"
+      payload: "VARIANT"
+      event_timestamp: "TIMESTAMP_NTZ"
+      ingestion_timestamp: "TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()"
+    
+    clustering_keys:
+      - "ingestion_timestamp"
+    
+    initial_row_count: 0  # Will be populated by event generator
+  
+  # Hybrid staging table - current year data (high-performance access)
+  - name: "sape_events_staging"
+    table_type: "HYBRID"
+    database: "R180_POC"
+    schema: "STAGING"
+    
+    columns:
+      event_id: "STRING PRIMARY KEY"
+      event_type: "STRING"
+      student_id: "STRING"
+      teacher_id: "STRING"
+      school_id: "STRING"
+      district_id: "STRING"
+      assessment_id: "STRING"
+      score: "NUMBER"
+      event_date: "DATE"
+      event_timestamp: "TIMESTAMP_NTZ"
+      processed_timestamp: "TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()"
+    
+    primary_key:
+      - "event_id"
+    
+    indexes:
+      - name: "idx_student_date"
+        columns:
+          - "student_id"
+          - "event_date"
+        include_columns:
+          - "score"
+          - "event_type"
+      
+      - name: "idx_teacher_date"
+        columns:
+          - "teacher_id"
+          - "event_date"
+      
+      - name: "idx_assessment"
+        columns:
+          - "assessment_id"
+          - "event_date"
+        include_columns:
+          - "student_id"
+          - "score"
+  
+  # Standard archive table - older data (cost-effective storage)
+  - name: "sape_events_archive"
+    table_type: "STANDARD"
+    database: "R180_POC"
+    schema: "ARCHIVE"
+    
+    columns:
+      event_id: "STRING"
+      event_type: "STRING"
+      student_id: "STRING"
+      teacher_id: "STRING"
+      school_id: "STRING"
+      district_id: "STRING"
+      assessment_id: "STRING"
+      score: "NUMBER"
+      event_date: "DATE"
+      event_timestamp: "TIMESTAMP_NTZ"
+      archived_timestamp: "TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()"
+    
+    clustering_keys:
+      - "event_date"
+      - "student_id"
+    
+    data_retention_days: 365
+  
+  # Roster table - simulates 36-hour latency sync
+  - name: "roster_data"
+    table_type: "HYBRID"
+    database: "R180_POC"
+    schema: "REFERENCE"
+    
+    columns:
+      student_id: "STRING PRIMARY KEY"
+      teacher_id: "STRING"
+      school_id: "STRING"
+      district_id: "STRING"
+      grade_level: "STRING"
+      enrollment_date: "DATE"
+      last_sync: "TIMESTAMP_NTZ"
+    
+    primary_key:
+      - "student_id"
+    
+    indexes:
+      - name: "idx_teacher"
+        columns:
+          - "teacher_id"
+      - name: "idx_school"
+        columns:
+          - "school_id"
+    
+    initial_row_count: 50000  # 50k students
+
+# Warehouses for different workloads
+warehouses:
+  # Ingestion warehouse
+  - name: "R180_INGEST_WH"
+    size: "LARGE"
+    auto_suspend: 60
+    auto_resume: true
+    usage: "ingestion"
+  
+  # Processing warehouse
+  - name: "R180_PROCESS_WH"
+    size: "XLARGE"
+    auto_suspend: 120
+    auto_resume: true
+    multi_cluster:
+      enabled: true
+      min_clusters: 1
+      max_clusters: 3
+      scaling_policy: "STANDARD"
+    usage: "processing"
+  
+  # UI/Query warehouse
+  - name: "R180_UI_WH"
+    size: "MEDIUM"
+    auto_suspend: 60
+    auto_resume: true
+    multi_cluster:
+      enabled: true
+      min_clusters: 1
+      max_clusters: 5
+      scaling_policy: "ECONOMY"
+    usage: "queries"
+
+# Views - union over hybrid + standard
+views:
+  - name: "sape_events_all"
+    definition: |
+      SELECT * FROM R180_POC.STAGING.sape_events_staging
+      UNION ALL
+      SELECT * FROM R180_POC.ARCHIVE.sape_events_archive
+  
+  - name: "teacher_par_metrics"
+    definition: |
+      SELECT 
+        e.teacher_id,
+        e.event_date,
+        COUNT(DISTINCT e.student_id) as unique_students,
+        COUNT(*) as total_events,
+        AVG(e.score) as avg_score,
+        r.school_id
+      FROM sape_events_all e
+      JOIN R180_POC.REFERENCE.roster_data r ON e.student_id = r.student_id
+      WHERE e.event_date >= CURRENT_DATE() - 7
+      GROUP BY e.teacher_id, e.event_date, r.school_id
+
+# Workload configuration - SAPE event ingestion
+workload:
+  # Event generation
+  event_generator:
+    enabled: true
+    target_events_per_second: 2000  # Average 1,500-2,000/sec
+    peak_events_per_second: 6000     # Peak 5,000-6,000/sec
+    
+    event_types:
+      - type: "assessment_start"
+        weight: 0.15
+      - type: "assessment_complete"
+        weight: 0.15
+      - type: "question_answered"
+        weight: 0.50
+      - type: "progress_update"
+        weight: 0.15
+      - type: "session_timeout"
+        weight: 0.05
+    
+    # Event data characteristics
+    students_count: 50000
+    teachers_count: 2500
+    schools_count: 100
+    districts_count: 10
+    
+    # Realistic distribution
+    peak_hours: [9, 10, 11, 13, 14, 15]  # School hours
+    off_peak_multiplier: 0.3
+  
+  # Processing workload
+  processing:
+    # Incremental aggregations on hybrid table
+    - task: "real_time_aggregation"
+      interval_seconds: 60
+      query: |
+        SELECT 
+          teacher_id,
+          COUNT(*) as event_count,
+          COUNT(DISTINCT student_id) as student_count
+        FROM R180_POC.STAGING.sape_events_staging
+        WHERE processed_timestamp >= DATEADD(minute, -1, CURRENT_TIMESTAMP())
+        GROUP BY teacher_id
+    
+    # Archival process - move old data to standard table
+    - task: "archive_old_events"
+      interval_seconds: 3600  # Every hour
+      query: |
+        INSERT INTO R180_POC.ARCHIVE.sape_events_archive
+        SELECT 
+          event_id, event_type, student_id, teacher_id, 
+          school_id, district_id, assessment_id, score,
+          event_date, event_timestamp, CURRENT_TIMESTAMP()
+        FROM R180_POC.STAGING.sape_events_staging
+        WHERE event_date < CURRENT_DATE() - 365
+        AND event_id NOT IN (
+          SELECT event_id FROM R180_POC.ARCHIVE.sape_events_archive
+        )
+  
+  # Query workload - simulating UI queries
+  queries:
+    - name: "teacher_par_last_7_days"
+      warehouse: "R180_UI_WH"
+      frequency_per_minute: 10
+      target_latency_seconds: 5  # Teacher PAR: 3-5 minutes SLA
+      query: |
+        SELECT * FROM R180_POC.VIEWS.teacher_par_metrics
+        WHERE teacher_id = ?
+        AND event_date >= CURRENT_DATE() - 7
+    
+    - name: "assessment_summary"
+      warehouse: "R180_UI_WH"
+      frequency_per_minute: 5
+      target_latency_seconds: 10  # Assessments: 10 minutes SLA
+      query: |
+        SELECT 
+          assessment_id,
+          COUNT(DISTINCT student_id) as students,
+          AVG(score) as avg_score,
+          MIN(event_timestamp) as started_at,
+          MAX(event_timestamp) as completed_at
+        FROM sape_events_all
+        WHERE assessment_id = ?
+        GROUP BY assessment_id
+    
+    - name: "student_progress"
+      warehouse: "R180_UI_WH"
+      frequency_per_minute: 20
+      target_latency_seconds: 2
+      query: |
+        SELECT * FROM sape_events_all
+        WHERE student_id = ?
+        AND event_date >= CURRENT_DATE() - 30
+        ORDER BY event_timestamp DESC
+        LIMIT 100
+
+# Roster sync simulation - 36-hour latency
+roster_sync:
+  enabled: true
+  sync_interval_seconds: 129600  # 36 hours
+  batch_size: 1000
+  # Simulates delayed roster updates
+
+# Load pattern - realistic daily pattern
+load_pattern:
+  type: "REALISTIC"
+  target_ops_per_second: 2000
+  peak_start_hour: 8
+  peak_end_hour: 16
+  off_peak_multiplier: 0.3
+
+# Test parameters
+test:
+  duration_seconds: 3600  # 1 hour test
+  concurrent_connections: 50
+  warmup_seconds: 300  # 5 minute warmup
+  think_time_ms: 50
+  
+  # Performance targets
+  targets:
+    # Ingestion
+    min_events_per_second: 1500
+    max_events_per_second: 6000
+    max_ingestion_latency_ms: 1000
+    
+    # Queries
+    teacher_par_p95_latency_seconds: 5
+    assessment_p95_latency_seconds: 10
+    api_p95_latency_seconds: 10
+    
+    # System
+    max_error_rate_percent: 0.1
+
+# Connection pool settings
+connection_pool:
+  ingest_pool_size: 20
+  process_pool_size: 10
+  query_pool_size: 30
+  timeout_seconds: 120
+
+# Reporting
+report:
+  save_results: true
+  generate_charts: true
+  export_format: "CSV"
+  metrics:
+    - "ingestion_rate"
+    - "query_latency_by_type"
+    - "warehouse_utilization"
+    - "cost_estimation"
+    - "data_volume_by_table"
+  
+  custom_dashboards:
+    - "teacher_par_performance"
+    - "assessment_latency_trends"
+    - "system_scalability"

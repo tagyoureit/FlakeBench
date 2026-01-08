@@ -1,0 +1,100 @@
+# ============================================================================
+# TEMPLATE METADATA
+# ============================================================================
+name: "OLAP Analytics Workload"
+description: "Analytical workload with aggregations, range scans, and joins"
+version: "1.0"
+category: "OLAP"
+
+# ============================================================================
+# OLAP Analytics Workload Template
+# Analytical workload with aggregations, scans, and complex queries
+# ============================================================================
+
+# Table configuration
+table:
+  name: "olap_test"
+  table_type: "STANDARD"  # Standard tables for OLAP
+  database: "UNISTORE_BENCHMARK"
+  schema: "PUBLIC"
+  
+  # Schema definition
+  columns:
+    id: "NUMBER"
+    customer_id: "NUMBER"
+    product_id: "NUMBER"
+    region: "STRING"
+    status: "STRING"
+    amount: "NUMBER(10,2)"
+    quantity: "NUMBER"
+    created_at: "TIMESTAMP_NTZ"
+  
+  # Clustering for analytical queries
+  clustering_keys:
+    - "created_at"
+    - "region"
+  
+  data_retention_days: 7
+  
+  # Initial data - larger dataset for analytics
+  initial_row_count: 10000000  # 10M rows
+
+# Warehouse configuration - larger for analytics
+warehouse:
+  size: "XLARGE"
+  name: "ANALYTICS_WH"
+  auto_suspend: 300
+  auto_resume: true
+  
+  # Multi-cluster for concurrent queries
+  multi_cluster:
+    enabled: true
+    min_clusters: 1
+    max_clusters: 3
+    scaling_policy: "STANDARD"
+
+# Workload configuration
+workload:
+  type: "OLAP"
+  read_weight: 0.95   # 95% reads
+  write_weight: 0.05  # 5% writes (bulk inserts)
+  
+  # Query type distribution
+  aggregation_weight: 0.4
+  range_scan_weight: 0.3
+  join_weight: 0.2
+  complex_query_weight: 0.1
+
+# Load pattern
+load_pattern:
+  type: "SINE_WAVE"
+  target_ops_per_second: 10  # Fewer queries, but more complex
+  amplitude_factor: 0.5
+  period_seconds: 120
+
+# Test parameters
+test:
+  duration_seconds: 600  # 10 minutes
+  concurrent_connections: 5  # Fewer concurrent for analytics
+  warmup_seconds: 60
+  think_time_ms: 1000  # 1 second think time
+  
+  # Performance targets
+  targets:
+    min_ops_per_second: 5
+    max_p95_latency_ms: 5000   # 5 seconds
+    max_p99_latency_ms: 10000  # 10 seconds
+    max_error_rate_percent: 2.0
+
+# Connection pool settings
+connection_pool:
+  pool_size: 5
+  max_overflow: 5
+  timeout_seconds: 300  # Longer timeout for analytical queries
+
+# Reporting
+report:
+  save_results: true
+  generate_charts: true
+  export_format: "CSV"
+  include_query_profile: true

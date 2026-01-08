@@ -1,0 +1,81 @@
+{% if is_htmx %}
+{% extends "partials/content_only.html" %}
+{% else %}
+{% extends "base.html" %}
+{% endif %}
+
+{% block title %}Dashboard History - Unistore Benchmark{% endblock %}
+
+{% block content %}
+<div x-data="dashboard({ mode: 'history' })" data-test-id="{{ test_id or '' }}">
+    <div class="dashboard-top-grid">
+        <div class="card" x-show="templateInfo">
+            <div
+                class="card-title"
+                x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"
+            ></div>
+            <div class="text-sm text-gray-600">
+                <div>
+                    <strong>Template:</strong>
+                    <span x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"></span>
+                </div>
+                <div class="mt-1">
+                    <strong>Table:</strong>
+                    <span x-text="templateInfo ? (templateInfo.table_full_name || '') : ''"></span>
+                    (<span x-text="templateInfo ? (templateInfo.table_type || '') : ''"></span>)
+                </div>
+                <div class="mt-1">
+                    <strong>Warehouse:</strong>
+                    <span x-text="templateInfo ? (templateInfo.warehouse || 'default') : 'default'"></span>
+                    <span x-show="templateInfo && templateInfo.warehouse_size">(<span x-text="templateInfo ? (templateInfo.warehouse_size || '') : ''"></span>)</span>
+                </div>
+                <div class="mt-1">
+                    <strong>Workload:</strong>
+                    <span x-text="templateInfo ? (templateInfo.workload_type || '') : ''"></span>
+                    • <strong>Concurrency:</strong> <span x-text="templateInfo ? (templateInfo.concurrent_connections ?? '') : ''"></span>
+                    • <strong>Duration:</strong> <span x-text="templateInfo ? (templateInfo.duration_seconds ?? '') : ''"></span>s
+                </div>
+                <div class="mt-1">
+                    <strong>Status:</strong>
+                    <span x-text="templateInfo ? (templateInfo.status || '') : ''"></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">History View</div>
+            <div style="color: #6b7280;">
+                Read-only analysis dashboard. For realtime execution and controls, use the live dashboard.
+            </div>
+            <div style="margin-top: 0.75rem;">
+                <a class="btn btn-primary" :href="testId ? `/dashboard/${testId}` : '/dashboard'">
+                    Open Live Dashboard
+                </a>
+            </div>
+        </div>
+    </div>
+
+    {% include "components/latency_sections.html" %}
+
+    <div class="card">
+        <div class="card-title">Real-Time Metrics (captured)</div>
+        <div class="chart-container">
+            <canvas id="throughputChart"></canvas>
+        </div>
+    </div>
+    
+    <div class="card">
+        <div class="card-title">Latency Distribution (end-to-end)</div>
+        <div class="chart-container">
+            <canvas id="latencyChart"></canvas>
+        </div>
+        <div style="margin-top: 0.5rem; color: #6b7280;">
+            Note: charts are based on end-to-end app timings collected during execution.
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}{% endblock %}
+
+

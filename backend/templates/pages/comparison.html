@@ -1,0 +1,304 @@
+{% if is_htmx %}
+{% extends "partials/content_only.html" %}
+{% else %}
+{% extends "base.html" %}
+{% endif %}
+
+{% block title %}Compare Results - Unistore Benchmark{% endblock %}
+
+{% block content %}
+<div x-data="comparison()">
+    <div class="card">
+        <div class="card-title">Compare Test Results</div>
+        <p>Select up to 5 tests to compare side-by-side</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Selected Tests (<span x-text="selectedTests.length"></span>/5)</div>
+        
+        <div class="form-group">
+            <label class="form-label">Search Tests</label>
+            <input 
+                type="text" 
+                class="form-input" 
+                x-model="searchQuery"
+                @input.debounce.300ms="searchTests"
+                placeholder="Search by test name, table type, or date...">
+        </div>
+
+        <div x-show="error" class="alert alert-error mb-4">
+            <strong>Search failed.</strong>
+            <span x-text="error"></span>
+        </div>
+
+        <div class="mb-4" x-show="searchResults.length > 0">
+            <h4 class="font-semibold mb-2">Search Results</h4>
+            <div class="table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Test Name</th>
+                            <th>Table Type</th>
+                            <th>Date</th>
+                            <th>Ops/sec</th>
+                            <th>P95 Latency</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="test in searchResults" :key="test.test_id">
+                            <tr>
+                                <td x-text="test.test_name"></td>
+                                <td x-text="test.table_type"></td>
+                                <td x-text="new Date(test.created_at).toLocaleDateString()"></td>
+                                <td x-text="test.ops_per_sec.toFixed(0)"></td>
+                                <td x-text="test.p95_latency.toFixed(2) + ' ms'"></td>
+                                <td>
+                                    <button 
+                                        type="button"
+                                        class="btn btn-primary btn-sm"
+                                        @click="addTest(test)"
+                                        :disabled="selectedTests.length >= 5 || isSelected(test.test_id)">
+                                        <span x-text="isSelected(test.test_id) ? 'Selected' : 'Add'"></span>
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div x-show="selectedTests.length > 0" class="mb-4">
+            <h4 class="font-semibold mb-2">Selected for Comparison</h4>
+            <div class="flex flex-wrap gap-2">
+                <template x-for="test in selectedTests" :key="test.test_id">
+                    <div class="inline-flex items-center px-3 py-1 rounded-full bg-blue-100 text-blue-800">
+                        <span x-text="test.test_name" class="mr-2"></span>
+                        <button @click="removeTest(test.test_id)" class="text-blue-600 hover:text-blue-800">&times;</button>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
+
+    <div x-show="selectedTests.length >= 2" class="card">
+        <div class="card-title">Comparison Results</div>
+        
+        <div class="table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <th x-text="test.test_name"></th>
+                        </template>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="font-semibold">Table Type</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td x-text="test.table_type"></td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">Warehouse Size</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td x-text="test.warehouse_size"></td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">Concurrent Connections</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td x-text="test.concurrent_connections"></td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">Operations / Second</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td>
+                                <span x-text="test.ops_per_sec.toFixed(0)"></span>
+                                <span 
+                                    class="ml-2 text-sm"
+                                    :class="test.ops_per_sec === Math.max(...selectedTests.map(t => t.ops_per_sec)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                    x-show="test.ops_per_sec === Math.max(...selectedTests.map(t => t.ops_per_sec))">
+                                    ✓ Best
+                                </span>
+                            </td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">P50 Latency (ms)</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td>
+                                <span x-text="test.p50_latency.toFixed(2)"></span>
+                                <span 
+                                    class="ml-2 text-sm"
+                                    :class="test.p50_latency === Math.min(...selectedTests.map(t => t.p50_latency)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                    x-show="test.p50_latency === Math.min(...selectedTests.map(t => t.p50_latency))">
+                                    ✓ Best
+                                </span>
+                            </td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">P95 Latency (ms)</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td>
+                                <span x-text="test.p95_latency.toFixed(2)"></span>
+                                <span 
+                                    class="ml-2 text-sm"
+                                    :class="test.p95_latency === Math.min(...selectedTests.map(t => t.p95_latency)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                    x-show="test.p95_latency === Math.min(...selectedTests.map(t => t.p95_latency))">
+                                    ✓ Best
+                                </span>
+                            </td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">P99 Latency (ms)</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td>
+                                <span x-text="test.p99_latency.toFixed(2)"></span>
+                                <span 
+                                    class="ml-2 text-sm"
+                                    :class="test.p99_latency === Math.min(...selectedTests.map(t => t.p99_latency)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                    x-show="test.p99_latency === Math.min(...selectedTests.map(t => t.p99_latency))">
+                                    ✓ Best
+                                </span>
+                            </td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">Error Rate (%)</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td>
+                                <span x-text="test.error_rate.toFixed(2)"></span>
+                                <span 
+                                    class="ml-2 text-sm"
+                                    :class="test.error_rate === Math.min(...selectedTests.map(t => t.error_rate)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                    x-show="test.error_rate === Math.min(...selectedTests.map(t => t.error_rate))">
+                                    ✓ Best
+                                </span>
+                            </td>
+                        </template>
+                    </tr>
+                    <tr>
+                        <td class="font-semibold">Test Duration (s)</td>
+                        <template x-for="test in selectedTests" :key="test.test_id">
+                            <td x-text="test.duration"></td>
+                        </template>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="btn-group mt-4">
+            <button type="button" class="btn btn-primary" @click="exportComparison">
+                Export to CSV
+            </button>
+            <button type="button" class="btn btn-secondary" @click="clearSelection">
+                Clear Selection
+            </button>
+        </div>
+    </div>
+
+    <div x-show="selectedTests.length < 2" class="card">
+        <div class="alert alert-info">
+            Select at least 2 tests to compare results side-by-side
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function comparison() {
+    return {
+        searchQuery: '',
+        searchResults: [],
+        selectedTests: [],
+        error: null,
+        
+        async searchTests() {
+            if (this.searchQuery.length < 2) {
+                this.searchResults = [];
+                this.error = null;
+                return;
+            }
+            
+            try {
+                this.error = null;
+                const response = await fetch(`/api/tests/search?q=${encodeURIComponent(this.searchQuery)}`);
+                if (!response.ok) {
+                    const payload = await response.json().catch(() => ({}));
+                    const detail = payload && payload.detail ? payload.detail : null;
+                    this.error =
+                        (detail && (detail.message || detail.detail || detail)) ||
+                        `Search failed (HTTP ${response.status})`;
+                    this.searchResults = [];
+                    return;
+                }
+
+                const data = await response.json();
+                this.searchResults = data.results || [];
+            } catch (error) {
+                console.error('Search failed:', error);
+                this.error = error?.message || String(error);
+                this.searchResults = [];
+            }
+        },
+        
+        addTest(test) {
+            if (this.selectedTests.length < 5 && !this.isSelected(test.test_id)) {
+                this.selectedTests.push(test);
+            }
+        },
+        
+        removeTest(testId) {
+            this.selectedTests = this.selectedTests.filter(t => t.test_id !== testId);
+        },
+        
+        isSelected(testId) {
+            return this.selectedTests.some(t => t.test_id === testId);
+        },
+        
+        async clearSelection() {
+            const confirmed = await window.toast.confirm('Clear all selected tests?', {
+                confirmText: 'Clear',
+                confirmVariant: 'primary',
+                timeoutMs: 10_000,
+            });
+            if (confirmed) {
+                this.selectedTests = [];
+                window.toast.success('Selection cleared.');
+            }
+        },
+        
+        exportComparison() {
+            const headers = ['Metric', ...this.selectedTests.map(t => t.test_name)];
+            const rows = [
+                ['Table Type', ...this.selectedTests.map(t => t.table_type)],
+                ['Warehouse Size', ...this.selectedTests.map(t => t.warehouse_size)],
+                ['Operations/sec', ...this.selectedTests.map(t => t.ops_per_sec.toFixed(0))],
+                ['P50 Latency (ms)', ...this.selectedTests.map(t => t.p50_latency.toFixed(2))],
+                ['P95 Latency (ms)', ...this.selectedTests.map(t => t.p95_latency.toFixed(2))],
+                ['P99 Latency (ms)', ...this.selectedTests.map(t => t.p99_latency.toFixed(2))],
+                ['Error Rate (%)', ...this.selectedTests.map(t => t.error_rate.toFixed(2))],
+            ];
+            
+            const csv = [headers, ...rows].map(row => row.join(',')).join('\n');
+            
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `comparison_${new Date().toISOString().split('T')[0]}.csv`;
+            a.click();
+            window.URL.revokeObjectURL(url);
+        }
+    };
+}
+</script>
+{% endblock %}

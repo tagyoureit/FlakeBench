@@ -1,0 +1,357 @@
+{% if is_htmx %}
+{% extends "partials/content_only.html" %}
+{% else %}
+{% extends "base.html" %}
+{% endif %}
+
+{% block title %}Test History - Unistore Benchmark{% endblock %}
+
+{% block content %}
+<div x-data="testHistory()">
+    <div class="card">
+        <div class="card-title">Test History</div>
+        <p>Browse and manage all previous test results</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Filters</div>
+        
+        <div class="filters-grid">
+            <div>
+                <label class="form-label">Table Type</label>
+                <select class="form-select" x-model="filters.table_type" @change="applyFilters">
+                    <option value="">All Types</option>
+                    <option value="STANDARD">Standard</option>
+                    <option value="HYBRID">Hybrid</option>
+                    <option value="INTERACTIVE">Interactive</option>
+                    <option value="POSTGRES">Postgres</option>
+                </select>
+            </div>
+
+            <div>
+                <label class="form-label">Warehouse Size</label>
+                <select class="form-select" x-model="filters.warehouse_size" @change="applyFilters">
+                    <option value="">All Sizes</option>
+                    <option value="XSMALL">X-Small</option>
+                    <option value="SMALL">Small</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LARGE">Large</option>
+                    <option value="XLARGE">X-Large</option>
+                </select>
+            </div>
+
+            <div>
+                <label class="form-label">Status</label>
+                <select class="form-select" x-model="filters.status" @change="applyFilters">
+                    <option value="">All Statuses</option>
+                    <option value="COMPLETED">Completed</option>
+                    <option value="RUNNING">Running</option>
+                    <option value="FAILED">Failed</option>
+                    <option value="PAUSED">Paused</option>
+                </select>
+            </div>
+
+            <div>
+                <label class="form-label">Date Range</label>
+                <select class="form-select" x-model="filters.date_range" @change="applyFilters">
+                    <option value="all">All Time</option>
+                    <option value="today">Today</option>
+                    <option value="week">Past Week</option>
+                    <option value="month">Past Month</option>
+                    <option value="custom">Custom Range</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="btn-group">
+            <button type="button" class="btn btn-secondary" @click="resetFilters">Reset Filters</button>
+            <button type="button" class="btn btn-primary" @click="applyFilters">Apply</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="flex justify-between items-center mb-4">
+            <div class="card-title mb-0">Test Results</div>
+            <div>
+                <span class="text-sm text-gray-600">
+                    Showing <span x-text="tests.length"></span> results
+                </span>
+            </div>
+        </div>
+
+        <div x-show="error" class="alert alert-error">
+            <strong>Failed to load test results.</strong>
+            <span x-text="error"></span>
+            <div class="mt-2 text-sm">
+                If this looks like a Snowflake connectivity issue, connect to VPN / allowlist your IP and refresh.
+            </div>
+        </div>
+
+        <div class="table">
+            <table>
+                <thead>
+                    <tr>
+                        <th @click="sortBy('test_name')" class="cursor-pointer">
+                            Test Name 
+                            <span x-show="sortField === 'test_name'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
+                        </th>
+                        <th @click="sortBy('table_type')" class="cursor-pointer">
+                            Table Type
+                            <span x-show="sortField === 'table_type'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
+                        </th>
+                        <th @click="sortBy('created_at')" class="cursor-pointer">
+                            Date
+                            <span x-show="sortField === 'created_at'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
+                        </th>
+                        <th @click="sortBy('ops_per_sec')" class="cursor-pointer">
+                            Ops/sec
+                            <span x-show="sortField === 'ops_per_sec'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
+                        </th>
+                        <th @click="sortBy('p95_latency')" class="cursor-pointer">
+                            P95 Latency
+                            <span x-show="sortField === 'p95_latency'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
+                        </th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="test in sortedTests" :key="test.test_id">
+                        <tr>
+                            <td>
+                                <a :href="dashboardUrl(test)" class="text-blue-600 hover:underline" x-text="test.test_name"></a>
+                            </td>
+                            <td x-text="test.table_type"></td>
+                            <td x-text="new Date(test.created_at).toLocaleString()"></td>
+                            <td x-text="test.ops_per_sec.toFixed(0)"></td>
+                            <td x-text="test.p95_latency.toFixed(2) + ' ms'"></td>
+                            <td>
+                                <span 
+                                    class="status-badge"
+                                    :class="{
+                                        'status-completed': test.status === 'COMPLETED',
+                                        'status-running': test.status === 'RUNNING',
+                                        'status-failed': test.status === 'FAILED',
+                                        'status-paused': test.status === 'PAUSED'
+                                    }"
+                                    x-text="test.status">
+                                </span>
+                            </td>
+                            <td>
+                                <div class="flex gap-2">
+                                    <button 
+                                        type="button" 
+                                        class="btn btn-primary btn-sm"
+                                        @click="viewTest(test)">
+                                        View
+                                    </button>
+                                    <button 
+                                        type="button" 
+                                        class="btn btn-secondary btn-sm"
+                                        @click="rerunTest(test.test_id)">
+                                        Re-run
+                                    </button>
+                                    <button 
+                                        type="button" 
+                                        class="btn btn-error btn-sm"
+                                        @click="deleteTest(test.test_id)">
+                                        Delete
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+
+        <div x-show="!error && tests.length === 0" class="alert alert-info">
+            No test results found. Run your first test to see results here.
+        </div>
+
+        <div class="flex justify-between items-center mt-4" x-show="totalPages > 1">
+            <button 
+                type="button" 
+                class="btn btn-secondary"
+                @click="previousPage"
+                :disabled="currentPage === 1">
+                Previous
+            </button>
+            <span class="text-sm text-gray-600">
+                Page <span x-text="currentPage"></span> of <span x-text="totalPages"></span>
+            </span>
+            <button 
+                type="button" 
+                class="btn btn-secondary"
+                @click="nextPage"
+                :disabled="currentPage === totalPages">
+                Next
+            </button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function testHistory() {
+    return {
+        tests: [],
+        error: null,
+        filters: {
+            table_type: '',
+            warehouse_size: '',
+            status: '',
+            date_range: 'all'
+        },
+        sortField: 'created_at',
+        sortDirection: 'desc',
+        currentPage: 1,
+        pageSize: 20,
+        totalPages: 1,
+        
+        init() {
+            this.loadTests();
+        },
+        
+        async loadTests() {
+            try {
+                this.error = null;
+                const params = new URLSearchParams({
+                    page: this.currentPage,
+                    page_size: this.pageSize,
+                    ...this.filters
+                });
+                
+                const response = await fetch(`/api/tests?${params}`);
+                if (!response.ok) {
+                    const payload = await response.json().catch(() => ({}));
+                    const detail = payload && payload.detail ? payload.detail : null;
+                    this.error =
+                        (detail && (detail.message || detail.detail || detail)) ||
+                        `Failed to load test results (HTTP ${response.status})`;
+                    this.tests = [];
+                    this.totalPages = 1;
+                    return;
+                }
+
+                const data = await response.json();
+                this.tests = data.results || [];
+                this.totalPages = data.total_pages || 1;
+            } catch (error) {
+                console.error('Failed to load tests:', error);
+                this.error = error?.message || String(error);
+                this.tests = [];
+                this.totalPages = 1;
+            }
+        },
+        
+        get sortedTests() {
+            return [...this.tests].sort((a, b) => {
+                let aVal = a[this.sortField];
+                let bVal = b[this.sortField];
+                
+                if (this.sortField === 'created_at') {
+                    aVal = new Date(aVal);
+                    bVal = new Date(bVal);
+                }
+                
+                if (this.sortDirection === 'asc') {
+                    return aVal > bVal ? 1 : -1;
+                } else {
+                    return aVal < bVal ? 1 : -1;
+                }
+            });
+        },
+        
+        sortBy(field) {
+            if (this.sortField === field) {
+                this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
+            } else {
+                this.sortField = field;
+                this.sortDirection = 'desc';
+            }
+        },
+        
+        applyFilters() {
+            this.currentPage = 1;
+            this.loadTests();
+        },
+        
+        resetFilters() {
+            this.filters = {
+                table_type: '',
+                warehouse_size: '',
+                status: '',
+                date_range: 'all'
+            };
+            this.applyFilters();
+        },
+        
+        previousPage() {
+            if (this.currentPage > 1) {
+                this.currentPage--;
+                this.loadTests();
+            }
+        },
+        
+        nextPage() {
+            if (this.currentPage < this.totalPages) {
+                this.currentPage++;
+                this.loadTests();
+            }
+        },
+        
+        dashboardUrl(test) {
+            const id = test && test.test_id ? String(test.test_id) : '';
+            const status = test && test.status ? String(test.status).toUpperCase() : '';
+            if (!id) return '/dashboard';
+            if (status === 'COMPLETED') return `/dashboard/history/${id}`;
+            return `/dashboard/${id}`;
+        },
+
+        viewTest(test) {
+            window.location.href = this.dashboardUrl(test);
+        },
+        
+        async rerunTest(testId) {
+            const confirmed = await window.toast.confirm(
+                'Re-run this test with the same configuration?',
+                { confirmText: 'Re-run', confirmVariant: 'primary', timeoutMs: 10_000 },
+            );
+            if (!confirmed) return;
+
+            try {
+                const response = await fetch(`/api/tests/${testId}/rerun`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                window.location.href = `/dashboard/${data.new_test_id}`;
+            } catch (error) {
+                console.error('Failed to rerun test:', error);
+                window.toast.error('Failed to rerun test');
+            }
+        },
+        
+        async deleteTest(testId) {
+            const confirmed = await window.toast.confirm(
+                'Delete this test result? This cannot be undone.',
+                { confirmText: 'Delete', confirmVariant: 'danger', timeoutMs: 10_000 },
+            );
+            if (!confirmed) return;
+
+            try {
+                await fetch(`/api/tests/${testId}`, {
+                    method: 'DELETE'
+                });
+                this.loadTests();
+                window.toast.success('Test deleted.');
+            } catch (error) {
+                console.error('Failed to delete test:', error);
+                window.toast.error('Failed to delete test');
+            }
+        }
+    };
+}
+</script>
+{% endblock %}

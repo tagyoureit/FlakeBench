@@ -1,0 +1,514 @@
+"""
+Unistore Benchmark - Main Application Entry Point
+
+FastAPI application with real-time WebSocket support for database performance benchmarking.
+"""
+
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, cast
+
+import asyncio
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse
+import logging
+
+from backend.config import settings
+from backend.core.test_registry import registry
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL),
+    format=settings.LOG_FORMAT,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(settings.LOG_FILE)
+        if settings.LOG_FILE
+        else logging.NullHandler(),
+    ],
+)
+
+logger = logging.getLogger(__name__)
+
+# Snowsight link support (derived from Snowflake session context).
+_snowsight_org_account_path: str | None = None
+_snowsight_org_account_lock = asyncio.Lock()
+
+
+async def _get_snowsight_org_account_path() -> str:
+    """
+    Resolve the Snowsight URL path segment: "<ORG>/<ACCOUNT>".
+
+    This is fetched from Snowflake once per process (cached) using:
+      SELECT CURRENT_ORGANIZATION_NAME() || '/' || CURRENT_ACCOUNT_NAME();
+    """
+    global _snowsight_org_account_path
+
+    if _snowsight_org_account_path is not None:
+        return _snowsight_org_account_path
+
+    async with _snowsight_org_account_lock:
+        if _snowsight_org_account_path is not None:
+            return _snowsight_org_account_path
+
+        try:
+            from backend.connectors import snowflake_pool
+
+            pool = snowflake_pool.get_default_pool()
+            rows = await pool.execute_query(
+                "SELECT CURRENT_ORGANIZATION_NAME() || '/' || CURRENT_ACCOUNT_NAME()"
+            )
+            value = str(rows[0][0]).strip() if rows and rows[0] and rows[0][0] else ""
+            _snowsight_org_account_path = value
+        except Exception as e:
+            logger.debug("Failed to resolve Snowsight org/account: %s", e)
+            _snowsight_org_account_path = ""
+
+        return _snowsight_org_account_path
+
+
+# Base directory for templates and static files
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan manager - handles startup and shutdown events.
+    """
+    # Startup
+    logger.info("🚀 Unistore Benchmark starting up...")
+    logger.info(f"📁 Templates directory: {TEMPLATES_DIR}")
+    logger.info(f"📁 Static files directory: {STATIC_DIR}")
+    logger.info(
+        f"🔧 Environment: {'Development' if settings.APP_DEBUG else 'Production'}"
+    )
+
+    # Initialize database connection pools
+    try:
+        from backend.connectors import snowflake_pool, postgres_pool
+
+        logger.info("📊 Initializing Snowflake connection pool...")
+        sf_pool = snowflake_pool.get_default_pool()
+        await sf_pool.initialize()
+        logger.info("✅ Snowflake pool initialized")
+
+        if settings.ENABLE_POSTGRES and settings.POSTGRES_CONNECT_ON_STARTUP:
+            logger.info("🐘 Initializing Postgres connection pool...")
+            pg_pool = postgres_pool.get_default_pool()
+            await pg_pool.initialize()
+            logger.info("✅ Postgres pool initialized")
+        elif settings.ENABLE_POSTGRES:
+            logger.info(
+                "🐘 Postgres enabled but not connecting on startup "
+                "(set POSTGRES_CONNECT_ON_STARTUP=true to initialize at boot)"
+            )
+
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize connection pools: {e}")
+        logger.warning("⚠️  Application starting without database connections")
+
+    # TODO: Load test templates from config
+
+    yield
+
+    # Shutdown
+    logger.info("🛑 Unistore Benchmark shutting down...")
+
+    # Cancel in-flight benchmark tasks (important for `--reload`)
+    try:
+        await registry.shutdown(timeout_seconds=5.0)
+    except Exception as e:
+        logger.warning("Registry shutdown encountered an error: %s", e)
+
+    # Close database connections
+    try:
+        from backend.connectors import snowflake_pool, postgres_pool
+
+        logger.info("Closing database connection pools...")
+        await snowflake_pool.close_default_pool()
+        await postgres_pool.close_all_pools()
+        logger.info("✅ All connection pools closed")
+
+    except Exception as e:
+        logger.error(f"Error closing connection pools: {e}")
+
+    # TODO: Clean up temporary files
+
+
+# Initialize FastAPI application
+app = FastAPI(
+    title="Unistore Benchmark",
+    description="Performance benchmarking tool for Snowflake and Postgres - 3DMark for databases",
+    version="0.1.0",
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+)
+
+# Configure CORS for local development
+if settings.APP_DEBUG:
+    app.add_middleware(
+        cast(Any, CORSMiddleware),
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    logger.info(f"🔓 CORS enabled for origins: {settings.CORS_ORIGINS}")
+
+# Mount static files
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Initialize Jinja2 templates
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+# Add custom template filters/functions
+templates.env.globals.update(
+    {
+        "app_name": "Unistore Benchmark",
+        "app_version": "0.1.0",
+    }
+)
+
+
+# ============================================================================
+# Health Check & Info Endpoints
+# ============================================================================
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def root(request: Request):
+    """
+    Root endpoint - renders templates page (tests are run from templates).
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = "pages/templates.html" if not is_htmx else "pages/templates.html"
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard(request: Request):
+    """
+    Dashboard page - real-time test metrics and control.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = "pages/dashboard.html" if not is_htmx else "pages/dashboard.html"
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/dashboard/{test_id}", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard_test(request: Request, test_id: str):
+    """
+    Dashboard page for a specific test - real-time test metrics and control.
+    """
+    # For terminal runs, prefer the read-only analysis view which includes the
+    # final (post-processed) metrics. But do NOT redirect prepared/running tests,
+    # since this route is used to start/monitor runs.
+    history_url = f"/dashboard/history/{test_id}"
+    running = await registry.get(test_id)
+    if running is None:
+        return RedirectResponse(url=history_url, status_code=302)
+
+    status = str(getattr(running, "status", "") or "").upper()
+    live_statuses = {"PREPARED", "READY", "PENDING", "RUNNING", "CANCELLING"}
+    if status not in live_statuses:
+        if request.headers.get("HX-Request") == "true":
+            resp = HTMLResponse("")
+            resp.headers["HX-Redirect"] = history_url
+            return resp
+        return RedirectResponse(url=history_url, status_code=302)
+
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = "pages/dashboard.html" if not is_htmx else "pages/dashboard.html"
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx, "test_id": test_id}
+    )
+
+
+@app.get(
+    "/dashboard/history/{test_id}", response_class=HTMLResponse, include_in_schema=False
+)
+async def dashboard_history_test(request: Request, test_id: str):
+    """
+    History dashboard page for a specific test - read-only analysis view.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = (
+        "pages/dashboard_history.html"
+        if not is_htmx
+        else "pages/dashboard_history.html"
+    )
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx, "test_id": test_id}
+    )
+
+
+@app.get(
+    "/dashboard/history/{test_id}/data",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def dashboard_history_data(request: Request, test_id: str):
+    """
+    Drilldown page for persisted per-operation query executions.
+
+    Query params:
+    - kinds: comma-separated QUERY_KIND list (e.g. POINT_LOOKUP,RANGE_SCAN)
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    kinds = request.query_params.get("kinds", "") or ""
+    snowsight_org_account_path = await _get_snowsight_org_account_path()
+    template = (
+        "pages/dashboard_history_data.html"
+        if not is_htmx
+        else "pages/dashboard_history_data.html"
+    )
+    return templates.TemplateResponse(
+        template,
+        {
+            "request": request,
+            "is_htmx": is_htmx,
+            "test_id": test_id,
+            "kinds": kinds,
+            "snowsight_org_account_path": snowsight_org_account_path,
+        },
+    )
+
+
+@app.get("/configure", response_class=HTMLResponse, include_in_schema=False)
+async def configure(request: Request):
+    """
+    Test configuration page - design custom performance tests.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = "pages/configure.html" if not is_htmx else "pages/configure.html"
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/comparison", response_class=HTMLResponse, include_in_schema=False)
+async def comparison(request: Request):
+    """
+    Test comparison page - compare up to 5 test results side-by-side.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = "pages/comparison.html" if not is_htmx else "pages/comparison.html"
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/history", response_class=HTMLResponse, include_in_schema=False)
+async def history(request: Request):
+    """
+    Test history page - browse and manage previous test results.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = "pages/history.html" if not is_htmx else "pages/history.html"
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/templates", response_class=HTMLResponse, include_in_schema=False)
+async def templates_page(request: Request):
+    """
+    Templates page - manage and reuse test configuration templates.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    template = "pages/templates.html" if not is_htmx else "pages/templates.html"
+    return templates.TemplateResponse(
+        template, {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for monitoring and load balancers.
+
+    Returns:
+        dict: Service health status and version information
+    """
+    health_status: dict[str, Any] = {
+        "status": "healthy",
+        "service": "unistore-benchmark",
+        "version": "0.1.0",
+        "environment": "development" if settings.APP_DEBUG else "production",
+        "checks": {},
+    }
+
+    # Check Snowflake connection
+    try:
+        from backend.connectors import snowflake_pool
+
+        sf_pool = snowflake_pool.get_default_pool()
+        stats = await sf_pool.get_pool_stats()
+        health_status["checks"]["snowflake"] = {
+            "status": "healthy" if stats["initialized"] else "not_initialized",
+            "pool": stats,
+        }
+    except Exception as e:
+        health_status["checks"]["snowflake"] = {"status": "unhealthy", "error": str(e)}
+        health_status["status"] = "degraded"
+
+    # Check Postgres connection (if enabled)
+    if settings.ENABLE_POSTGRES:
+        try:
+            from backend.connectors import postgres_pool
+
+            pg_pool = postgres_pool.get_default_pool()
+            stats = await pg_pool.get_pool_stats()
+            is_healthy = await pg_pool.is_healthy()
+            health_status["checks"]["postgres"] = {
+                "status": "healthy" if is_healthy else "unhealthy",
+                "pool": stats,
+            }
+        except Exception as e:
+            health_status["checks"]["postgres"] = {
+                "status": "unhealthy",
+                "error": str(e),
+            }
+
+    return health_status
+
+
+@app.get("/api/info")
+async def api_info():
+    """
+    API information endpoint.
+
+    Returns:
+        dict: Application configuration and capabilities
+    """
+    return {
+        "name": "Unistore Benchmark",
+        "version": "0.1.0",
+        "description": "Performance benchmarking tool for Snowflake and Postgres",
+        "results_warehouse": settings.SNOWFLAKE_WAREHOUSE,
+        "features": {
+            "table_types": ["standard", "hybrid", "interactive", "postgres"],
+            "real_time_metrics": True,
+            "max_comparisons": 5,
+            "websocket_support": True,
+        },
+        "endpoints": {
+            "api_docs": "/api/docs",
+            "health": "/health",
+            "dashboard": "/dashboard",
+            "configure": "/configure",
+            "comparison": "/comparison",
+            "history": "/history",
+        },
+    }
+
+
+# ============================================================================
+# Import API Routes (will be created in next steps)
+# ============================================================================
+
+# Import and include API routers
+from backend.api.routes import tests  # noqa: E402
+from backend.api.routes import templates as templates_router  # noqa: E402
+from backend.api.routes import warehouses  # noqa: E402
+from backend.api.routes import test_results  # noqa: E402
+
+app.include_router(tests.router, prefix="/api/test", tags=["tests"])
+app.include_router(templates_router.router, prefix="/api/templates", tags=["templates"])
+app.include_router(warehouses.router, prefix="/api/warehouses", tags=["warehouses"])
+app.include_router(test_results.router, prefix="/api/tests", tags=["test_results"])
+
+# TODO: Import additional routers as they're created
+# from backend.api.routes import comparison, history
+# app.include_router(comparison.router, prefix="/comparison", tags=["comparison"])
+# app.include_router(history.router, prefix="/history", tags=["history"])
+
+
+# ============================================================================
+# WebSocket endpoint (placeholder)
+# ============================================================================
+
+
+@app.websocket("/ws/test/{test_id}")
+async def websocket_test_metrics(websocket: WebSocket, test_id: str):
+    """
+    WebSocket endpoint for real-time test metrics streaming.
+
+    Args:
+        websocket: WebSocket connection
+        test_id: Unique test identifier
+    """
+    await websocket.accept()
+    logger.info(f"📡 WebSocket connected for test: {test_id}")
+
+    try:
+        q = await registry.subscribe(test_id)
+        try:
+            await websocket.send_json(
+                {
+                    "status": "connected",
+                    "test_id": test_id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+            )
+            while True:
+                # Wait for either a metrics payload OR a websocket disconnect.
+                #
+                # Without this, on reload a websocket can disconnect while we're blocked
+                # on q.get(), and the handler never exits → uvicorn hangs on
+                # "Waiting for background tasks to complete."
+                get_payload = asyncio.create_task(q.get())
+                recv_ws = asyncio.create_task(websocket.receive())
+                done, pending = await asyncio.wait(
+                    {get_payload, recv_ws}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+
+                if recv_ws in done:
+                    msg = recv_ws.result()
+                    if msg.get("type") == "websocket.disconnect":
+                        break
+                    # Ignore any other control frames/messages.
+                    continue
+
+                payload = get_payload.result()
+                if websocket.client_state != WebSocketState.CONNECTED:
+                    break
+                await websocket.send_json(payload)
+        finally:
+            await registry.unsubscribe(test_id, q)
+
+    except WebSocketDisconnect:
+        logger.info(f"📡 WebSocket disconnected for test: {test_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "backend.main:app",
+        host=settings.APP_HOST,
+        port=settings.APP_PORT,
+        reload=settings.APP_RELOAD,
+        log_level=settings.LOG_LEVEL.lower(),
+    )

@@ -1,0 +1,231 @@
+{# Shared latency UI: toggle + KPI cards + detailed tables.
+   Expects Alpine state from dashboard.js:
+   - latencyView: 'end_to_end' | 'sf_execution'
+   - setLatencyView(view)
+   - sfLatencyAvailable()
+   - sfLatencyDisabledReason()
+   - formatMs(value)
+   - currentLatencyMs(pct)   # pct: 95 or 99
+   - detailLatency(fieldName) # e.g. 'read_p95_latency_ms'
+   - latencyViewLabel()
+   - templateInfo, metrics
+#}
+
+<div style="display:flex; justify-content: flex-end; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+    <div style="font-weight: 600;">Latency view:</div>
+    <button
+        type="button"
+        class="btn btn-sm"
+        :class="latencyView === 'sf_execution' ? 'btn-primary' : 'btn-secondary'"
+        @click="setLatencyView('sf_execution')"
+        :disabled="!sfLatencyAvailable()"
+        :title="sfLatencyAvailable() ? 'Server-side SQL execution time (Snowflake QUERY_HISTORY.EXECUTION_TIME). Excludes client/network.' : sfLatencyDisabledReason()"
+    >
+        SQL execution (Snowflake)
+    </button>
+    <button
+        type="button"
+        class="btn btn-sm"
+        :class="latencyView === 'end_to_end' ? 'btn-primary' : 'btn-secondary'"
+        @click="setLatencyView('end_to_end')"
+        title="End-to-end latency measured by the benchmark app (includes client/network/connector + Snowflake + result transfer)."
+    >
+        End-to-end (app)
+    </button>
+    <div
+        x-show="latencyView === 'sf_execution' && !sfLatencyAvailable()"
+        style="color: #6b7280;"
+        :title="sfLatencyDisabledReason()"
+    >
+        Available after processing
+    </div>
+</div>
+
+<div class="metrics-grid">
+    <div class="metric-card">
+        <div class="metric-label">Operations / Second</div>
+        <div class="metric-value" x-text="formatCompact(metrics.ops_per_sec)"></div>
+        <div class="metric-change" x-text="'↑ ' + (metrics.ops_change || 0) + '%'"></div>
+    </div>
+
+    <div class="metric-card success">
+        <div class="metric-label" x-text="'P95 Latency'"></div>
+        <div class="metric-value" x-text="formatMsWithUnit(currentLatencyMs(95))"></div>
+        <div class="metric-change" x-text="latencyViewLabel()"></div>
+    </div>
+
+    <div class="metric-card warning">
+        <div class="metric-label" x-text="'P99 Latency'"></div>
+        <div class="metric-value" x-text="formatMsWithUnit(currentLatencyMs(99))"></div>
+        <div class="metric-change" x-text="latencyViewLabel()"></div>
+    </div>
+
+    <div class="metric-card error">
+        <div class="metric-label">Error Rate</div>
+        <div class="metric-value" x-text="(metrics.error_rate || 0).toFixed(2) + '%'"></div>
+        <div class="metric-change" x-text="metrics.total_errors + ' errors'"></div>
+    </div>
+</div>
+
+<div
+    x-show="latencyView === 'sf_execution' && !sfLatencyAvailable()"
+    class="card"
+    style="margin-top: -1rem;"
+>
+    <div style="color: #6b7280;">
+        SQL execution timings are available after processing completes (they come from
+        <code>INFORMATION_SCHEMA.QUERY_HISTORY</code>).
+    </div>
+</div>
+
+<div class="card" x-show="templateInfo && templateInfo.status === 'COMPLETED'">
+    <div class="card-title">Detailed Latency Breakdown</div>
+    <div style="color: #6b7280; margin-top: -0.25rem;">
+        Values below reflect the selected latency view.
+    </div>
+
+    <div class="metrics-grid" style="margin-top: 1rem;">
+        <div class="metric-card">
+            <div class="metric-label">Read Operations</div>
+            <div class="metric-value" x-text="templateInfo.read_operations || 0"></div>
+            <div class="metric-change" x-text="(templateInfo.reads_per_second || 0).toFixed(2) + ' ops/s'"></div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Write Operations</div>
+            <div class="metric-value" x-text="templateInfo.write_operations || 0"></div>
+            <div class="metric-change" x-text="(templateInfo.writes_per_second || 0).toFixed(2) + ' ops/s'"></div>
+        </div>
+    </div>
+
+    <h4 style="margin-top: 1.5rem; margin-bottom: 0.5rem; font-weight: 600;">Read vs Write Latency</h4>
+    <table style="width: 100%; border-collapse: collapse; margin-top: 0.5rem;">
+        <thead style="background: #f3f4f6;">
+            <tr>
+                <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Type</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P50 (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P95 (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P99 (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Min (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Max (ms)</th>
+                <th x-show="mode === 'history'" style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Data</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Reads</td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_p50_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_p95_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_p99_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_min_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('POINT_LOOKUP,RANGE_SCAN')}` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Writes</td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_p50_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_p95_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_p99_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_min_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('INSERT,UPDATE')}` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h4 style="margin-top: 1.5rem; margin-bottom: 0.5rem; font-weight: 600;">Per-Query-Type Latency</h4>
+    <table style="width: 100%; border-collapse: collapse; margin-top: 0.5rem;">
+        <thead style="background: #f3f4f6;">
+            <tr>
+                <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Query Type</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P50 (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P95 (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P99 (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Min (ms)</th>
+                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Max (ms)</th>
+                <th x-show="mode === 'history'" style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Data</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Point Lookup</td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_p50_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_p95_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_p99_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_min_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('POINT_LOOKUP')}` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Range Scan</td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_p50_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_p95_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_p99_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_min_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('RANGE_SCAN')}` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Insert</td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_p50_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_p95_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_p99_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_min_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('INSERT')}` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 0.5rem; font-weight: 500;">Update</td>
+                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_p50_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_p95_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_p99_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_min_latency_ms'))"></td>
+                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" style="padding: 0.5rem;">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('UPDATE')}` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+
