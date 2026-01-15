@@ -33,6 +33,10 @@ logging.basicConfig(
     ],
 )
 
+# Suppress verbose Snowflake connector internal logging (connection handshake details)
+logging.getLogger("snowflake.connector.connection").setLevel(logging.WARNING)
+logging.getLogger("snowflake.connector.network").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # Snowsight link support (derived from Snowflake session context).
@@ -133,6 +137,7 @@ async def lifespan(app: FastAPI):
         from backend.connectors import snowflake_pool, postgres_pool
 
         logger.info("Closing database connection pools...")
+        await snowflake_pool.close_telemetry_pool()
         await snowflake_pool.close_default_pool()
         await postgres_pool.close_all_pools()
         logger.info("✅ All connection pools closed")
@@ -302,13 +307,14 @@ async def configure(request: Request):
 @app.get("/comparison", response_class=HTMLResponse, include_in_schema=False)
 async def comparison(request: Request):
     """
-    Test comparison page - compare up to 5 test results side-by-side.
+    Deprecated: comparison is now part of /history.
     """
     is_htmx = request.headers.get("HX-Request") == "true"
-    template = "pages/comparison.html" if not is_htmx else "pages/comparison.html"
-    return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx}
-    )
+    if is_htmx:
+        # HTMX doesn't always push the redirected URL the way we want; tell it to
+        # navigate directly to the new location.
+        return HTMLResponse("", headers={"HX-Redirect": "/history"})
+    return RedirectResponse(url="/history", status_code=303)
 
 
 @app.get("/history", response_class=HTMLResponse, include_in_schema=False)
@@ -320,6 +326,36 @@ async def history(request: Request):
     template = "pages/history.html" if not is_htmx else "pages/history.html"
     return templates.TemplateResponse(
         template, {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/history/compare", response_class=HTMLResponse, include_in_schema=False)
+async def history_compare(request: Request):
+    """
+    Deep comparison view for two tests.
+
+    Query params:
+    - ids: comma-separated two TEST_ID values (UUIDs)
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    ids_raw = (request.query_params.get("ids") or "").strip()
+    ids_list = [p.strip() for p in ids_raw.split(",") if p and p.strip()]
+    error = None
+    if len(ids_list) != 2:
+        error = "Provide exactly 2 test ids via ?ids=<id1>,<id2>."
+
+    template = (
+        "pages/history_compare.html" if not is_htmx else "pages/history_compare.html"
+    )
+    return templates.TemplateResponse(
+        template,
+        {
+            "request": request,
+            "is_htmx": is_htmx,
+            "ids_raw": ids_raw,
+            "ids": ids_list,
+            "error": error,
+        },
     )
 
 
@@ -410,7 +446,6 @@ async def api_info():
             "health": "/health",
             "dashboard": "/dashboard",
             "configure": "/configure",
-            "comparison": "/comparison",
             "history": "/history",
         },
     }
@@ -424,11 +459,13 @@ async def api_info():
 from backend.api.routes import tests  # noqa: E402
 from backend.api.routes import templates as templates_router  # noqa: E402
 from backend.api.routes import warehouses  # noqa: E402
+from backend.api.routes import catalog  # noqa: E402
 from backend.api.routes import test_results  # noqa: E402
 
 app.include_router(tests.router, prefix="/api/test", tags=["tests"])
 app.include_router(templates_router.router, prefix="/api/templates", tags=["templates"])
 app.include_router(warehouses.router, prefix="/api/warehouses", tags=["warehouses"])
+app.include_router(catalog.router, prefix="/api/catalog", tags=["catalog"])
 app.include_router(test_results.router, prefix="/api/tests", tags=["test_results"])
 
 # TODO: Import additional routers as they're created

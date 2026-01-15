@@ -14,7 +14,7 @@ Unistore Benchmark is a comprehensive performance testing tool designed to bench
 ### Key Features
 
 - ⚡ **Real-time Dashboard** - Live metrics updates every 1 second via WebSocket
-- 🔧 **Configurable Tests** - Customize indexes, warehouses, queries, and load patterns
+- 🔧 **Configurable Tests** - Select existing tables/views, pick warehouses, and tune workload parameters
 - 📊 **Performance Metrics** - Operations/sec, latency percentiles (p50, p95, p99), throughput
 - 🔄 **Comparison View** - Side-by-side comparison of up to 5 test configurations
 - 📚 **Test Templates** - Pre-built scenarios including R180 POC template
@@ -100,16 +100,19 @@ Navigate to: http://localhost:8000
 1. Click **"New Test"** in the navigation
 2. Select table type (Standard/Hybrid/Interactive/Postgres)
 3. Configure settings:
-   - **Indexes:** Primary keys, secondary indexes, composite indexes
+   - **Table:** Choose an existing database/schema/table (or view) from dropdowns
    - **Warehouse:** Size, multi-cluster, scaling policy
-   - **Test Parameters:** Duration, concurrency, workload type
-   - **Custom Queries:** Optional custom read/write queries
-   - **AI Adjust 4 SQL Statements (Preview):** Click this button to auto-fill the 4 canonical CUSTOM queries (point lookup / range scan / insert / update) to match the selected table schema.
+   - **Test Parameters:** Duration + load mode (fixed workers or auto-scale target)
+  - **Queries, Mix, and Targets:** Templates store all SQL (4 canonical queries) and the per-query mix % + SLO targets (P95/P99 latency + error%).
+     - **Mix preset:** Quickly adjusts weights (does not change SQL)
+     - **Generate SQL for This Table Type:** Auto-fills the 4 canonical queries (point lookup / range scan / insert / update) to match the selected table + backend (Snowflake vs Postgres-family).
      - Preview-only: **no DB writes happen until you save the template**
      - If a usable key/time column can’t be detected, the affected SQL will be blank and its % set to 0 (toast will be yellow with details)
 4. Click **"Start Test"**
 
-After saving a template, you can optionally run **"Prepare AI Workload (Pools + Metadata)"** to persist large value pools for high-concurrency runs (stored in `TEMPLATE_VALUE_POOLS`) and avoid generating values at runtime.
+**Note:** Views are supported for benchmarking, but they are read-only. Use `READ_ONLY` workloads when selecting a view.
+
+After saving a template, you can optionally run **"Prepare AI Workload (Pools + Metadata)"** (or use **"Save & Prepare"**) to persist large value pools for high-concurrency runs (stored in `TEMPLATE_VALUE_POOLS`) and avoid generating values at runtime.
 
 ### Viewing Real-Time Results
 
@@ -161,27 +164,20 @@ unistore_performance_analysis/
 
 ### Table Type Configurations
 
-**Standard Tables:**
-- Clustering keys
-- Time travel
-- Data retention policies
+**Standard & Hybrid (Snowflake):**
+- Select an existing table (or view)
+- The app introspects the object schema at runtime
+- No table/index/clustering DDL is created by the app
 
-**Hybrid Tables:**
-- Primary keys (required)
-- Secondary indexes
-- Foreign key constraints
-- Composite indexes with INCLUDE columns
-
-**Interactive Tables (Preview):**
+**Interactive Tables:**
 - CLUSTER BY requirements
 - Interactive warehouse configuration
 - Cache warming strategies
 - 5-second query timeout handling
 
-**Postgres:**
-- Standard indexes (B-tree, Hash, GIN, GiST)
-- Partitioning strategies
-- Connection pooling
+**Postgres (including Snowflake via Postgres protocol):**
+- Select an existing schema + table/view
+- Database selection is fixed by the configured Postgres connection
 
 ### Postgres Startup Behavior
 

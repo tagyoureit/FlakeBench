@@ -21,7 +21,6 @@ class TableType(str, Enum):
     INTERACTIVE = "interactive"
     POSTGRES = "postgres"
     SNOWFLAKE_POSTGRES = "snowflake_postgres"
-    CRUNCHYDATA = "crunchydata"
 
 
 class IndexType(str, Enum):
@@ -91,15 +90,13 @@ class TableConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_table_requirements(self):
-        """Validate table type-specific requirements."""
-        # Hybrid tables require primary keys
-        if self.table_type == TableType.HYBRID and not self.primary_key:
-            raise ValueError("Hybrid tables require a primary key")
+        """
+        Validate table type-specific requirements.
 
-        # Interactive tables require CLUSTER BY
-        if self.table_type == TableType.INTERACTIVE and not self.cluster_by:
-            raise ValueError("Interactive tables require CLUSTER BY columns")
-
+        NOTE: Table creation is no longer supported by this app. Requirements that were only
+        necessary for DDL (e.g. HYBRID primary key, INTERACTIVE CLUSTER BY) are intentionally
+        *not enforced* here. Runtime operations introspect the existing table schema instead.
+        """
         return self
 
     class Config:
@@ -194,6 +191,64 @@ class TestScenario(BaseModel):
     concurrent_connections: int = Field(
         10, ge=1, le=1000, description="Number of concurrent connections"
     )
+    # Load mode
+    load_mode: str = Field(
+        "CONCURRENCY",
+        description=(
+            "Load mode: CONCURRENCY (fixed workers), QPS (auto-scale workers), "
+            "or FIND_MAX_CONCURRENCY (step-load to find max sustainable concurrency). "
+            "For Snowflake tables, QPS targets Snowflake RUNNING (by QUERY_TAG). "
+            "For Postgres-family templates, QPS targets QPS."
+        ),
+    )
+    target_qps: Optional[float] = Field(
+        None,
+        description=(
+            "Target value when load_mode=QPS. For Snowflake tables: target Snowflake RUNNING "
+            "(concurrent) for the test's QUERY_TAG. For Postgres-family: target QPS."
+        ),
+    )
+    min_concurrency: int = Field(
+        1, ge=1, le=1000, description="Starting/min worker count when load_mode=QPS"
+    )
+
+    # FIND_MAX_CONCURRENCY mode settings
+    start_concurrency: int = Field(
+        5,
+        ge=1,
+        le=100,
+        description="Starting worker count for FIND_MAX_CONCURRENCY mode",
+    )
+    concurrency_increment: int = Field(
+        10,
+        ge=1,
+        le=100,
+        description="Workers to add each step in FIND_MAX_CONCURRENCY mode",
+    )
+    step_duration_seconds: int = Field(
+        30,
+        ge=10,
+        le=300,
+        description="Duration of each step in FIND_MAX_CONCURRENCY mode",
+    )
+    qps_stability_pct: float = Field(
+        5.0,
+        ge=1.0,
+        le=50.0,
+        description="QPS must be within this % of previous step to be stable",
+    )
+    latency_stability_pct: float = Field(
+        20.0,
+        ge=5.0,
+        le=100.0,
+        description="P95 latency can increase up to this % and still be stable",
+    )
+    max_error_rate_pct: float = Field(
+        1.0,
+        ge=0.0,
+        le=100.0,
+        description="Max error rate % before stopping FIND_MAX_CONCURRENCY",
+    )
     operations_per_connection: Optional[int] = Field(
         None, description="Ops per connection (None=unlimited until duration)"
     )
@@ -232,11 +287,6 @@ class TestScenario(BaseModel):
     # Custom queries
     custom_queries: Optional[List[Dict[str, Any]]] = Field(
         None, description="Custom queries with weights and parameters"
-    )
-
-    # Rate limiting
-    target_ops_per_second: Optional[int] = Field(
-        None, description="Target operations per second (None=unlimited)"
     )
 
     # Think time

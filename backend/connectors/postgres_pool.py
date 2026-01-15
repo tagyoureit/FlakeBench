@@ -216,6 +216,106 @@ class PostgresConnectionPool:
         async with self.get_connection() as conn:
             return await conn.fetchval(query, *args, timeout=timeout)
 
+    @staticmethod
+    def _convert_placeholders(query: str) -> str:
+        """
+        Convert `?` placeholders to `$1, $2, ...` for asyncpg.
+
+        Templates use Snowflake-style `?` placeholders; asyncpg requires numbered `$N`.
+        """
+        result = []
+        idx = 0
+        i = 0
+        in_string = False
+        string_char = None
+
+        while i < len(query):
+            ch = query[i]
+
+            # Track string literals to avoid converting ? inside them
+            if ch in ("'", '"') and (i == 0 or query[i - 1] != "\\"):
+                if not in_string:
+                    in_string = True
+                    string_char = ch
+                elif ch == string_char:
+                    in_string = False
+                    string_char = None
+
+            if ch == "?" and not in_string:
+                idx += 1
+                result.append(f"${idx}")
+            else:
+                result.append(ch)
+            i += 1
+
+        return "".join(result)
+
+    async def execute_query_with_info(
+        self,
+        query: str,
+        params: Optional[List[Any]] = None,
+        *,
+        fetch: bool = True,
+        timeout: Optional[float] = None,
+    ) -> tuple[List[tuple], Dict[str, Any]]:
+        """
+        Execute a query and return results + execution info.
+
+        Compatible with SnowflakeConnectionPool.execute_query_with_info for
+        unified CUSTOM workload execution.
+
+        Args:
+            query: SQL query (may use `?` placeholders, will be converted)
+            params: Query parameters as a list
+            fetch: If True, fetch and return results
+            timeout: Optional query timeout
+
+        Returns:
+            (results, info) where info includes:
+              - query_id: None (Postgres doesn't have Snowflake-style query IDs)
+              - rowcount: Number of rows affected (for DML) or returned (for SELECT)
+        """
+        # Convert ? placeholders to $1, $2, ... for asyncpg
+        converted_query = self._convert_placeholders(query)
+
+        async with self.get_connection() as conn:
+            if fetch:
+                # SELECT-style query
+                if params:
+                    rows = await conn.fetch(converted_query, *params, timeout=timeout)
+                else:
+                    rows = await conn.fetch(converted_query, timeout=timeout)
+
+                # Convert asyncpg.Record to tuples for consistency with Snowflake
+                results = [tuple(row.values()) for row in rows]
+                rowcount = len(results)
+            else:
+                # DML query (INSERT, UPDATE, DELETE)
+                if params:
+                    status = await conn.execute(
+                        converted_query, *params, timeout=timeout
+                    )
+                else:
+                    status = await conn.execute(converted_query, timeout=timeout)
+
+                results = []
+                # Parse rowcount from status string (e.g., "INSERT 0 1", "UPDATE 5")
+                rowcount = None
+                if status:
+                    parts = str(status).split()
+                    if len(parts) >= 2:
+                        try:
+                            # Last number is typically the row count
+                            rowcount = int(parts[-1])
+                        except ValueError:
+                            pass
+
+            return results, {
+                "query_id": None,  # Postgres doesn't have Snowflake-style query IDs
+                "rowcount": rowcount,
+                "total_elapsed_time_ms": None,  # Could add timing if needed
+            }
+
     async def execute_many(
         self,
         query: str,
@@ -283,10 +383,12 @@ class PostgresConnectionPool:
             logger.info("Postgres pool closed")
 
 
-# Global connection pool instances
+# Global connection pool instances (legacy - for backward compatibility)
 _default_pool: Optional[PostgresConnectionPool] = None
 _snowflake_postgres_pool: Optional[PostgresConnectionPool] = None
-_crunchydata_pool: Optional[PostgresConnectionPool] = None
+
+# Dynamic pool cache: keyed by (pool_type, database)
+_dynamic_pools: Dict[tuple[str, str], PostgresConnectionPool] = {}
 
 
 def get_default_pool() -> PostgresConnectionPool:
@@ -338,47 +440,133 @@ def get_snowflake_postgres_pool() -> PostgresConnectionPool:
     return _snowflake_postgres_pool
 
 
-def get_crunchydata_pool() -> PostgresConnectionPool:
+def get_postgres_connection_params(pool_type: str = "default") -> dict[str, Any]:
     """
-    Get or create connection pool for CrunchyData.
+    Get connection parameters for Postgres (without database).
+
+    Args:
+        pool_type: "default" for standard Postgres, "snowflake_postgres" for Snowflake Postgres
 
     Returns:
-        PostgresConnectionPool: CrunchyData pool
+        Dict with host, port, user, password (no database)
     """
-    global _crunchydata_pool
+    if pool_type == "snowflake_postgres":
+        return {
+            "host": settings.SNOWFLAKE_POSTGRES_HOST,
+            "port": settings.SNOWFLAKE_POSTGRES_PORT,
+            "user": settings.SNOWFLAKE_POSTGRES_USER,
+            "password": settings.SNOWFLAKE_POSTGRES_PASSWORD,
+        }
+    return {
+        "host": settings.POSTGRES_HOST,
+        "port": settings.POSTGRES_PORT,
+        "user": settings.POSTGRES_USER,
+        "password": settings.POSTGRES_PASSWORD,
+    }
 
-    if _crunchydata_pool is None:
-        if not settings.CRUNCHYDATA_HOST:
-            raise ValueError("CRUNCHYDATA_HOST not configured")
 
-        _crunchydata_pool = PostgresConnectionPool(
-            host=settings.CRUNCHYDATA_HOST,
-            port=settings.CRUNCHYDATA_PORT,
-            database=settings.CRUNCHYDATA_DATABASE,
-            user=settings.CRUNCHYDATA_USER,
-            password=settings.CRUNCHYDATA_PASSWORD,
-            min_size=settings.POSTGRES_POOL_MIN_SIZE,
-            max_size=settings.POSTGRES_POOL_MAX_SIZE,
+def get_pool_for_database(
+    database: str,
+    pool_type: str = "default",
+) -> PostgresConnectionPool:
+    """
+    Get or create a connection pool for a specific database.
+
+    Pools are cached by (pool_type, database) key and created lazily.
+    This enables dynamic database selection from templates without requiring
+    POSTGRES_DATABASE to match.
+
+    Args:
+        database: Database name to connect to
+        pool_type: "default" for standard Postgres, "snowflake_postgres" for Snowflake Postgres
+
+    Returns:
+        PostgresConnectionPool: Pool for the specified database
+    """
+    global _dynamic_pools
+
+    cache_key = (pool_type, database)
+    if cache_key in _dynamic_pools:
+        return _dynamic_pools[cache_key]
+
+    params = get_postgres_connection_params(pool_type)
+    pool = PostgresConnectionPool(
+        host=params["host"],
+        port=params["port"],
+        database=database,
+        user=params["user"],
+        password=params["password"],
+        min_size=settings.POSTGRES_POOL_MIN_SIZE,
+        max_size=settings.POSTGRES_POOL_MAX_SIZE,
+    )
+
+    _dynamic_pools[cache_key] = pool
+    logger.info(f"Created dynamic pool for {pool_type}/{database}")
+    return pool
+
+
+async def fetch_from_database(
+    database: str,
+    query: str,
+    *args,
+    pool_type: str = "default",
+    timeout: float = 30.0,
+) -> List[asyncpg.Record]:
+    """
+    Execute a query against a specific database using an ad-hoc connection.
+
+    This is used for catalog operations (listing databases, schemas, tables)
+    where we need to connect to a user-selected database rather than the
+    pre-configured pool database.
+
+    Args:
+        database: Database name to connect to
+        query: SQL query to execute
+        *args: Query parameters
+        pool_type: "default" for standard Postgres, "snowflake_postgres" for Snowflake Postgres
+        timeout: Query timeout in seconds
+
+    Returns:
+        List of records
+    """
+    params = get_postgres_connection_params(pool_type)
+    conn = None
+    try:
+        conn = await asyncpg.connect(
+            host=params["host"],
+            port=params["port"],
+            database=database,
+            user=params["user"],
+            password=params["password"],
+            timeout=timeout,
         )
-
-    return _crunchydata_pool
+        return await conn.fetch(query, *args, timeout=timeout)
+    finally:
+        if conn:
+            await conn.close()
 
 
 async def close_all_pools():
-    """Close all Postgres connection pools."""
-    global _default_pool, _snowflake_postgres_pool, _crunchydata_pool
+    """Close all Postgres connection pools (legacy and dynamic)."""
+    global _default_pool, _snowflake_postgres_pool, _dynamic_pools
 
-    pools = [
+    # Close legacy pools
+    legacy_pools = [
         ("default", _default_pool),
         ("snowflake_postgres", _snowflake_postgres_pool),
-        ("crunchydata", _crunchydata_pool),
     ]
 
-    for name, pool in pools:
+    for name, pool in legacy_pools:
         if pool is not None:
             logger.info(f"Closing {name} pool...")
             await pool.close()
 
     _default_pool = None
     _snowflake_postgres_pool = None
-    _crunchydata_pool = None
+
+    # Close dynamic pools
+    for (pool_type, database), pool in list(_dynamic_pools.items()):
+        logger.info(f"Closing dynamic pool {pool_type}/{database}...")
+        await pool.close()
+
+    _dynamic_pools = {}

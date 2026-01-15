@@ -211,7 +211,7 @@ class MetricsCollector:
                     list(self._delete_latencies)
                 )
 
-            # Calculate current ops/sec (since last snapshot)
+            # Calculate current QPS (since last snapshot)
             if self._last_snapshot_time:
                 time_delta = (
                     self.metrics.timestamp - self._last_snapshot_time
@@ -219,20 +219,15 @@ class MetricsCollector:
 
                 if time_delta > 0:
                     ops_delta = self.metrics.total_operations - self._last_snapshot_ops
-                    self.metrics.current_ops_per_second = ops_delta / time_delta
+                    self.metrics.current_qps = ops_delta / time_delta
 
                     # Update peak
-                    if (
-                        self.metrics.current_ops_per_second
-                        > self.metrics.peak_ops_per_second
-                    ):
-                        self.metrics.peak_ops_per_second = (
-                            self.metrics.current_ops_per_second
-                        )
+                    if self.metrics.current_qps > self.metrics.peak_qps:
+                        self.metrics.peak_qps = self.metrics.current_qps
 
-            # Calculate average ops/sec
+            # Calculate average QPS
             if self.metrics.elapsed_seconds > 0:
-                self.metrics.avg_ops_per_second = (
+                self.metrics.avg_qps = (
                     self.metrics.total_operations / self.metrics.elapsed_seconds
                 )
 
@@ -373,9 +368,9 @@ class MetricsCollector:
             "success_rate": self.metrics.success_rate,
             "error_rate": self.metrics.error_rate,
             "elapsed_seconds": self.metrics.elapsed_seconds,
-            "avg_ops_per_second": self.metrics.avg_ops_per_second,
-            "peak_ops_per_second": self.metrics.peak_ops_per_second,
-            "current_ops_per_second": self.metrics.current_ops_per_second,
+            "avg_qps": self.metrics.avg_qps,
+            "peak_qps": self.metrics.peak_qps,
+            "current_qps": self.metrics.current_qps,
             "overall_latency": self.metrics.overall_latency.to_dict(),
             "read_operations": self.metrics.read_metrics.count,
             "write_operations": self.metrics.write_metrics.count,

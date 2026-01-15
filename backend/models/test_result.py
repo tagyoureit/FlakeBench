@@ -82,7 +82,7 @@ class TestResult(BaseModel):
     failed_operations: int = Field(0, description="Failed operations")
 
     # Performance metrics
-    operations_per_second: float = Field(0.0, description="Average ops/sec")
+    qps: float = Field(0.0, description="Average QPS")
     reads_per_second: float = Field(0.0, description="Reads/sec")
     writes_per_second: float = Field(0.0, description="Writes/sec")
 

@@ -1,0 +1,161 @@
+{% if is_htmx %}
+{% extends "partials/content_only.html" %}
+{% else %}
+{% extends "base.html" %}
+{% endif %}
+
+{% block title %}Deep Compare - Unistore Benchmark{% endblock %}
+
+{% block content %}
+<div x-data="compareDetail()" data-test-ids="{{ (ids or []) | join(',') }}">
+    <div class="card">
+        <div class="card-title">Deep Compare</div>
+        <p>Compare two benchmark runs with overlaid charts (primary in color, secondary in gray).</p>
+        <div class="btn-group mt-4">
+            <a
+                class="btn btn-secondary"
+                href="/history"
+                hx-get="/history"
+                hx-target="#main-content"
+                hx-swap="innerHTML"
+                hx-push-url="true"
+            >
+                Back to History
+            </a>
+        </div>
+    </div>
+
+    {% if error %}
+    <div class="card">
+        <div class="alert alert-error">
+            <strong>Invalid compare request.</strong>
+            <span>{{ error }}</span>
+        </div>
+    </div>
+    {% endif %}
+
+    <div x-show="error" class="card">
+        <div class="alert alert-error">
+            <strong>Failed to load compare data.</strong>
+            <span x-text="error"></span>
+        </div>
+    </div>
+
+    <div x-show="loading" class="card text-center py-8">
+        {% include "components/loading_spinner.html" %}
+        <p class="mt-2">Loading comparison...</p>
+    </div>
+
+    <div x-show="!loading && !error && ready">
+        <div class="dashboard-top-grid">
+            <div class="card" x-show="testA">
+                <div class="card-title" style="margin-bottom: 0.25rem;">
+                    <span style="display: inline-block; font-size: 0.75rem; font-weight: 700; color: #1d4ed8; margin-right: 0.5rem;">PRIMARY</span>
+                    <span x-text="testA ? (testA.template_name || testA.test_name || '') : ''"></span>
+                </div>
+                <div class="text-sm text-gray-600">
+                    <div>
+                        <strong>Table:</strong>
+                        <span x-text="testA ? (testA.table_full_name || testA.table_name || '') : ''"></span>
+                        (<span x-text="testA ? (testA.table_type || '') : ''"></span>)
+                    </div>
+                    <div class="mt-1" x-show="testA && !['POSTGRES', 'SNOWFLAKE_POSTGRES'].includes((testA.table_type || '').toUpperCase())">
+                        <strong>Warehouse:</strong>
+                        <span x-text="testA ? (testA.warehouse || '') : ''"></span>
+                        (<span x-text="testA ? (testA.warehouse_size || '') : ''"></span>)
+                    </div>
+                    <div class="mt-1" x-show="testA && ['POSTGRES', 'SNOWFLAKE_POSTGRES'].includes((testA.table_type || '').toUpperCase())">
+                        <strong>Database:</strong>
+                        <span>Postgres</span>
+                    </div>
+                    <div class="mt-1">
+                        <strong>Concurrency:</strong>
+                        <span x-text="testA ? (testA.concurrent_connections ?? '') : ''"></span>
+                        • <strong>Duration:</strong>
+                        <span x-text="testA && testA.duration_seconds != null ? Number(testA.duration_seconds).toFixed(0) : ''"></span>s
+                    </div>
+                    <div class="mt-1">
+                        <strong>QPS:</strong>
+                        <span x-text="testA ? Number(testA.qps || 0).toFixed(0) : ''"></span>
+                        • <strong>P95:</strong>
+                        <span x-text="testA ? Number(testA.p95_latency_ms || 0).toFixed(2) : ''"></span> ms
+                    </div>
+                </div>
+                <div style="margin-top: 0.75rem;">
+                    <a class="btn btn-primary btn-sm" :href="testA ? `/dashboard/history/${testA.test_id}` : '/history'">
+                        Open History Dashboard
+                    </a>
+                </div>
+            </div>
+
+            <div class="card" x-show="testB">
+                <div class="card-title" style="margin-bottom: 0.25rem;">
+                    <span style="display: inline-block; font-size: 0.75rem; font-weight: 700; color: #6b7280; margin-right: 0.5rem;">SECONDARY</span>
+                    <span x-text="testB ? (testB.template_name || testB.test_name || '') : ''"></span>
+                </div>
+                <div class="text-sm text-gray-600">
+                    <div>
+                        <strong>Table:</strong>
+                        <span x-text="testB ? (testB.table_full_name || testB.table_name || '') : ''"></span>
+                        (<span x-text="testB ? (testB.table_type || '') : ''"></span>)
+                    </div>
+                    <div class="mt-1" x-show="testB && !['POSTGRES', 'SNOWFLAKE_POSTGRES'].includes((testB.table_type || '').toUpperCase())">
+                        <strong>Warehouse:</strong>
+                        <span x-text="testB ? (testB.warehouse || '') : ''"></span>
+                        (<span x-text="testB ? (testB.warehouse_size || '') : ''"></span>)
+                    </div>
+                    <div class="mt-1" x-show="testB && ['POSTGRES', 'SNOWFLAKE_POSTGRES'].includes((testB.table_type || '').toUpperCase())">
+                        <strong>Database:</strong>
+                        <span>Postgres</span>
+                    </div>
+                    <div class="mt-1">
+                        <strong>Concurrency:</strong>
+                        <span x-text="testB ? (testB.concurrent_connections ?? '') : ''"></span>
+                        • <strong>Duration:</strong>
+                        <span x-text="testB && testB.duration_seconds != null ? Number(testB.duration_seconds).toFixed(0) : ''"></span>s
+                    </div>
+                    <div class="mt-1">
+                        <strong>QPS:</strong>
+                        <span x-text="testB ? Number(testB.qps || 0).toFixed(0) : ''"></span>
+                        • <strong>P95:</strong>
+                        <span x-text="testB ? Number(testB.p95_latency_ms || 0).toFixed(2) : ''"></span> ms
+                    </div>
+                </div>
+                <div style="margin-top: 0.75rem;">
+                    <a class="btn btn-secondary btn-sm" :href="testB ? `/dashboard/history/${testB.test_id}` : '/history'">
+                        Open History Dashboard
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Throughput (QPS)</div>
+            <div class="chart-container">
+                <canvas id="compareThroughputChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Latency (ms)</div>
+            <div style="color: #6b7280; margin-top: -0.25rem;">
+                P50/P95/P99 over elapsed time. Primary uses color; secondary uses gray variants.
+            </div>
+            <div class="chart-container" style="margin-top: 1rem;">
+                <canvas id="compareLatencyChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Snowflake Concurrency (Running)</div>
+            <div style="color: #6b7280; margin-top: -0.25rem;">
+                Derived from <code>METRICS_SNAPSHOTS.CUSTOM_METRICS</code> (best-effort; may be 0 for older runs or Postgres tests).
+            </div>
+            <div class="chart-container" style="margin-top: 1rem;">
+                <canvas id="compareConcurrencyChart"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+

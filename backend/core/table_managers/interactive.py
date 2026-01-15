@@ -1,7 +1,7 @@
 """
 Interactive Table Manager (Placeholder)
 
-Manages Snowflake interactive tables (preview feature).
+Manages Snowflake interactive tables.
 """
 
 import logging

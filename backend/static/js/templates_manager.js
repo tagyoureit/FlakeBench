@@ -3,11 +3,74 @@ function templatesManager() {
     templates: [],
     filteredTemplates: [],
     searchQuery: "",
+    viewMode: "table", // 'table' | 'cards'
     loading: true,
     error: null,
 
     async init() {
+      this.initViewMode();
       await this.loadTemplates();
+    },
+
+    initViewMode() {
+      try {
+        const raw = localStorage.getItem("templatesViewMode");
+        const mode = String(raw || "").toLowerCase();
+        if (mode === "cards" || mode === "table") {
+          this.viewMode = mode;
+        }
+      } catch {
+        // Ignore localStorage access issues (private mode, etc.)
+      }
+    },
+
+    setViewMode(mode) {
+      const v = String(mode || "").toLowerCase();
+      if (v !== "cards" && v !== "table") {
+        return;
+      }
+      this.viewMode = v;
+      try {
+        localStorage.setItem("templatesViewMode", v);
+      } catch {
+        // ignore
+      }
+    },
+
+    tableTypeKey(template) {
+      return String(template?.config?.table_type || "").trim().toUpperCase();
+    },
+
+    tableTypeLabel(template) {
+      const t = this.tableTypeKey(template);
+      if (t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES") return "POSTGRES";
+      if (t === "HYBRID") return "HYBRID";
+      if (t === "STANDARD") return "STANDARD";
+      if (t === "INTERACTIVE") return "INTERACTIVE";
+      return t || "";
+    },
+
+    tableTypeIconSrc(template) {
+      const t = this.tableTypeKey(template);
+      if (t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES") {
+        return "/static/img/postgres_elephant.svg";
+      }
+      if (t === "HYBRID") {
+        return "/static/img/table_hybrid.svg";
+      }
+      if (t === "STANDARD") {
+        return "/static/img/table_standard.svg";
+      }
+      // INTERACTIVE: blank for now (per Russ request)
+      return "";
+    },
+
+    tableFqn(template) {
+      const db = String(template?.config?.database || "").trim();
+      const sch = String(template?.config?.schema || "").trim();
+      const tbl = String(template?.config?.table_name || "").trim();
+      const parts = [db, sch, tbl].filter(Boolean);
+      return parts.join(".");
     },
 
     async loadTemplates() {
@@ -46,7 +109,9 @@ function templatesManager() {
         (t) =>
           t.template_name.toLowerCase().includes(query) ||
           (t.description && t.description.toLowerCase().includes(query)) ||
-          (this.deriveWorkloadLabel(t.config).toLowerCase().includes(query)),
+          (this.deriveWorkloadLabel(t.config).toLowerCase().includes(query)) ||
+          (this.tableFqn(t).toLowerCase().includes(query)) ||
+          (this.tableTypeLabel(t).toLowerCase().includes(query)),
       );
     },
 
@@ -75,8 +140,7 @@ function templatesManager() {
       const tableType = String(template?.config?.table_type || "").toUpperCase();
       const isPostgres =
         tableType === "POSTGRES" ||
-        tableType === "SNOWFLAKE_POSTGRES" ||
-        tableType === "CRUNCHYDATA";
+        tableType === "SNOWFLAKE_POSTGRES";
 
       // For Snowflake-executed templates, enforce that the execution warehouse
       // isn't the same as the results warehouse (`SNOWFLAKE_WAREHOUSE`).

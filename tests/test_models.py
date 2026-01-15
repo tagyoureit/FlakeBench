@@ -39,7 +39,6 @@ def test_table_config():
         standard_table = TableConfig(
             name="test_standard",
             table_type=TableType.STANDARD,
-            clustering_keys=["date", "customer_id"],
             columns={
                 "id": "NUMBER",
                 "date": "DATE",
@@ -50,15 +49,10 @@ def test_table_config():
         )
         print(f"✅ Standard table created: {standard_table.name}")
 
-        # Hybrid table (requires primary key)
+        # Hybrid table (existing table; primary key is not required by the app)
         hybrid_table = TableConfig(
             name="test_hybrid",
             table_type=TableType.HYBRID,
-            primary_key=["id"],
-            indexes=[
-                {"name": "idx_customer", "columns": ["customer_id"]},
-                {"name": "idx_date", "columns": ["date"], "type": "btree"},
-            ],
             columns={
                 "id": "NUMBER",
                 "customer_id": "VARCHAR",
@@ -84,17 +78,17 @@ def test_table_config():
         )
         print(f"✅ Interactive table created: {interactive_table.name}")
 
-        # Test validation (hybrid without PK should fail)
+        # Hybrid without PK should still validate (table creation is disabled)
         try:
             TableConfig(
                 name="bad_hybrid",
                 table_type=TableType.HYBRID,
                 columns={"id": "NUMBER"},
             )
-            print("❌ Should have failed: hybrid table without PK")
-            return False
+            print("✅ Hybrid config without PK validated (expected)")
         except ValueError as e:
-            print(f"✅ Validation works: {e}")
+            print(f"❌ Unexpected validation error: {e}")
+            return False
 
         return True
 
@@ -260,7 +254,7 @@ def test_test_result():
             total_operations=12000,
             read_operations=9600,
             write_operations=2400,
-            operations_per_second=99.6,
+            qps=99.6,
             avg_latency_ms=15.2,
             p95_latency_ms=45.3,
             p99_latency_ms=78.9,
@@ -272,7 +266,7 @@ def test_test_result():
         print(f"   Test ID: {result.test_id}")
         print(f"   Status: {result.status}")
         print(f"   Operations: {result.total_operations}")
-        print(f"   Ops/sec: {result.operations_per_second:.2f}")
+        print(f"   QPS: {result.qps:.2f}")
         print(f"   P95 latency: {result.p95_latency_ms:.2f}ms")
 
         # Test JSON serialization
@@ -313,7 +307,7 @@ def test_test_run():
             status=TestStatus.COMPLETED,
             start_time=datetime.now(),
             concurrent_connections=50,
-            operations_per_second=120.5,
+            qps=120.5,
         )
 
         result2 = TestResult(
@@ -324,7 +318,7 @@ def test_test_run():
             status=TestStatus.COMPLETED,
             start_time=datetime.now(),
             concurrent_connections=50,
-            operations_per_second=145.8,
+            qps=145.8,
         )
 
         run.add_test_result(result1)
@@ -357,9 +351,9 @@ def test_metrics():
             total_operations=3050,
             successful_operations=3048,
             failed_operations=2,
-            current_ops_per_second=102.3,
-            avg_ops_per_second=100.0,
-            peak_ops_per_second=125.6,
+            current_qps=102.3,
+            avg_qps=100.0,
+            peak_qps=125.6,
             active_connections=50,
             idle_connections=5,
         )
@@ -376,7 +370,7 @@ def test_metrics():
 
         print("✅ Metrics created")
         print(f"   Operations: {metrics.total_operations}")
-        print(f"   Ops/sec: {metrics.current_ops_per_second:.2f}")
+        print(f"   QPS: {metrics.current_qps:.2f}")
         print(f"   P95 latency: {metrics.overall_latency.p95:.2f}ms")
         print(f"   Success rate: {metrics.success_rate:.4f}")
 

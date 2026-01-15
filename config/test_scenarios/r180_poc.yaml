@@ -12,6 +12,8 @@ category: "POC"
 # ============================================================================
 
 # Multi-table scenario
+# NOTE: Table creation is disabled. All tables/views referenced below must already exist.
+# The schema/index/clustering sections are informational only and are ignored at runtime.
 tables:
   # Raw events table - landing zone
   - name: "sape_events_raw"

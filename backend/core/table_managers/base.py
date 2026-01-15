@@ -5,7 +5,7 @@ Abstract interface for table management across different table types.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from typing import Any
 import logging
 
 from backend.models.test_config import TableConfig
@@ -32,54 +32,13 @@ class TableManager(ABC):
         self.table_name = config.name
         self.database = config.database
         self.schema_name = config.schema_name
-        self._created = False
-        self._stats: Dict[str, Any] = {}
+        # Tracks whether the target is a TABLE or VIEW (set during schema validation).
+        # "TABLE" / "VIEW" / None
+        self.object_type: str | None = None
+        self._stats: dict[str, Any] = {}
 
     @abstractmethod
-    async def create_table(self) -> bool:
-        """
-        Create the table with specified configuration.
-
-        Returns:
-            bool: True if successful
-        """
-        pass
-
-    @abstractmethod
-    async def drop_table(self) -> bool:
-        """
-        Drop the table if it exists.
-
-        Returns:
-            bool: True if successful
-        """
-        pass
-
-    @abstractmethod
-    async def truncate_table(self) -> bool:
-        """
-        Truncate the table (remove all data).
-
-        Returns:
-            bool: True if successful
-        """
-        pass
-
-    @abstractmethod
-    async def populate_data(self, row_count: int) -> bool:
-        """
-        Populate table with initial test data.
-
-        Args:
-            row_count: Number of rows to insert
-
-        Returns:
-            bool: True if successful
-        """
-        pass
-
-    @abstractmethod
-    async def get_table_stats(self) -> Dict[str, Any]:
+    async def get_table_stats(self) -> dict[str, Any]:
         """
         Get table statistics (row count, size, etc.).
 
@@ -110,7 +69,7 @@ class TableManager(ABC):
 
     async def setup(self) -> bool:
         """
-        Complete table setup (create + populate).
+        Complete table setup.
 
         Returns:
             bool: True if successful
@@ -118,29 +77,15 @@ class TableManager(ABC):
         try:
             logger.info(f"Setting up table: {self.table_name}")
 
-            # Create if missing (non-destructive default).
-            # If the table already exists, we validate and reuse it.
             exists = await self.table_exists()
             if not exists:
-                if not await self.create_table():
-                    logger.error(f"Failed to create table: {self.table_name}")
-                    return False
-                self._created = True
-            else:
-                logger.info(
-                    f"Table {self.table_name} already exists, reusing (no drop)."
+                logger.error(
+                    "Table creation is disabled. Missing table/view: %s",
+                    self.get_full_table_name(),
                 )
-                self._created = False
+                return False
 
-            # Populate data if needed
-            if not exists and self.config.initial_row_count > 0:
-                logger.info(
-                    f"Populating {self.table_name} with "
-                    f"{self.config.initial_row_count} rows"
-                )
-                if not await self.populate_data(self.config.initial_row_count):
-                    logger.error(f"Failed to populate table: {self.table_name}")
-                    return False
+            logger.info("Using existing table/view: %s", self.get_full_table_name())
 
             # Validate
             if not await self.validate_schema():
@@ -159,20 +104,14 @@ class TableManager(ABC):
 
     async def teardown(self) -> bool:
         """
-        Clean up table (drop).
+        Teardown is a no-op.
+
+        Table creation is disabled, so we never drop/modify customer objects.
 
         Returns:
             bool: True if successful
         """
-        try:
-            if self._created:
-                logger.info(f"Tearing down table: {self.table_name}")
-                await self.drop_table()
-                self._created = False
-            return True
-        except Exception as e:
-            logger.error(f"Error tearing down table {self.table_name}: {e}")
-            return False
+        return True
 
     def get_full_table_name(self) -> str:
         """
@@ -189,24 +128,7 @@ class TableManager(ABC):
         parts.append(self.table_name)
         return ".".join(parts)
 
-    def get_column_definitions(self) -> List[str]:
-        """
-        Get column definitions as SQL strings.
-
-        Returns:
-            List of "column_name type" strings
-        """
-        return [
-            f"{col_name} {col_type}"
-            for col_name, col_type in self.config.columns.items()
-        ]
-
     @property
-    def is_created(self) -> bool:
-        """Check if table has been created."""
-        return self._created
-
-    @property
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         """Get current table statistics."""
         return self._stats

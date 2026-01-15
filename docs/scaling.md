@@ -55,11 +55,26 @@ Example:
 
 This avoids client-side queueing while still allowing Snowflake/warehouse-side queueing (which is what you want to observe when the warehouse is undersized).
 
+## Find Max Concurrency (step-load) mode: live dashboard metrics
+
+When `load_mode=FIND_MAX_CONCURRENCY`, the benchmark runs a step-load controller that increases (or backs off) the worker count to find the maximum sustainable concurrency.
+
+The dashboard surfaces additional live controller metrics:
+
+- **Established P95 baseline**: step 1’s p95 latency (used as a baseline target)
+- **Current P95**: rolling end-to-end p95 latency for the current step
+- **% difference**: delta vs the baseline
+- **P95 max threshold**: baseline + \(2 \times\) `latency_stability_pct` (matches the controller’s baseline drift guardrail)
+- **Workers current → next**: current step target and the next planned target, with a countdown to the end-of-step decision
+- **Conclusion reason**: plain-text reason for why the controller stopped/completed (persisted to results)
+
 ## Next steps (if you want the app to orchestrate multi-node runs)
 
 If you want the UI to start/stop multiple worker nodes and aggregate their metrics in one dashboard run, we should add:
 - a worker process mode (no web UI) that accepts a test payload and runs it
 - an orchestration layer (local multi-process or remote multi-node)
 - metrics aggregation (sum ops, merge latency distributions)
+
+
 
 

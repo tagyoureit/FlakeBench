@@ -24,15 +24,35 @@
                     <span x-text="templateInfo ? (templateInfo.table_full_name || '') : ''"></span>
                     (<span x-text="templateInfo ? (templateInfo.table_type || '') : ''"></span>)
                 </div>
-                <div class="mt-1">
+                <div class="mt-1" x-show="!isPostgresTable()">
                     <strong>Warehouse:</strong>
-                    <span x-text="templateInfo ? (templateInfo.warehouse || 'default') : 'default'"></span>
-                    <span x-show="templateInfo && templateInfo.warehouse_size">(<span x-text="templateInfo ? (templateInfo.warehouse_size || '') : ''"></span>)</span>
+                    <span x-text="warehouseDisplay()"></span>
+                </div>
+                <div class="mt-1" x-show="isPostgresTable()">
+                    <strong>Database:</strong>
+                    <span>Postgres</span>
+                </div>
+                <div class="mt-1" x-show="isPostgresTable() && postgresPoolDisplay()">
+                    <strong>Postgres:</strong>
+                    <span x-text="postgresPoolDisplay()"></span>
+                </div>
+                <div class="mt-1" x-show="isPostgresTable() && postgresConnectionsDisplay()">
+                    <strong>Postgres:</strong>
+                    <span x-text="postgresConnectionsDisplay()"></span>
                 </div>
                 <div class="mt-1">
                     <strong>Workload:</strong>
-                    <span x-text="templateInfo ? (templateInfo.workload_type || '') : ''"></span>
-                    • <strong>Concurrency:</strong> <span x-text="templateInfo ? (templateInfo.concurrent_connections ?? '') : ''"></span>
+                    <span x-text="workloadDisplay()"></span>
+                    <span x-show="String(templateInfo?.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
+                        • <strong>Workers:</strong> <span x-text="templateInfo ? (templateInfo.concurrent_connections ?? '') : ''"></span>
+                    </span>
+                    <span x-show="String(templateInfo?.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
+                        • <strong>Target:</strong>
+                        <span x-text="templateInfo ? (templateInfo.qps_target_mode === 'SF_RUNNING' ? 'Snowflake Running' : 'QPS') : ''"></span>
+                        = <span x-text="templateInfo ? (templateInfo.target_qps ?? '') : ''"></span>
+                        • <strong>Workers:</strong>
+                        <span x-text="templateInfo ? ((templateInfo.min_concurrency ?? '') + '-' + (templateInfo.concurrent_connections ?? '')) : ''"></span>
+                    </span>
                     • <strong>Duration:</strong> <span x-text="templateInfo ? (templateInfo.duration_seconds ?? '') : ''"></span>s
                 </div>
             </div>
@@ -41,7 +61,8 @@
         <div class="card">
             <div class="card-title">Test Control Panel</div>
 
-            <div class="btn-group">
+            <div class="btn-group" style="justify-content: space-between; align-items: center;">
+                <div style="display: flex; gap: 1rem;">
                 <button
                     class="btn btn-success"
                     :disabled="(status || '').toUpperCase() !== 'PREPARED' && (status || '').toUpperCase() !== 'READY'"
@@ -55,9 +76,10 @@
                     @click="stopTest()">
                     Stop
                 </button>
+                </div>
                 <button
                     class="btn btn-primary"
-                    :disabled="!testId || !status || ['PREPARED','READY'].includes((status || '').toUpperCase())"
+                    x-show="isFinalMetricsReady()"
                     @click="openRunAnalysis()">
                     Open run analysis
                 </button>
@@ -66,23 +88,57 @@
             <div x-show="testRunning">
                 <div class="form-group">
                     <label class="form-label">Test Progress</label>
-                    <div class="progress-bar">
-                        <div class="progress-bar-fill" :style="`width: ${progress}%`"></div>
+                    
+                    <!-- Phase Pipeline -->
+                    <div class="phase-pipeline">
+                        <template x-for="(phaseName, idx) in phaseNames()" :key="phaseName">
+                            <div class="phase-item">
+                                <span 
+                                    class="phase-badge"
+                                    :class="phaseBadgeClassNew(phaseName)"
+                                >
+                                    <!-- Spinner for active untimed phases -->
+                                    <span 
+                                        class="phase-spinner"
+                                        x-show="phaseState(phaseName) === 'active' && (phaseName === 'PREPARING' || phaseName === 'PROCESSING')"
+                                    ></span>
+                                    <!-- Checkmark for completed phases -->
+                                    <span 
+                                        class="phase-checkmark"
+                                        x-show="phaseState(phaseName) === 'completed'"
+                                    >✓</span>
+                                    <span x-text="completedPhaseDisplayName(phaseName)"></span>
+                                </span>
+                                <!-- Arrow between phases (not after last) -->
+                                <span 
+                                    class="phase-arrow"
+                                    :class="{ 'phase-arrow--active': idx < currentPhaseIndex() }"
+                                    x-show="idx < phaseNames().length - 1"
+                                >→</span>
+                            </div>
+                        </template>
                     </div>
-                    <div class="progress-meta">
-                        <small x-text="`${elapsed}s / ${duration}s`"></small>
-                        <span
-                            class="status-badge"
-                            x-show="phaseLabel()"
-                            :class="phaseBadgeClass()"
-                            x-text="phaseLabel()"
-                        ></span>
+
+                    <!-- Phase Progress Bar (only for timed phases: WARMUP, RUNNING) -->
+                    <div class="phase-progress-section" x-show="isTimedPhase()">
+                        <div class="phase-progress-label" x-text="currentPhaseDisplayName()"></div>
+                        <div class="phase-progress-bar">
+                            <div 
+                                class="phase-progress-bar-fill"
+                                :class="phaseProgressBarClass()"
+                                :style="`width: ${phaseProgressPercent()}%`"
+                            ></div>
+                        </div>
+                        <div class="phase-progress-timing">
+                            <span x-text="phaseTimingLabel()"></span>
+                        </div>
                     </div>
-                    <small
-                        class="progress-phase-details"
-                        x-show="phaseTimingText()"
-                        x-text="phaseTimingText()"
-                    ></small>
+
+                    <!-- Total Time Counter -->
+                    <div class="total-time-display">
+                        <span class="total-time-label">Total Time:</span>
+                        <span class="total-time-value" x-text="`${Math.floor(elapsed)}s`"></span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -94,6 +150,55 @@
         <div class="card-title">Real-Time Metrics</div>
         <div class="chart-container">
             <canvas id="throughputChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Concurrent Queries</div>
+        <div class="chart-container">
+            <canvas id="concurrencyChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card" x-show="!['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())">
+        <div style="display:flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+            <div class="card-title" style="margin-bottom: 0;">Snowflake Running Queries (Server)</div>
+            <div style="display:flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <div style="font-weight: 600;">Breakdown:</div>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="sfRunningBreakdown === 'read_write' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setSfRunningBreakdown('read_write')"
+                >
+                    Read / Write
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="sfRunningBreakdown === 'by_kind' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setSfRunningBreakdown('by_kind')"
+                >
+                    Point / Range / Insert / Update
+                </button>
+            </div>
+        </div>
+        <div style="color: #6b7280; margin-top: 0.5rem;">
+            Sampled every ~5 seconds from <code>INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE</code> filtered by per-test <code>QUERY_TAG</code>.
+            "Total" is the sum of benchmark statements (best-effort). If kind tagging is unavailable for a run, the chart falls back to Snowflake's per-test Running total.
+        </div>
+        <div class="chart-container" style="margin-top: 0.75rem;">
+            <canvas id="sfRunningChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card" x-show="!['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())">
+        <div class="card-title">MCW Active Clusters (real-time)</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Sampled every ~5 seconds from <code>SHOW WAREHOUSES</code>. Shows started clusters (MCW nodes).
+        </div>
+        <div class="chart-container" style="margin-top: 0.75rem;">
+            <canvas id="mcwLiveChart"></canvas>
         </div>
     </div>
     

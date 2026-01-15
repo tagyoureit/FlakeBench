@@ -119,7 +119,7 @@ async def test_throughput_calculation() -> None:
 
     assert metrics.total_operations == 100
     assert metrics.elapsed_seconds > 0
-    assert metrics.avg_ops_per_second > 0
+    assert metrics.avg_qps > 0
     assert metrics.rows_per_second > 0
     assert metrics.bytes_per_second > 0
 

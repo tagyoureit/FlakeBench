@@ -37,7 +37,6 @@ def create_table_manager(config: TableConfig) -> TableManager:
     elif table_type in (
         TableType.POSTGRES,
         TableType.SNOWFLAKE_POSTGRES,
-        TableType.CRUNCHYDATA,
     ):
         return PostgresTableManager(config)
     else:

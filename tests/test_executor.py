@@ -37,7 +37,6 @@ def test_executor_creation():
                 "date": "DATE",
                 "value": "VARCHAR(100)",
             },
-            clustering_keys=["date"],
         )
 
         warehouse = WarehouseConfig(
@@ -163,14 +162,12 @@ def test_multi_table_scenario():
             name="events",
             table_type=TableType.STANDARD,
             columns={"id": "NUMBER", "date": "DATE", "type": "VARCHAR"},
-            clustering_keys=["date"],
         )
 
         # Hybrid table
         hybrid = TableConfig(
             name="users",
             table_type=TableType.HYBRID,
-            primary_key=["id"],
             columns={"id": "NUMBER", "email": "VARCHAR", "created": "DATE"},
         )
 
@@ -217,7 +214,7 @@ def test_rate_limiting():
             duration_seconds=5,
             concurrent_connections=5,
             workload_type=WorkloadType.READ_ONLY,
-            target_ops_per_second=100,
+            target_qps=100,
             think_time_ms=50,
             table_configs=[table],
         )
@@ -225,7 +222,7 @@ def test_rate_limiting():
         TestExecutor(scenario)
 
         print("✅ Rate-limited executor created")
-        print(f"   Target: {scenario.target_ops_per_second} ops/sec")
+        print(f"   Target: {scenario.target_qps} QPS")
         print(f"   Think time: {scenario.think_time_ms}ms")
 
         # With operation limit

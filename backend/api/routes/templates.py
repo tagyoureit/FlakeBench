@@ -6,6 +6,7 @@ Manages templates stored in Snowflake TEST_TEMPLATES table.
 
 from datetime import UTC, datetime
 import logging
+import math
 import re
 from uuid import uuid4
 from typing import List, Dict, Any, Optional
@@ -14,7 +15,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from backend.config import settings
-from backend.connectors import snowflake_pool
+from backend.connectors import postgres_pool, snowflake_pool
 from backend.api.error_handling import http_exception
 from backend.core.table_profiler import profile_snowflake_table
 
@@ -36,19 +37,31 @@ _CUSTOM_PCT_FIELDS: tuple[str, str, str, str] = (
     "custom_update_pct",
 )
 
-# Canonical SQL templates for saved CUSTOM workloads. These are intentionally generic:
-# execution substitutes `{table}` with the fully-qualified table name.
-_DEFAULT_CUSTOM_QUERIES: dict[str, str] = {
+# Canonical SQL templates for saved CUSTOM workloads.
+#
+# These are intentionally generic starting points (phantom table) and are stored per-template.
+# Execution substitutes `{table}` with the fully-qualified table name.
+#
+# IMPORTANT: Postgres templates must store Postgres SQL; Snowflake templates must store Snowflake SQL.
+# Note: Range scan uses BETWEEN without LIMIT - the offset (100) constrains row count,
+# avoiding LIMIT-based early termination optimization which can skew benchmark results.
+_DEFAULT_CUSTOM_QUERIES_SNOWFLAKE: dict[str, str] = {
     "custom_point_lookup_query": "SELECT * FROM {table} WHERE id = ?",
-    "custom_range_scan_query": (
-        "SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100"
-    ),
+    "custom_range_scan_query": ("SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100"),
     "custom_insert_query": (
         "INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)"
     ),
     "custom_update_query": (
         "UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?"
     ),
+}
+
+_DEFAULT_CUSTOM_QUERIES_POSTGRES: dict[str, str] = {
+    "custom_point_lookup_query": "SELECT * FROM {table} WHERE id = $1",
+    "custom_range_scan_query": "SELECT * FROM {table} WHERE id BETWEEN $1 AND $2 LIMIT 100",
+    # Prefer fully parameterized inserts/updates so executors can generate values.
+    "custom_insert_query": "INSERT INTO {table} (id, data, timestamp) VALUES ($1, $2, $3)",
+    "custom_update_query": "UPDATE {table} SET data = $1, timestamp = $2 WHERE id = $3",
 }
 
 _PRESET_PCTS: dict[str, dict[str, int]] = {
@@ -117,6 +130,42 @@ def _quote_ident(name: str) -> str:
     return f'"{name}"'
 
 
+def _is_postgres_family_table_type(table_type_raw: Any) -> bool:
+    """
+    True when the template targets a Postgres-family backend:
+    - POSTGRES (standalone)
+    - SNOWFLAKE_POSTGRES (Snowflake Postgres protocol)
+    """
+    t = _upper_str(table_type_raw)
+    return t in {"POSTGRES", "SNOWFLAKE_POSTGRES"}
+
+
+def _pg_quote_ident(name: str) -> str:
+    """
+    Quote a Postgres identifier defensively.
+
+    Postgres does not support binding identifiers, so we must ensure safe quoting when we
+    build introspection/sample queries against customer objects.
+    """
+    s = str(name or "")
+    return '"' + s.replace('"', '""') + '"'
+
+
+def _pg_qualified_name(schema: str, table: str) -> str:
+    sch = str(schema or "").strip()
+    tbl = str(table or "").strip()
+    if not sch or not tbl:
+        raise ValueError("schema and table_name are required")
+    return f"{_pg_quote_ident(sch)}.{_pg_quote_ident(tbl)}"
+
+
+def _pg_placeholders(n: int, *, start: int = 1) -> str:
+    if int(n) <= 0:
+        return ""
+    s = int(start)
+    return ", ".join(f"${i}" for i in range(s, s + int(n)))
+
+
 def _full_table_name(database: str, schema: str, table: str) -> str:
     db = _validate_ident(database, label="database")
     sch = _validate_ident(schema, label="schema")
@@ -160,38 +209,168 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
                 f"{sorted([*list(_PRESET_PCTS.keys()), 'CUSTOM'])})"
             )
         out["workload_type"] = "CUSTOM"
-        out.update(_DEFAULT_CUSTOM_QUERIES)
-        out.update(_PRESET_PCTS[wt])
-        return out
-
-    # CUSTOM: normalize and validate.
-    out["workload_type"] = "CUSTOM"
-
-    # Normalize query strings.
-    for k in _CUSTOM_QUERY_FIELDS:
-        out[k] = str(out.get(k) or "").strip()
-
-    # Normalize pct fields.
-    for k in _CUSTOM_PCT_FIELDS:
-        out[k] = _coerce_int(out.get(k) or 0, label=k)
-        if out[k] < 0 or out[k] > 100:
-            raise ValueError(f"{k} must be between 0 and 100 (got {out[k]})")
-
-    total = sum(int(out[k]) for k in _CUSTOM_PCT_FIELDS)
-    if total != 100:
-        raise ValueError(
-            f"Custom query percentages must sum to 100 (currently {total})."
+        # Templates persist SQL per-backend (Snowflake vs Postgres-family).
+        defaults = (
+            _DEFAULT_CUSTOM_QUERIES_POSTGRES
+            if _is_postgres_family_table_type(out.get("table_type"))
+            else _DEFAULT_CUSTOM_QUERIES_SNOWFLAKE
         )
+        out.update(defaults)
+        out.update(_PRESET_PCTS[wt])
+    else:
+        # CUSTOM: normalize and validate.
+        out["workload_type"] = "CUSTOM"
 
-    required_pairs = [
-        ("custom_point_lookup_pct", "custom_point_lookup_query"),
-        ("custom_range_scan_pct", "custom_range_scan_query"),
-        ("custom_insert_pct", "custom_insert_query"),
-        ("custom_update_pct", "custom_update_query"),
-    ]
-    for pct_k, sql_k in required_pairs:
-        if int(out.get(pct_k) or 0) > 0 and not str(out.get(sql_k) or "").strip():
-            raise ValueError(f"{sql_k} is required when {pct_k} > 0")
+        # Normalize query strings.
+        for k in _CUSTOM_QUERY_FIELDS:
+            out[k] = str(out.get(k) or "").strip()
+
+        # Normalize pct fields.
+        for k in _CUSTOM_PCT_FIELDS:
+            out[k] = _coerce_int(out.get(k) or 0, label=k)
+            if out[k] < 0 or out[k] > 100:
+                raise ValueError(f"{k} must be between 0 and 100 (got {out[k]})")
+
+        total = sum(int(out[k]) for k in _CUSTOM_PCT_FIELDS)
+        if total != 100:
+            raise ValueError(
+                f"Custom query percentages must sum to 100 (currently {total})."
+            )
+
+        required_pairs = [
+            ("custom_point_lookup_pct", "custom_point_lookup_query"),
+            ("custom_range_scan_pct", "custom_range_scan_query"),
+            ("custom_insert_pct", "custom_insert_query"),
+            ("custom_update_pct", "custom_update_query"),
+        ]
+        for pct_k, sql_k in required_pairs:
+            if int(out.get(pct_k) or 0) > 0 and not str(out.get(sql_k) or "").strip():
+                raise ValueError(f"{sql_k} is required when {pct_k} > 0")
+
+    # Targets (SLOs): required for any query kind that has weight > 0.
+    def _coerce_num(v: Any, *, label: str) -> float:
+        if v is None:
+            return -1.0
+        if isinstance(v, bool):
+            return float(v)
+        s = str(v).strip()
+        if not s:
+            return -1.0
+        try:
+            n = float(s)
+        except Exception as e:
+            raise ValueError(f"Invalid {label}: {v!r}") from e
+        if not math.isfinite(n):
+            return -1.0
+        return float(n)
+
+    target_fields = {
+        "POINT_LOOKUP": (
+            "custom_point_lookup_pct",
+            "target_point_lookup_p95_latency_ms",
+            "target_point_lookup_p99_latency_ms",
+            "target_point_lookup_error_rate_pct",
+        ),
+        "RANGE_SCAN": (
+            "custom_range_scan_pct",
+            "target_range_scan_p95_latency_ms",
+            "target_range_scan_p99_latency_ms",
+            "target_range_scan_error_rate_pct",
+        ),
+        "INSERT": (
+            "custom_insert_pct",
+            "target_insert_p95_latency_ms",
+            "target_insert_p99_latency_ms",
+            "target_insert_error_rate_pct",
+        ),
+        "UPDATE": (
+            "custom_update_pct",
+            "target_update_p95_latency_ms",
+            "target_update_p99_latency_ms",
+            "target_update_error_rate_pct",
+        ),
+    }
+
+    for _pct_k, p95_k, p99_k, err_k in target_fields.values():
+        # Default all target fields to -1 (disabled), even if pct is 0, so templates
+        # have stable keys and a single sentinel for "disabled".
+        p95 = _coerce_num(out.get(p95_k), label=p95_k)
+        p99 = _coerce_num(out.get(p99_k), label=p99_k)
+        err = _coerce_num(out.get(err_k), label=err_k)
+
+        # Latency target: -1 disabled, else must be > 0.
+        if p95 < 0:
+            out[p95_k] = -1.0
+        elif p95 == 0:
+            raise ValueError(f"{p95_k} must be > 0 or -1 to disable")
+        else:
+            out[p95_k] = float(p95)
+
+        # Latency target: -1 disabled, else must be > 0.
+        if p99 < 0:
+            out[p99_k] = -1.0
+        elif p99 == 0:
+            raise ValueError(f"{p99_k} must be > 0 or -1 to disable")
+        else:
+            out[p99_k] = float(p99)
+
+        # Error target: -1 disabled, else must be within [0, 100].
+        if err < 0:
+            out[err_k] = -1.0
+        else:
+            if err > 100:
+                raise ValueError(f"{err_k} must be between 0 and 100 (got {err})")
+            out[err_k] = float(err)
+
+        # Targets are optional (default -1). When enabled, validate ranges above.
+
+    # Load mode: fixed concurrency vs auto-scale (QPS).
+    # - Snowflake tables: QPS targets Snowflake RUNNING (by QUERY_TAG)
+    # - Postgres-family templates: QPS targets QPS
+    load_mode_raw = str(out.get("load_mode") or "CONCURRENCY").strip()
+    load_mode = load_mode_raw.upper() if load_mode_raw else "CONCURRENCY"
+    if load_mode not in {"CONCURRENCY", "QPS", "FIND_MAX_CONCURRENCY"}:
+        raise ValueError("load_mode must be CONCURRENCY, QPS, or FIND_MAX_CONCURRENCY")
+    out["load_mode"] = load_mode
+
+    if load_mode == "QPS":
+        try:
+            target_qps = float(out.get("target_qps") or 0)
+        except Exception as e:
+            raise ValueError(f"Invalid target_qps: {out.get('target_qps')!r}") from e
+        if not math.isfinite(target_qps) or target_qps <= 0:
+            raise ValueError("target_qps must be > 0 when load_mode=QPS")
+        out["target_qps"] = float(target_qps)
+
+        min_concurrency = _coerce_int(
+            out.get("min_concurrency") or 1, label="min_concurrency"
+        )
+        if min_concurrency < 1:
+            raise ValueError("min_concurrency must be >= 1")
+        # In QPS mode, concurrent_connections represents the MAX worker cap.
+        # Allow -1 to mean "no user cap" (still bounded at runtime by engine caps).
+        raw_max = out.get("concurrent_connections")
+        if raw_max is None or (isinstance(raw_max, str) and not raw_max.strip()):
+            raw_max = -1
+        max_concurrency = _coerce_int(raw_max, label="concurrent_connections")
+        if max_concurrency != -1 and max_concurrency < 1:
+            raise ValueError(
+                "concurrent_connections must be >= 1 or -1 (no user cap) in QPS mode"
+            )
+        if max_concurrency != -1 and min_concurrency > max_concurrency:
+            raise ValueError(
+                "min_concurrency must be <= concurrent_connections (or set concurrent_connections=-1)"
+            )
+        out["min_concurrency"] = int(min_concurrency)
+        out["concurrent_connections"] = int(max_concurrency)
+    else:
+        # Keep keys stable but default to "disabled" values.
+        out["target_qps"] = (
+            out.get("target_qps") if out.get("target_qps") is not None else None
+        )
+        out["min_concurrency"] = _coerce_int(
+            out.get("min_concurrency") or 1, label="min_concurrency"
+        )
 
     return out
 
@@ -359,6 +538,562 @@ async def list_templates():
         raise http_exception("list templates", e)
 
 
+async def _ai_adjust_sql_postgres(sf_pool, cfg: dict[str, Any]) -> AiAdjustSqlResponse:
+    """
+    AI SQL adjustment for Postgres-family templates.
+
+    This endpoint introspects the *actual* Postgres table to choose key/time columns and
+    safe insert/update columns.
+    """
+    import json
+
+    # Connection target (Postgres-family):
+    # - database: Postgres database name (case-sensitive at connect time)
+    # - schema/table_name: used for metadata queries and sample reads
+    db = str(cfg.get("database") or "").strip()
+    schema = str(cfg.get("schema") or "").strip()
+    table = str(cfg.get("table_name") or "").strip()
+    if not db:
+        raise ValueError("database is required (select an existing Postgres database)")
+    if not schema:
+        raise ValueError("schema is required (select an existing Postgres schema)")
+    if not table:
+        raise ValueError(
+            "table_name is required (select an existing Postgres table/view)"
+        )
+
+    table_type = _upper_str(cfg.get("table_type") or "")
+    pool_type = (
+        "snowflake_postgres" if table_type == "SNOWFLAKE_POSTGRES" else "default"
+    )
+    pg_pool = postgres_pool.get_pool_for_database(db, pool_type=pool_type)
+    full_name = _pg_qualified_name(schema, table)
+
+    concurrency = int(cfg.get("concurrent_connections") or 1)
+    concurrency = max(1, concurrency)
+
+    # ------------------------------------------------------------------
+    # 1) Cortex availability check (fast, via Snowflake pool)
+    # ------------------------------------------------------------------
+    ai_available = False
+    ai_error: str | None = None
+    try:
+        await sf_pool.execute_query("SELECT AI_COMPLETE('claude-4-sonnet', 'test')")
+        ai_available = True
+    except Exception as e:
+        ai_available = False
+        ai_error = str(e)
+
+    # ------------------------------------------------------------------
+    # 2) Introspect columns from information_schema (Postgres)
+    # ------------------------------------------------------------------
+    desc_rows = await pg_pool.fetch_all(
+        """
+        SELECT
+          column_name,
+          data_type,
+          udt_name,
+          is_nullable,
+          column_default
+        FROM information_schema.columns
+        WHERE table_schema = $1
+          AND table_name = $2
+        ORDER BY ordinal_position
+        """,
+        schema,
+        table,
+    )
+    if not desc_rows:
+        raise ValueError(f"No columns found for {schema}.{table}")
+
+    col_types: dict[str, str] = {}
+    col_null_ok: dict[str, bool] = {}
+    col_default: dict[str, str] = {}
+    col_orig: dict[str, str] = {}
+    for row in desc_rows:
+        name_raw = str(row.get("column_name") or "").strip()
+        if not name_raw:
+            continue
+        name_u = name_raw.upper()
+        typ_raw = str(row.get("data_type") or row.get("udt_name") or "").strip()
+        typ_u = typ_raw.upper()
+        col_types[name_u] = typ_u
+        col_orig[name_u] = name_raw
+        null_raw = str(row.get("is_nullable") or "").strip().upper()
+        col_null_ok[name_u] = null_raw != "NO"
+        col_default[name_u] = str(row.get("column_default") or "").strip()
+
+    def _is_key_or_id_like(col: str) -> bool:
+        c = str(col or "").strip().upper()
+        if not c:
+            return False
+        return c == "ID" or c.endswith("ID") or c.endswith("KEY")
+
+    def _is_numeric_type(typ: str) -> bool:
+        t = str(typ or "").upper()
+        return any(
+            x in t
+            for x in (
+                "INT",
+                "BIGINT",
+                "SMALLINT",
+                "NUMERIC",
+                "DECIMAL",
+                "REAL",
+                "DOUBLE",
+                "FLOAT",
+                "SERIAL",
+            )
+        )
+
+    def _is_time_type(typ: str) -> bool:
+        t = str(typ or "").upper()
+        return any(x in t for x in ("TIMESTAMP", "DATE", "TIME"))
+
+    # Pick key/time columns (heuristic but based on actual schema)
+    key_col: str | None = None
+    time_col: str | None = None
+
+    if "ID" in col_types and _is_numeric_type(col_types.get("ID", "")):
+        key_col = "ID"
+    else:
+        for c in col_types.keys():
+            if _is_key_or_id_like(c) and _is_numeric_type(col_types.get(c, "")):
+                key_col = c
+                break
+        if key_col is None:
+            for c in col_types.keys():
+                if c.endswith("_ID") and _is_numeric_type(col_types.get(c, "")):
+                    key_col = c
+                    break
+        if key_col is None:
+            for c in col_types.keys():
+                if c.endswith("_KEY") and _is_numeric_type(col_types.get(c, "")):
+                    key_col = c
+                    break
+
+    preferred_time = [
+        "TIMESTAMP",
+        "CREATED_AT",
+        "UPDATED_AT",
+        "EVENT_TIME",
+        "CREATED",
+        "UPDATED",
+        "DATE",
+    ]
+    for c in preferred_time:
+        if c in col_types and _is_time_type(col_types.get(c, "")):
+            time_col = c
+            break
+    if time_col is None:
+        for c, typ in col_types.items():
+            if _is_time_type(typ):
+                time_col = c
+                break
+
+    def _pick_update_column() -> str | None:
+        if not key_col:
+            return None
+        preferred = ["UPDATED_AT", "STATUS", "STATE", "UPDATED", "MODIFIED_AT"]
+        for c in preferred:
+            if c in col_types and (not _is_key_or_id_like(c)) and c != key_col:
+                return c
+        for c in col_types.keys():
+            if c != key_col and not _is_key_or_id_like(c):
+                return c
+        return None
+
+    update_col = _pick_update_column()
+    if update_col and (_is_key_or_id_like(update_col) or update_col == key_col):
+        update_col = None
+
+    issues: list[str] = []
+    range_mode: str | None = None
+
+    def _has_default(col: str) -> bool:
+        d = (col_default.get(col) or "").strip()
+        return bool(d and d.upper() not in {"NULL", "NONE"})
+
+    required_cols: list[str] = []
+    for c in col_types.keys():
+        if not col_null_ok.get(c, True) and not _has_default(c):
+            required_cols.append(c)
+    if len(required_cols) > 8:
+        issues.append(
+            f"Table has {len(required_cols)} required columns; INSERT may need manual adjustment."
+        )
+
+    insert_cols: list[str] = []
+    for c in required_cols[:8]:
+        insert_cols.append(c)
+    if key_col and key_col not in insert_cols:
+        insert_cols.append(key_col)
+    if time_col and time_col not in insert_cols:
+        insert_cols.append(time_col)
+    for c, typ in col_types.items():
+        if c in insert_cols:
+            continue
+        if any(x in typ for x in ("CHAR", "VARCHAR", "TEXT")):
+            insert_cols.append(c)
+        if len(insert_cols) >= 6:
+            break
+    if not insert_cols:
+        insert_cols = list(col_types.keys())[:3]
+
+    # Optional: ask Cortex (Snowflake AI_COMPLETE) to refine based on schema + sample rows.
+    ai_summary_from_model: str | None = None
+    if ai_available:
+        try:
+            sample_cols: list[str] = []
+            if key_col:
+                sample_cols.append(key_col)
+            if time_col and time_col not in sample_cols:
+                sample_cols.append(time_col)
+            for c in col_types.keys():
+                if c in sample_cols:
+                    continue
+                if len(sample_cols) >= 12:
+                    break
+                sample_cols.append(c)
+
+            select_list = ", ".join(
+                _pg_quote_ident(col_orig.get(c, c)) for c in sample_cols
+            )
+            sample_rows = await pg_pool.fetch_all(
+                f"SELECT {select_list} FROM {full_name} LIMIT 20"
+            )
+            sample_payload = [dict(r) for r in sample_rows]
+
+            cols_for_prompt = [
+                {"name": c, "type": col_types.get(c, "")}
+                for c in list(col_types.keys())[:250]
+            ]
+
+            prompt = (
+                "You are adjusting a 4-statement benchmark workload for a Postgres table.\n"
+                "Your output will be shown to the user.\n\n"
+                f"POSTGRES_DATABASE: {db}\n"
+                f"SCHEMA: {schema}\n"
+                f"TABLE: {table}\n"
+                f"KEY_COLUMN (may be null): {key_col or None}\n"
+                f"TIME_COLUMN (may be null): {time_col or None}\n\n"
+                "COLUMNS (name/type):\n"
+                f"{json.dumps(cols_for_prompt, ensure_ascii=False)}\n\n"
+                "REQUIRED_COLUMNS (must be included in insert_columns if feasible):\n"
+                f"{json.dumps(required_cols, ensure_ascii=False)}\n\n"
+                "SAMPLE_ROWS (JSON objects):\n"
+                f"{json.dumps(sample_payload, ensure_ascii=False, default=str)}\n\n"
+                "Return STRICT JSON ONLY with:\n"
+                "- summary: string (1-2 sentences describing what you changed)\n"
+                "- insert_columns: [string] (columns to include in INSERT placeholders)\n"
+                "- update_columns: [string] (columns to include in UPDATE set clause)\n"
+                '- range_mode: one of ["TIME_CUTOFF","ID_BETWEEN",null]\n'
+                "- issues: [string] (empty if all OK)\n"
+                "\n"
+                "Rules:\n"
+                "- If KEY_COLUMN is null: update_columns must be empty.\n"
+                "- update_columns must NOT include any columns ending with ID or KEY.\n"
+                "- If TIME_COLUMN is null and KEY_COLUMN is null: range_mode must be null.\n"
+                "- Prefer TIME_CUTOFF if TIME_COLUMN exists; otherwise ID_BETWEEN if KEY_COLUMN exists.\n"
+                "- Keep insert_columns <= 8 and update_columns <= 2.\n"
+            )
+
+            ai_resp = await sf_pool.execute_query(
+                "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?), response_format => PARSE_JSON(?)) AS RESP",
+                params=[
+                    "claude-4-sonnet",
+                    prompt,
+                    json.dumps({"temperature": 0, "max_tokens": 600}),
+                    json.dumps(
+                        {
+                            "type": "json",
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "summary": {"type": "string"},
+                                    "insert_columns": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "update_columns": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "range_mode": {
+                                        "type": ["string", "null"],
+                                    },
+                                    "issues": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": [
+                                    "summary",
+                                    "insert_columns",
+                                    "update_columns",
+                                    "range_mode",
+                                    "issues",
+                                ],
+                            },
+                        }
+                    ),
+                ],
+            )
+
+            raw = ai_resp[0][0] if ai_resp and ai_resp[0] else None
+            parsed: dict[str, Any] | None = None
+            if isinstance(raw, dict):
+                parsed = raw
+            elif isinstance(raw, str) and raw.strip():
+                parsed = json.loads(raw)
+
+            if isinstance(parsed, dict):
+                ai_summary_from_model = str(parsed.get("summary") or "").strip() or None
+                ai_issues = parsed.get("issues")
+                if isinstance(ai_issues, list):
+                    issues.extend(str(x) for x in ai_issues if str(x).strip())
+
+                def _sanitize_cols(value: Any) -> list[str]:
+                    if not isinstance(value, list):
+                        return []
+                    out: list[str] = []
+                    for v in value:
+                        s = str(v or "").strip().upper()
+                        if not s:
+                            continue
+                        if s in col_types:
+                            out.append(s)
+                    # de-dupe, preserve order
+                    seen: set[str] = set()
+                    deduped: list[str] = []
+                    for c in out:
+                        if c in seen:
+                            continue
+                        seen.add(c)
+                        deduped.append(c)
+                    return deduped
+
+                ai_ins = _sanitize_cols(parsed.get("insert_columns"))[:8]
+                if ai_ins:
+                    insert_cols = ai_ins
+
+                ai_upd = _sanitize_cols(parsed.get("update_columns"))[:2]
+                if key_col and ai_upd:
+                    upd_filtered = [
+                        c
+                        for c in ai_upd
+                        if (not _is_key_or_id_like(c)) and c != key_col
+                    ]
+                    if upd_filtered:
+                        update_col = upd_filtered[0]
+
+                rm = parsed.get("range_mode")
+                if rm in ("TIME_CUTOFF", "ID_BETWEEN"):
+                    range_mode = str(rm)
+        except Exception as e:
+            logger.debug("AI planning failed in /ai/adjust-sql (postgres): %s", e)
+
+    # ------------------------------------------------------------------
+    # 3) Build Postgres SQL templates
+    # ------------------------------------------------------------------
+    select_list = "*"
+    point_sql = ""
+    update_sql = ""
+
+    key_expr = _pg_quote_ident(col_orig.get(key_col, key_col)) if key_col else ""
+    time_expr = _pg_quote_ident(col_orig.get(time_col, time_col)) if time_col else ""
+    update_expr = (
+        _pg_quote_ident(col_orig.get(update_col, update_col)) if update_col else ""
+    )
+
+    if key_col:
+        point_sql = f"SELECT {select_list} FROM {{table}} WHERE {key_expr} = $1"
+        if update_col:
+            update_sql = (
+                f"UPDATE {{table}} SET {update_expr} = $1 WHERE {key_expr} = $2"
+            )
+
+    range_sql = ""
+    if range_mode == "ID_BETWEEN":
+        if key_col:
+            range_sql = (
+                f"SELECT {select_list} FROM {{table}} WHERE {key_expr} BETWEEN $1 AND $2 "
+                f"ORDER BY {key_expr} LIMIT 100"
+            )
+        else:
+            range_mode = None
+    elif time_col:
+        range_sql = (
+            f"SELECT {select_list} FROM {{table}} WHERE {time_expr} >= $1 "
+            f"ORDER BY {time_expr} DESC LIMIT 100"
+        )
+        range_mode = "TIME_CUTOFF"
+    elif key_col:
+        range_sql = (
+            f"SELECT {select_list} FROM {{table}} WHERE {key_expr} BETWEEN $1 AND $2 "
+            f"ORDER BY {key_expr} LIMIT 100"
+        )
+        range_mode = "ID_BETWEEN"
+
+    insert_sql = ""
+    if insert_cols:
+        cols_sql = ", ".join(_pg_quote_ident(col_orig.get(c, c)) for c in insert_cols)
+        ph_sql = _pg_placeholders(len(insert_cols), start=1)
+        insert_sql = f"INSERT INTO {{table}} ({cols_sql}) VALUES ({ph_sql})"
+
+    # Percentages: keep the user's mix by default.
+    p_point = int(cfg.get("custom_point_lookup_pct") or 0)
+    p_range = int(cfg.get("custom_range_scan_pct") or 0)
+    p_ins = int(cfg.get("custom_insert_pct") or 0)
+    p_upd = int(cfg.get("custom_update_pct") or 0)
+
+    # Only adjust mix if we cannot generate SQL for an operation that currently has weight > 0.
+    disabled: list[tuple[str, str]] = []
+    if p_point > 0 and not point_sql:
+        disabled.append(
+            ("POINT_LOOKUP", "No usable key column detected; POINT_LOOKUP disabled.")
+        )
+    if p_range > 0 and not range_sql:
+        disabled.append(
+            ("RANGE_SCAN", "No usable time/key column detected; RANGE_SCAN disabled.")
+        )
+    if p_ins > 0 and not insert_sql:
+        disabled.append(
+            ("INSERT", "No usable insert columns detected; INSERT disabled.")
+        )
+    if p_upd > 0 and not update_sql:
+        disabled.append(
+            ("UPDATE", "No usable update/key column detected; UPDATE disabled.")
+        )
+
+    if disabled:
+        for _, msg in disabled:
+            issues.append(msg)
+
+        removed = 0
+        if any(k == "POINT_LOOKUP" for k, _ in disabled):
+            removed += p_point
+            p_point = 0
+        if any(k == "RANGE_SCAN" for k, _ in disabled):
+            removed += p_range
+            p_range = 0
+        if any(k == "INSERT" for k, _ in disabled):
+            removed += p_ins
+            p_ins = 0
+        if any(k == "UPDATE" for k, _ in disabled):
+            removed += p_upd
+            p_upd = 0
+
+        remaining = [
+            ("POINT_LOOKUP", p_point),
+            ("RANGE_SCAN", p_range),
+            ("INSERT", p_ins),
+            ("UPDATE", p_upd),
+        ]
+        remaining_total = sum(v for _, v in remaining if v > 0)
+        if remaining_total > 0 and removed > 0:
+            # Redistribute proportionally across remaining non-zero operations.
+            alloc: dict[str, int] = {}
+            used = 0
+            for kind, v in remaining:
+                if v <= 0:
+                    continue
+                add = int((removed * v) // remaining_total)
+                if add > 0:
+                    alloc[kind] = add
+                    used += add
+            leftover = max(0, removed - used)
+            # Deterministic leftover distribution: highest current weight first.
+            order = [
+                k
+                for k, v in sorted(remaining, key=lambda kv: int(kv[1]), reverse=True)
+                if v > 0
+            ]
+            i = 0
+            while leftover > 0 and order:
+                alloc[order[i % len(order)]] = (
+                    int(alloc.get(order[i % len(order)], 0)) + 1
+                )
+                leftover -= 1
+                i += 1
+
+            p_point += int(alloc.get("POINT_LOOKUP", 0))
+            p_range += int(alloc.get("RANGE_SCAN", 0))
+            p_ins += int(alloc.get("INSERT", 0))
+            p_upd += int(alloc.get("UPDATE", 0))
+        elif removed > 0:
+            # Nothing left with weight; fall back to any supported query kind.
+            fallback_kind = None
+            if range_sql:
+                fallback_kind = "RANGE_SCAN"
+            elif insert_sql:
+                fallback_kind = "INSERT"
+            elif point_sql:
+                fallback_kind = "POINT_LOOKUP"
+            elif update_sql:
+                fallback_kind = "UPDATE"
+            if fallback_kind:
+                p_point = 100 if fallback_kind == "POINT_LOOKUP" else 0
+                p_range = 100 if fallback_kind == "RANGE_SCAN" else 0
+                p_ins = 100 if fallback_kind == "INSERT" else 0
+                p_upd = 100 if fallback_kind == "UPDATE" else 0
+                issues.append(
+                    f"All configured operations were unsupported; falling back to {fallback_kind}=100%."
+                )
+
+        # Guardrail: keep sum at 100; assign rounding drift to INSERT.
+        total = p_point + p_range + p_ins + p_upd
+        if total != 100:
+            p_ins += 100 - total
+
+    # Toast only when unexpected (mix had to change due to missing SQL).
+    toast_level = "warning" if issues else "success"
+    ai_summary = ai_summary_from_model or ""
+    if not ai_summary:
+        ai_summary = "Generated workload SQL."
+    if issues:
+        ai_summary = ai_summary + " Issues: " + " ".join(issues)
+
+    cols_map: dict[str, str] = {}
+    for c in {
+        *(insert_cols or []),
+        *([key_col] if key_col else []),
+        *([time_col] if time_col else []),
+    }:
+        if not c:
+            continue
+        cols_map[str(c).upper()] = col_types.get(str(c).upper(), "VARCHAR")
+
+    ai_workload = {
+        "available": ai_available,
+        "model": "claude-4-sonnet",
+        "availability_error": ai_error,
+        "key_column": key_col,
+        "time_column": time_col,
+        "range_mode": range_mode,
+        "insert_columns": insert_cols,
+        "update_columns": [update_col] if update_col else [],
+        "postgres_database": db,
+        "postgres_schema": schema,
+        "postgres_table": table,
+    }
+
+    return AiAdjustSqlResponse(
+        custom_point_lookup_query=point_sql,
+        custom_range_scan_query=range_sql,
+        custom_insert_query=insert_sql,
+        custom_update_query=update_sql,
+        custom_point_lookup_pct=p_point,
+        custom_range_scan_pct=p_range,
+        custom_insert_pct=p_ins,
+        custom_update_pct=p_upd,
+        columns=cols_map,
+        ai_workload=ai_workload,
+        toast_level=toast_level,
+        summary=ai_summary,
+    )
+
+
 @router.post("/ai/adjust-sql", response_model=AiAdjustSqlResponse)
 async def ai_adjust_sql(req: AiAdjustSqlRequest):
     """
@@ -366,22 +1101,37 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
 
     Contract:
     - Does NOT write anything to Snowflake results tables.
-    - Returns updated custom_*_query strings and percentages for the client to apply.
-    - If a required key/time column is missing, the affected SQL is blank and its % is 0
-      (and the remaining % is redistributed to keep the total at 100).
-    - Returns a toast summary (success=green, warning=yellow).
+    - Generates SQL for the canonical 4-query CUSTOM workload.
+    - Preserves the user's mix % by default.
+    - Only if an operation's SQL cannot be generated *and it currently has weight > 0*:
+      that operation is disabled (pct=0) and the remainder is redistributed to keep total=100.
+    - Toasts are only emitted by the client when the result is "unexpected" (i.e., issues).
     """
     try:
         pool = snowflake_pool.get_default_pool()
         cfg = _normalize_template_config(req.config)
 
+        table_type = _upper_str(cfg.get("table_type") or "")
+        if _is_postgres_family_table_type(table_type):
+            return await _ai_adjust_sql_postgres(pool, cfg)
+
         db = _validate_ident(cfg.get("database"), label="database")
         sch = _validate_ident(cfg.get("schema"), label="schema")
         tbl = _validate_ident(cfg.get("table_name"), label="table")
         full_name = _full_table_name(db, sch, tbl)
+        is_hybrid = table_type == "HYBRID"
+        is_interactive = table_type == "INTERACTIVE"
 
-        concurrency = int(cfg.get("concurrent_connections") or 1)
-        concurrency = max(1, concurrency)
+        # For pool sizing in preparation, treat concurrent_connections as:
+        # - CONCURRENCY mode: fixed worker count
+        # - QPS mode: max worker cap (may be -1 => no user cap; use engine cap)
+        load_mode = (
+            str(cfg.get("load_mode") or "CONCURRENCY").strip().upper() or "CONCURRENCY"
+        )
+        raw_cc = cfg.get("concurrent_connections")
+        cc = int(raw_cc) if raw_cc is not None else 1
+        if load_mode == "QPS" and cc == -1:
+            cc = int(settings.SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS)
 
         # AI availability check (fast).
         ai_available = False
@@ -394,7 +1144,9 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
             ai_error = str(e)
 
         # Profile table for key/time columns (cheap).
-        prof = await profile_snowflake_table(pool, full_name)
+        # For SQL adjustment we only need key/time column names; avoid MIN/MAX scans which can
+        # time out on large hybrid tables.
+        prof = await profile_snowflake_table(pool, full_name, include_bounds=False)
         key_col = prof.id_column
         time_col = prof.time_column
 
@@ -449,7 +1201,63 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
             update_col = None
 
         issues: list[str] = []
-        range_mode: str | None = None
+
+        # Range scan strategy:
+        # - HYBRID: prefer key-range scans to avoid expensive time-cutoff + sort patterns
+        # - STANDARD: prefer time-cutoff if available; else key-range
+        range_mode: str | None = "ID_BETWEEN" if (is_hybrid and key_col) else None
+
+        # Collect key column distribution stats for smarter range scan offset calculation.
+        # This helps generate BETWEEN queries that return ~100 rows without relying on LIMIT.
+        key_stats: dict[str, Any] = {}
+        if key_col:
+            try:
+                stats_sql = f'''
+                    SELECT 
+                        MIN("{key_col}") AS key_min,
+                        MAX("{key_col}") AS key_max,
+                        COUNT(*) AS row_count
+                    FROM {full_name}
+                '''
+                stats_rows = await pool.execute_query(stats_sql)
+                if stats_rows and stats_rows[0]:
+                    row = stats_rows[0]
+                    key_min = row[0]
+                    key_max = row[1]
+                    row_count = row[2]
+                    if (
+                        key_min is not None
+                        and key_max is not None
+                        and row_count
+                        and row_count > 0
+                    ):
+                        key_stats = {
+                            "key_min": key_min,
+                            "key_max": key_max,
+                            "row_count": int(row_count),
+                            "key_range": key_max - key_min
+                            if isinstance(key_max, (int, float))
+                            and isinstance(key_min, (int, float))
+                            else None,
+                        }
+                        if (
+                            key_stats["key_range"] is not None
+                            and key_stats["row_count"] > 0
+                        ):
+                            key_stats["avg_gap"] = (
+                                key_stats["key_range"] / key_stats["row_count"]
+                            )
+                            # Calculate offset to get ~100 rows: offset = avg_gap * target_rows
+                            key_stats["suggested_offset_for_100_rows"] = (
+                                int(key_stats["avg_gap"] * 100) or 100
+                            )
+            except Exception as e:
+                logger.debug(
+                    "Failed to collect key stats for range scan optimization: %s", e
+                )
+
+        # Default range offset (will be refined by AI or heuristics)
+        range_offset: int = key_stats.get("suggested_offset_for_100_rows", 100)
 
         def _has_default(col: str) -> bool:
             d = (col_default.get(col) or "").strip()
@@ -522,12 +1330,32 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
                 for c in list(col_types.keys())[:250]:
                     cols_for_prompt.append({"name": c, "type": col_types.get(c, "")})
 
+                # Build key stats section for the prompt if available
+                key_stats_section = ""
+                if key_stats:
+                    key_stats_section = (
+                        "\nKEY_COLUMN_STATS (for range scan optimization):\n"
+                        f"{json.dumps(key_stats, ensure_ascii=False, default=str)}\n"
+                    )
+
+                # Build interactive table note for the prompt
+                interactive_note = ""
+                if is_interactive:
+                    interactive_note = (
+                        "\nIMPORTANT: This is an INTERACTIVE TABLE. Interactive tables do NOT support "
+                        "DML operations (INSERT, UPDATE, DELETE). Only read operations are allowed.\n"
+                        "Return empty arrays for insert_columns and update_columns.\n\n"
+                    )
+
                 prompt = (
                     "You are adjusting a 4-statement benchmark workload for a Snowflake table.\n"
                     "Your output will be shown to the user.\n\n"
                     f"TABLE: {db}.{sch}.{tbl}\n"
+                    f"TABLE_TYPE: {table_type}\n"
+                    f"{interactive_note}"
                     f"KEY_COLUMN (may be null): {key_col or None}\n"
-                    f"TIME_COLUMN (may be null): {time_col or None}\n\n"
+                    f"TIME_COLUMN (may be null): {time_col or None}\n"
+                    f"{key_stats_section}\n"
                     "COLUMNS (name/type):\n"
                     f"{json.dumps(cols_for_prompt, ensure_ascii=False)}\n\n"
                     "REQUIRED_COLUMNS (must be included in insert_columns if feasible):\n"
@@ -536,16 +1364,21 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
                     f"{json.dumps(sample_payload, ensure_ascii=False, default=str)}\n\n"
                     "Return STRICT JSON ONLY with:\n"
                     "- summary: string (1-2 sentences describing what you changed)\n"
-                    "- insert_columns: [string] (columns to include in INSERT placeholders)\n"
-                    "- update_columns: [string] (columns to include in UPDATE set clause)\n"
-                    '- range_mode: one of ["TIME_CUTOFF","ID_BETWEEN",null]\n'
+                    "- insert_columns: [string] (columns to include in INSERT placeholders; empty for INTERACTIVE tables)\n"
+                    "- update_columns: [string] (columns to include in UPDATE set clause; empty for INTERACTIVE tables)\n"
+                    '- range_mode: one of ["ID_BETWEEN","TIME_CUTOFF",null]\n'
+                    "- range_offset: integer (for ID_BETWEEN: the offset to add to start key to get ~100 rows; use KEY_COLUMN_STATS.suggested_offset_for_100_rows if available, else 100)\n"
                     "- issues: [string] (empty if all OK)\n"
                     "\n"
                     "Rules:\n"
+                    "- If TABLE_TYPE is INTERACTIVE: insert_columns and update_columns MUST be empty (DML not supported).\n"
                     "- If KEY_COLUMN is null: update_columns must be empty.\n"
                     "- update_columns must NOT include any columns ending with ID or KEY.\n"
                     "- If TIME_COLUMN is null and KEY_COLUMN is null: range_mode must be null.\n"
-                    "- Prefer TIME_CUTOFF if TIME_COLUMN exists; otherwise ID_BETWEEN if KEY_COLUMN exists.\n"
+                    "- IMPORTANT: Prefer ID_BETWEEN over TIME_CUTOFF when KEY_COLUMN exists - it provides more predictable scan sizes.\n"
+                    "- ID_BETWEEN uses: WHERE key BETWEEN ? AND ? (returns ~100 rows based on range_offset, no LIMIT needed)\n"
+                    "- TIME_CUTOFF uses: WHERE time >= ? LIMIT 100 (relies on LIMIT for row count, may cause early termination optimization)\n"
+                    "- If KEY_COLUMN_STATS is provided, use suggested_offset_for_100_rows as range_offset.\n"
                     "- Keep insert_columns <= 8 and update_columns <= 2.\n"
                 )
 
@@ -573,6 +1406,9 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
                                         "range_mode": {
                                             "type": ["string", "null"],
                                         },
+                                        "range_offset": {
+                                            "type": "integer",
+                                        },
                                         "issues": {
                                             "type": "array",
                                             "items": {"type": "string"},
@@ -583,6 +1419,7 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
                                         "insert_columns",
                                         "update_columns",
                                         "range_mode",
+                                        "range_offset",
                                         "issues",
                                     ],
                                 },
@@ -640,112 +1477,223 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
                     rm = parsed.get("range_mode")
                     if rm in ("TIME_CUTOFF", "ID_BETWEEN"):
                         range_mode = str(rm)
+
+                    # Extract range_offset from AI response
+                    ai_offset = parsed.get("range_offset")
+                    if isinstance(ai_offset, (int, float)) and ai_offset > 0:
+                        range_offset = int(ai_offset)
             except Exception as e:
                 # If Cortex fails mid-flight, fall back to heuristics (do not warn the user unless
                 # there are actual workload issues like missing key/time columns or blank SQL).
                 logger.debug("AI planning failed in /ai/adjust-sql: %s", e)
 
         # Build SQL templates (blank + pct=0 if missing key/time as requested).
-        select_list = "*"
+        # Prefer a narrow projection to avoid SELECT * on wide tables.
+        projection_cols: list[str] = []
+
+        def _add_proj(col: str | None) -> None:
+            if not col:
+                return
+            c = str(col).strip().upper()
+            if not c or c not in col_types:
+                return
+            if c not in projection_cols:
+                projection_cols.append(c)
+
+        # Always include key/time/update + insert columns (bounded).
+        _add_proj(key_col)
+        _add_proj(time_col)
+        _add_proj(update_col)
+        for c in (insert_cols or [])[:12]:
+            _add_proj(c)
+
+        # Fill with a few additional simple columns for realism (bounded).
+        for c, typ in col_types.items():
+            if len(projection_cols) >= 12:
+                break
+            if c in projection_cols:
+                continue
+            t = str(typ or "").upper()
+            if any(x in t for x in ("VARIANT", "OBJECT", "ARRAY", "BINARY")):
+                continue
+            _add_proj(c)
+
+        select_list = (
+            ", ".join(f'"{c}"' for c in projection_cols) if projection_cols else "*"
+        )
         point_sql = ""
         update_sql = ""
         if key_col:
             point_sql = f'SELECT {select_list} FROM {{table}} WHERE "{key_col}" = ?'
-            if update_col:
+            # Interactive tables do NOT support UPDATE (only INSERT OVERWRITE is allowed).
+            if update_col and not is_interactive:
                 update_sql = (
                     f'UPDATE {{table}} SET "{update_col}" = ? WHERE "{key_col}" = ?'
                 )
 
-        # Range scan: prefer time-based; fall back to id-based if key exists; else blank.
+        # Range scan: prefer ID_BETWEEN when key exists (more predictable scan sizes);
+        # fall back to TIME_CUTOFF only when no key column is available.
+        # ID_BETWEEN: Uses calculated offset to return ~100 rows without LIMIT (avoids early termination optimization)
+        # TIME_CUTOFF: Uses >= with LIMIT 100 (may benefit from early termination, less predictable workload)
         range_sql = ""
         if range_mode == "ID_BETWEEN":
             # Explicit override (only valid when key exists).
             if key_col:
-                range_sql = (
-                    f'SELECT {select_list} FROM {{table}} WHERE "{key_col}" BETWEEN ? AND ? + 100 '
-                    f'ORDER BY "{key_col}" LIMIT 100'
-                )
+                # Use calculated range_offset; no LIMIT needed since we're constraining by range
+                range_sql = f'SELECT {select_list} FROM {{table}} WHERE "{key_col}" BETWEEN ? AND ? + {range_offset}'
             else:
                 range_mode = None
+        elif key_col:
+            # Prefer ID_BETWEEN when key column exists (changed from preferring TIME_CUTOFF)
+            range_sql = f'SELECT {select_list} FROM {{table}} WHERE "{key_col}" BETWEEN ? AND ? + {range_offset}'
+            range_mode = "ID_BETWEEN"
         elif time_col:
+            # Only use TIME_CUTOFF when no key column is available
             range_sql = (
-                f'SELECT {select_list} FROM {{table}} WHERE "{time_col}" >= ? '
-                f'ORDER BY "{time_col}" DESC LIMIT 100'
+                f'SELECT {select_list} FROM {{table}} WHERE "{time_col}" >= ? LIMIT 100'
             )
             range_mode = "TIME_CUTOFF"
-        elif key_col:
-            range_sql = (
-                f'SELECT {select_list} FROM {{table}} WHERE "{key_col}" BETWEEN ? AND ? + 100 '
-                f'ORDER BY "{key_col}" LIMIT 100'
-            )
-            range_mode = "ID_BETWEEN"
 
         # Insert (always placeholders; params generated in executor).
-        cols_sql = ", ".join(f'"{c}"' for c in insert_cols)
-        ph_sql = ", ".join("?" for _ in insert_cols)
-        insert_sql = (
-            f"INSERT INTO {{table}} ({cols_sql}) VALUES ({ph_sql})"
-            if insert_cols
-            else ""
-        )
+        # NOTE: Interactive tables do NOT support DML (INSERT, UPDATE, DELETE).
+        # Only INSERT OVERWRITE is allowed, which is not supported in benchmark workloads.
+        if is_interactive:
+            insert_sql = ""
+        else:
+            cols_sql = ", ".join(f'"{c}"' for c in insert_cols)
+            ph_sql = ", ".join("?" for _ in insert_cols)
+            insert_sql = (
+                f"INSERT INTO {{table}} ({cols_sql}) VALUES ({ph_sql})"
+                if insert_cols
+                else ""
+            )
 
-        # Percentages: start from preset mix (already normalized to CUSTOM by _normalize_template_config).
+        # Percentages: keep the user's mix by default.
         p_point = int(cfg.get("custom_point_lookup_pct") or 0)
         p_range = int(cfg.get("custom_range_scan_pct") or 0)
         p_ins = int(cfg.get("custom_insert_pct") or 0)
         p_upd = int(cfg.get("custom_update_pct") or 0)
 
-        # Missing key disables POINT + UPDATE.
-        if not key_col:
-            if p_point > 0:
-                issues.append("No usable key column detected; POINT_LOOKUP disabled.")
-                p_range += p_point
+        # Only adjust mix if we cannot generate SQL for an operation that currently has weight > 0.
+        disabled: list[tuple[str, str]] = []
+        if p_point > 0 and not point_sql:
+            disabled.append(
+                (
+                    "POINT_LOOKUP",
+                    "No usable key column detected; POINT_LOOKUP disabled.",
+                )
+            )
+        if p_range > 0 and not range_sql:
+            disabled.append(
+                (
+                    "RANGE_SCAN",
+                    "No usable time/key column detected; RANGE_SCAN disabled.",
+                )
+            )
+        if p_ins > 0 and not insert_sql:
+            if is_interactive:
+                disabled.append(
+                    ("INSERT", "Interactive tables do not support INSERT; disabled.")
+                )
+            else:
+                disabled.append(
+                    ("INSERT", "No usable insert columns detected; INSERT disabled.")
+                )
+        if p_upd > 0 and not update_sql:
+            if is_interactive:
+                disabled.append(
+                    ("UPDATE", "Interactive tables do not support UPDATE; disabled.")
+                )
+            else:
+                disabled.append(
+                    ("UPDATE", "No usable update/key column detected; UPDATE disabled.")
+                )
+
+        if disabled:
+            for _, msg in disabled:
+                issues.append(msg)
+
+            removed = 0
+            if any(k == "POINT_LOOKUP" for k, _ in disabled):
+                removed += p_point
                 p_point = 0
-            if p_upd > 0:
-                issues.append("No usable key column detected; UPDATE disabled.")
-                p_ins += p_upd
+            if any(k == "RANGE_SCAN" for k, _ in disabled):
+                removed += p_range
+                p_range = 0
+            if any(k == "INSERT" for k, _ in disabled):
+                removed += p_ins
+                p_ins = 0
+            if any(k == "UPDATE" for k, _ in disabled):
+                removed += p_upd
                 p_upd = 0
-        elif not update_sql and p_upd > 0:
-            issues.append("No usable update column detected; UPDATE disabled.")
-            p_ins += p_upd
-            p_upd = 0
 
-        # Missing time AND key disables RANGE.
-        if not range_sql and p_range > 0:
-            issues.append("No usable time/key column detected; RANGE_SCAN disabled.")
-            p_ins += p_range
-            p_range = 0
+            remaining = [
+                ("POINT_LOOKUP", p_point),
+                ("RANGE_SCAN", p_range),
+                ("INSERT", p_ins),
+                ("UPDATE", p_upd),
+            ]
+            remaining_total = sum(v for _, v in remaining if v > 0)
+            if remaining_total > 0 and removed > 0:
+                alloc: dict[str, int] = {}
+                used = 0
+                for kind, v in remaining:
+                    if v <= 0:
+                        continue
+                    add = int((removed * v) // remaining_total)
+                    if add > 0:
+                        alloc[kind] = add
+                        used += add
+                leftover = max(0, removed - used)
+                order = [
+                    k
+                    for k, v in sorted(
+                        remaining, key=lambda kv: int(kv[1]), reverse=True
+                    )
+                    if v > 0
+                ]
+                i = 0
+                while leftover > 0 and order:
+                    alloc[order[i % len(order)]] = (
+                        int(alloc.get(order[i % len(order)], 0)) + 1
+                    )
+                    leftover -= 1
+                    i += 1
 
-        # Ensure total=100 (guardrail). Any rounding goes to INSERT.
-        total = p_point + p_range + p_ins + p_upd
-        if total != 100:
-            p_ins += 100 - total
+                p_point += int(alloc.get("POINT_LOOKUP", 0))
+                p_range += int(alloc.get("RANGE_SCAN", 0))
+                p_ins += int(alloc.get("INSERT", 0))
+                p_upd += int(alloc.get("UPDATE", 0))
+            elif removed > 0:
+                fallback_kind = None
+                if range_sql:
+                    fallback_kind = "RANGE_SCAN"
+                elif insert_sql:
+                    fallback_kind = "INSERT"
+                elif point_sql:
+                    fallback_kind = "POINT_LOOKUP"
+                elif update_sql:
+                    fallback_kind = "UPDATE"
+                if fallback_kind:
+                    p_point = 100 if fallback_kind == "POINT_LOOKUP" else 0
+                    p_range = 100 if fallback_kind == "RANGE_SCAN" else 0
+                    p_ins = 100 if fallback_kind == "INSERT" else 0
+                    p_upd = 100 if fallback_kind == "UPDATE" else 0
+                    issues.append(
+                        f"All configured operations were unsupported; falling back to {fallback_kind}=100%."
+                    )
 
-        # Blank SQL if pct==0 for disabled operations.
-        if p_point == 0:
-            point_sql = ""
-        if p_range == 0:
-            range_sql = ""
-        if p_upd == 0:
-            update_sql = ""
+            # Guardrail: keep sum at 100; assign rounding drift to INSERT.
+            total = p_point + p_range + p_ins + p_upd
+            if total != 100:
+                p_ins += 100 - total
 
-        ai_summary: str
-        toast_level = "success"
-        if ai_available and ai_summary_from_model:
-            ai_summary = ai_summary_from_model
-        elif ai_available:
-            ai_summary = (
-                f"AI adjusted workload SQL. key={key_col or '∅'} time={time_col or '∅'} "
-                f"mode={range_mode or '∅'}"
-            )
-        else:
-            toast_level = "warning"
-            ai_summary = (
-                "AI not available in this account; using heuristic SQL adjustment."
-            )
-
+        # Toast only when unexpected (mix had to change due to missing SQL).
+        toast_level = "warning" if issues else "success"
+        ai_summary = ai_summary_from_model or ""
+        if not ai_summary:
+            ai_summary = "Generated workload SQL."
         if issues:
-            toast_level = "warning"
             ai_summary = ai_summary + " Issues: " + " ".join(issues)
 
         # Return a minimal columns map so the saved template can validate against the customer table.
@@ -767,8 +1715,10 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
             "key_column": key_col,
             "time_column": time_col,
             "range_mode": range_mode,
+            "range_offset": range_offset,
             "insert_columns": insert_cols,
             "update_columns": [update_col] if update_col else [],
+            "projection_columns": projection_cols,
         }
 
         return AiAdjustSqlResponse(
@@ -1057,6 +2007,8 @@ async def prepare_ai_template(template_id: str):
 
         concurrency = int(cfg.get("concurrent_connections") or 1)
         concurrency = max(1, concurrency)
+        table_type = _upper_str(cfg.get("table_type") or "")
+        is_hybrid = table_type == "HYBRID"
 
         # ------------------------------------------------------------------
         # 1) Cortex availability check (fast)
@@ -1073,9 +2025,16 @@ async def prepare_ai_template(template_id: str):
         # ------------------------------------------------------------------
         # 2) Profile table (heuristics) for key/time columns
         # ------------------------------------------------------------------
-        profile = await profile_snowflake_table(pool, full_name)
+        # For HYBRID templates we typically use ID_BETWEEN range scans and do not need
+        # expensive MIN/MAX bounds (which can time out on large hybrid tables).
+        profile = await profile_snowflake_table(
+            pool,
+            full_name,
+            include_bounds=not is_hybrid,
+        )
         key_col = profile.id_column
         time_col = profile.time_column
+        range_mode: str | None = "ID_BETWEEN" if (is_hybrid and key_col) else None
 
         # Pull full DESCRIBE metadata so we can choose safe insert/update columns.
         desc_rows = await pool.execute_query(f"DESCRIBE TABLE {full_name}")
@@ -1404,6 +2363,39 @@ async def prepare_ai_template(template_id: str):
             if proposed_proj:
                 projection_cols = proposed_proj
 
+        # Heuristic fallback: if the model didn't supply projection columns, prefer a narrow
+        # select list to avoid SELECT * on wide customer tables.
+        if not projection_cols:
+            # Key + time + update + required + a few simple columns.
+            candidates: list[str] = []
+            if key_col:
+                candidates.append(str(key_col).upper())
+            if time_col:
+                candidates.append(str(time_col).upper())
+            candidates.extend([c for c in update_cols if c])
+            candidates.extend([c for c in required_cols if c])
+            for c in candidates:
+                c_u = str(c).strip().upper()
+                if c_u and c_u in col_types and c_u not in projection_cols:
+                    projection_cols.append(c_u)
+            for c, typ in col_types.items():
+                if len(projection_cols) >= 12:
+                    break
+                if c in projection_cols:
+                    continue
+                t = str(typ or "").upper()
+                if any(x in t for x in ("VARIANT", "OBJECT", "ARRAY", "BINARY")):
+                    continue
+                projection_cols.append(c)
+            projection_cols = projection_cols[:20]
+
+        # Range scan strategy: prefer key-range for HYBRID, else time-cutoff when available.
+        if range_mode is None:
+            if time_col:
+                range_mode = "TIME_CUTOFF"
+            elif key_col:
+                range_mode = "ID_BETWEEN"
+
         # ------------------------------------------------------------------
         # 3) Build value pools in Snowflake (no large data transfer through API)
         # ------------------------------------------------------------------
@@ -1443,7 +2435,7 @@ async def prepare_ai_template(template_id: str):
             pools_created["KEY"] = int(target_n)
 
         # 3.2 Range pool (time cutoffs) for time-based scans
-        if time_col:
+        if time_col and range_mode == "TIME_CUTOFF":
             target_n = max(2000, concurrency * 10)
             target_n = min(1_000_000, target_n)
             sample_n = min(1_000_000, max(target_n * 2, target_n))
@@ -1451,23 +2443,56 @@ async def prepare_ai_template(template_id: str):
             time_ident = _validate_ident(time_col, label="time_column")
             time_expr = _quote_ident(time_ident)
 
-            insert_time_pool = f"""
-            INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
-                POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
-            )
-            SELECT
-                ?, ?, 'RANGE', ?, SEQ4(), TO_VARIANT(T_VAL)
-            FROM (
-                SELECT DISTINCT {time_expr} AS T_VAL
-                FROM {full_name} SAMPLE ({sample_n} ROWS)
-                WHERE {time_expr} IS NOT NULL
-            )
-            LIMIT {target_n}
-            """
-            await pool.execute_query(
-                insert_time_pool, params=[pool_id, template_id, time_ident]
-            )
-            pools_created["RANGE"] = int(target_n)
+            # Prefer generating "recent" cutoffs near time_max to avoid scans that touch most
+            # of the table (e.g., cutoff in early history). This is especially important
+            # for HYBRID tables.
+            time_max = profile.time_max
+            time_type = str(col_types.get(time_ident, "")).upper()
+            if time_max is not None and any(
+                x in time_type for x in ("DATE", "TIMESTAMP")
+            ):
+                window_days = 30
+                max_param = (
+                    time_max.isoformat()
+                    if hasattr(time_max, "isoformat")
+                    else str(time_max)
+                )
+                max_expr = (
+                    "TO_DATE(?)" if "DATE" in time_type else "TO_TIMESTAMP_NTZ(?)"
+                )
+                insert_time_pool = f"""
+                INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
+                    POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
+                )
+                SELECT
+                    ?, ?, 'RANGE', ?, SEQ4(),
+                    TO_VARIANT(DATEADD('day', -UNIFORM(0, {window_days}, RANDOM()), {max_expr}))
+                FROM TABLE(GENERATOR(ROWCOUNT => {target_n}))
+                """
+                await pool.execute_query(
+                    insert_time_pool,
+                    params=[pool_id, template_id, time_ident, max_param],
+                )
+                pools_created["RANGE"] = int(target_n)
+            else:
+                # Fallback: SAMPLE distinct values (may be broad).
+                insert_time_pool = f"""
+                INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
+                    POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
+                )
+                SELECT
+                    ?, ?, 'RANGE', ?, SEQ4(), TO_VARIANT(T_VAL)
+                FROM (
+                    SELECT DISTINCT {time_expr} AS T_VAL
+                    FROM {full_name} SAMPLE ({sample_n} ROWS)
+                    WHERE {time_expr} IS NOT NULL
+                )
+                LIMIT {target_n}
+                """
+                await pool.execute_query(
+                    insert_time_pool, params=[pool_id, template_id, time_ident]
+                )
+                pools_created["RANGE"] = int(target_n)
 
         # 3.3 Row pool for inserts (sample rows packed as VARIANT objects)
         row_pool_n = max(2000, concurrency * 10)
@@ -1515,6 +2540,7 @@ async def prepare_ai_template(template_id: str):
             "pool_id": pool_id,
             "key_column": key_col,
             "time_column": time_col,
+            "range_mode": range_mode,
             "concurrency": concurrency,
             "pools": counts,
             "insert_columns": insert_cols,

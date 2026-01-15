@@ -7,12 +7,16 @@ from being misrepresented in the UI as "no results".
 
 from __future__ import annotations
 
+import logging
+import traceback
 from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException, status
 
 from backend.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,13 @@ def http_exception(operation: str, exc: BaseException) -> HTTPException:
     """
     Convert an exception into a consistent HTTPException payload.
     """
+    # Log the full traceback to the server console for debugging
+    logger.error(
+        "API error during '%s': %s\n%s",
+        operation,
+        exc,
+        traceback.format_exc(),
+    )
 
     sf = classify_snowflake_error(exc)
     if sf is not None:

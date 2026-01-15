@@ -61,7 +61,7 @@
     </div>
 
     <form @submit.prevent="submitTest">
-        <fieldset :disabled="isSaving || isReadOnly">
+        <fieldset :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading || isReadOnly">
         <!-- Template Metadata Section (moved to top for better visibility) -->
         <div class="card">
             <div class="card-title">Template Metadata</div>
@@ -82,12 +82,12 @@
             
             <div class="form-group">
                 <label class="form-label">Table Type</label>
-                <select class="form-select" x-model="config.table_type">
+                <select class="form-select" x-model="config.table_type" @change="onTableTypeChanged()">
                     <option value="STANDARD">Standard Table</option>
                     <option value="HYBRID">Hybrid Table</option>
-                    <option value="INTERACTIVE">Interactive Table (Preview)</option>
+                    <option value="INTERACTIVE">Interactive Table</option>
                     <option value="POSTGRES">Postgres</option>
-                    <option value="SNOWFLAKE_POSTGRES">Snowflake via Postgres Protocol</option>
+                    <option value="SNOWFLAKE_POSTGRES">Snowflake Postgres</option>
                 </select>
                 <small class="form-text">Choose the table type to benchmark</small>
             </div>
@@ -95,180 +95,119 @@
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="form-group">
                     <label class="form-label">Database</label>
-                    <input type="text" class="form-input" x-model="config.database" placeholder="e.g., UNISTORE_BENCHMARK" required>
-                    <small class="form-text">Target database name</small>
+                    <select id="database-select" class="form-select" x-model="config.database" @change="onDatabaseChanged()" required>
+                        <option value="">-- Select a database --</option>
+                        <template x-for="db in availableDatabases" :key="db.name">
+                            <option :value="String(db.name || '')" x-text="db.name"></option>
+                        </template>
+                    </select>
+                    <small class="form-text">Select an existing database</small>
                 </div>
 
                 <div class="form-group">
                     <label class="form-label">Schema</label>
-                    <input type="text" class="form-input" x-model="config.schema" placeholder="e.g., PUBLIC" required>
-                    <small class="form-text">Target schema name</small>
+                    <select
+                        id="schema-select"
+                        class="form-select"
+                        x-model="config.schema"
+                        @change="onSchemaChanged()"
+                        :disabled="!config.database"
+                        required
+                    >
+                        <option value="">-- Select a schema --</option>
+                        <template x-for="s in availableSchemas" :key="s.name">
+                            <option :value="String(s.name || '')" x-text="s.name"></option>
+                        </template>
+                    </select>
+                    <small class="form-text">Select an existing schema</small>
                 </div>
 
                 <div class="form-group">
-                    <label class="form-label">Table Name</label>
-                    <input type="text" class="form-input" x-model="config.table_name" placeholder="e.g., benchmark_test_001" required>
-                    <small class="form-text">Table to create/test</small>
+                    <label class="form-label">Table / View</label>
+                    <select id="table-select" class="form-select" x-model="config.table_name" :disabled="!config.schema" required>
+                        <option value="">-- Select a table or view --</option>
+                        <template x-for="obj in availableObjects" :key="obj.type + ':' + obj.name">
+                            <option
+                                :value="String(obj.name || '')"
+                                x-text="(obj.type || 'OBJECT') + ': ' + obj.name"
+                            ></option>
+                        </template>
+                    </select>
+                    <small class="form-text">Select an existing table or view</small>
                 </div>
             </div>
 
             <div class="alert alert-info mt-3">
                 <strong>Full Table Name:</strong> <code x-text="config.database + '.' + config.schema + '.' + config.table_name"></code>
             </div>
-
-            <div class="form-group" x-show="config.table_type === 'STANDARD' || config.table_type === 'INTERACTIVE'">
-                <label class="form-label">Clustering Keys (comma-separated)</label>
-                <input type="text" class="form-input" x-model="config.clustering_keys" placeholder="e.g., date, customer_id">
-                <small class="form-text">Optional: Improve query performance by clustering</small>
-            </div>
-
-            <div x-show="config.table_type === 'HYBRID'">
-                <div class="form-group">
-                    <label class="form-label">Primary Key (comma-separated)</label>
-                    <input type="text" class="form-input" x-model="config.primary_key" placeholder="e.g., id">
-                    <small class="form-text">Required for Hybrid tables</small>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">
-                        <input type="checkbox" x-model="config.add_indexes"> Add Secondary Indexes
-                    </label>
-                </div>
-
-                <div x-show="config.add_indexes" class="mt-3">
-                    <template x-for="(index, idx) in config.indexes" :key="idx">
-                        <div class="border p-3 mb-3 rounded">
-                            <div class="flex justify-between items-center mb-2">
-                                <h4 class="font-semibold">Index <span x-text="idx + 1"></span></h4>
-                                <button type="button" class="btn btn-error btn-sm" @click="removeIndex(idx)">Remove</button>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Index Columns (comma-separated)</label>
-                                <input type="text" class="form-input" x-model="index.columns" placeholder="e.g., customer_id, region">
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">INCLUDE Columns (optional)</label>
-                                <input type="text" class="form-input" x-model="index.include" placeholder="e.g., status, amount">
-                            </div>
-                        </div>
-                    </template>
-                    <button type="button" class="btn btn-secondary" @click="addIndex">+ Add Index</button>
-                </div>
-            </div>
         </div>
 
-        <div class="card" x-show="config.table_type !== 'POSTGRES' && config.table_type !== 'SNOWFLAKE_POSTGRES' && config.table_type !== 'CRUNCHYDATA'">
+        <div class="card" x-show="config.table_type !== 'POSTGRES' && config.table_type !== 'SNOWFLAKE_POSTGRES'">
             <div class="card-title">Warehouse Configuration</div>
             
             <div class="form-group">
-                <label class="form-label">Warehouse Mode</label>
-                <select class="form-select" x-model="config.warehouse_mode">
-                    <option value="EXISTING">Use Existing Warehouse</option>
-                    <option value="CREATE_NEW">Create New Warehouse for Test</option>
+                <label class="form-label">Select Warehouse</label>
+                <select
+                    id="warehouse-select"
+                    class="form-select"
+                    x-model="config.warehouse_name"
+                    @change="loadWarehouseDetails"
+                    :required="config.table_type !== 'POSTGRES' && config.table_type !== 'SNOWFLAKE_POSTGRES'"
+                >
+                    <option value="">-- Select a warehouse --</option>
+                    <template x-for="wh in availableWarehouses" :key="wh.name">
+                        <option
+                            :value="String(wh.name || '')"
+                            x-text="formatWarehouseOption(wh)"
+                        ></option>
+                    </template>
                 </select>
-                <small class="form-text">Use existing warehouse or create temporary one for testing</small>
-            </div>
-
-            <div x-show="config.warehouse_mode === 'EXISTING'">
-                <div class="form-group">
-                    <label class="form-label">Select Warehouse</label>
-                    <select id="warehouse-select" class="form-select" x-model="config.warehouse_name" @change="loadWarehouseDetails">
-                        <option value="">-- Select a warehouse --</option>
-                        <template x-for="wh in availableWarehouses" :key="wh.name">
-                            <option :value="String(wh.name || '')" x-text="wh.name + ' (' + wh.size + ', ' + wh.state + ')'"></option>
-                        </template>
-                    </select>
-                    <small class="form-text">Select existing warehouse - size and settings will be auto-populated</small>
-                </div>
-                
-                <div x-show="config.warehouse_name" class="alert alert-info mt-3">
-                    <strong>Warehouse Details:</strong><br>
-                    <span x-show="selectedWarehouseDetails">
-                        <strong>Name:</strong> <span x-text="selectedWarehouseDetails?.name || config.warehouse_name"></span><br>
-                        <strong>Size:</strong> <span x-text="selectedWarehouseDetails?.size"></span><br>
-                        <strong>State:</strong> <span x-text="selectedWarehouseDetails?.state"></span><br>
-                        <strong>Type:</strong> <span x-text="selectedWarehouseDetails?.type"></span><br>
-                        
-                        <!-- Multi-Cluster Warehouse Details -->
-                        <span x-show="selectedWarehouseDetails?.max_cluster_count > 1">
-                            <hr style="margin: 8px 0;">
-                            <strong>Multi-Cluster Configuration:</strong><br>
-                            &nbsp;&nbsp;• Min Clusters: <span x-text="selectedWarehouseDetails?.min_cluster_count"></span><br>
-                            &nbsp;&nbsp;• Max Clusters: <span x-text="selectedWarehouseDetails?.max_cluster_count"></span><br>
-                            &nbsp;&nbsp;• Scaling Policy: <span x-text="selectedWarehouseDetails?.scaling_policy"></span><br>
-                            &nbsp;&nbsp;• Currently Started: <span x-text="selectedWarehouseDetails?.started_clusters"></span> cluster(s)<br>
-                        </span>
-                        
-                        <!-- Single Cluster -->
-                        <span x-show="selectedWarehouseDetails?.max_cluster_count === 1">
-                            <strong>Multi-Cluster:</strong> <span class="text-muted">Not Enabled (Single Cluster)</span><br>
-                        </span>
-                        
-                        <!-- Auto-Suspend/Resume Settings -->
-                        <hr style="margin: 8px 0;">
-                        <strong>Auto Settings:</strong><br>
-                        &nbsp;&nbsp;• Auto-Suspend: <span x-text="selectedWarehouseDetails?.auto_suspend ? selectedWarehouseDetails.auto_suspend + ' seconds' : 'Disabled'"></span><br>
-                        &nbsp;&nbsp;• Auto-Resume: <span x-text="selectedWarehouseDetails?.auto_resume ? 'Enabled' : 'Disabled'"></span><br>
-                    </span>
-                </div>
-            </div>
-
-            <div x-show="config.warehouse_mode === 'CREATE_NEW'">
-                <div class="alert alert-info mb-3">
-                    <strong>New Warehouse:</strong> A temporary warehouse will be created with the settings below and dropped after the test completes.
-                </div>
-                
-                <div class="form-group">
-                    <label class="form-label">New Warehouse Name</label>
-                    <input type="text" class="form-input" x-model="config.new_warehouse_name" placeholder="e.g., BENCHMARK_TEST_WH">
-                    <small class="form-text">Name for the temporary warehouse (will be auto-suffixed with timestamp)</small>
-                </div>
+                <small class="form-text">Select existing warehouse - size and settings will be auto-populated</small>
             </div>
             
-            <div class="form-group" x-show="config.warehouse_mode === 'CREATE_NEW'">
-                <label class="form-label">Warehouse Size</label>
-                <select class="form-select" x-model="config.warehouse_size">
-                    <option value="XSMALL">X-Small</option>
-                    <option value="SMALL">Small</option>
-                    <option value="MEDIUM">Medium</option>
-                    <option value="LARGE">Large</option>
-                    <option value="XLARGE">X-Large</option>
-                    <option value="2XLARGE">2X-Large</option>
-                    <option value="3XLARGE">3X-Large</option>
-                    <option value="4XLARGE">4X-Large</option>
-                </select>
-                <small class="form-text">Size for new warehouse</small>
-            </div>
-
-            <div x-show="config.warehouse_mode === 'CREATE_NEW'">
-                <div class="form-group">
-                    <label class="form-label">
-                        <input type="checkbox" x-model="config.multi_cluster"> Enable Multi-Cluster Warehouse
-                    </label>
-                    <small class="form-text">Enable multi-cluster for new warehouse</small>
-                </div>
-
-                <div x-show="config.multi_cluster">
-                    <div class="form-group">
-                        <label class="form-label">Min Clusters</label>
-                        <input type="number" class="form-input" x-model.number="config.min_clusters" min="1" max="10">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Max Clusters</label>
-                        <input type="number" class="form-input" x-model.number="config.max_clusters" min="1" max="10">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label">Scaling Policy</label>
-                        <select class="form-select" x-model="config.scaling_policy">
-                            <option value="STANDARD">Standard (fastest)</option>
-                            <option value="ECONOMY">Economy (cost-effective)</option>
-                        </select>
-                    </div>
-                </div>
+            <div x-show="config.warehouse_name" class="alert alert-info mt-3">
+                <strong>Warehouse Details:</strong><br>
+                <span x-show="selectedWarehouseDetails">
+                    <strong>Name:</strong> <span x-text="selectedWarehouseDetails?.name || config.warehouse_name"></span><br>
+                    <strong>Size:</strong> <span x-text="selectedWarehouseDetails?.size"></span><br>
+                    <strong>State:</strong> <span x-text="selectedWarehouseDetails?.state"></span><br>
+                    <strong>Type:</strong> <span x-text="selectedWarehouseDetails?.type"></span><br>
+                    <strong>Generation:</strong> 
+                    <span x-text="selectedWarehouseDetails?.resource_constraint === 'STANDARD_GEN_2' ? 'Gen 2' : 'Gen 1'"></span><br>
+                    
+                    <!-- Multi-Cluster Warehouse Details -->
+                    <span x-show="selectedWarehouseDetails?.max_cluster_count > 1">
+                        <hr style="margin: 8px 0;">
+                        <strong>Multi-Cluster Configuration:</strong><br>
+                        &nbsp;&nbsp;• Min Clusters: <span x-text="selectedWarehouseDetails?.min_cluster_count"></span><br>
+                        &nbsp;&nbsp;• Max Clusters: <span x-text="selectedWarehouseDetails?.max_cluster_count"></span><br>
+                        &nbsp;&nbsp;• Scaling Policy: <span x-text="selectedWarehouseDetails?.scaling_policy"></span><br>
+                        &nbsp;&nbsp;• Currently Started: <span x-text="selectedWarehouseDetails?.started_clusters"></span> cluster(s)<br>
+                    </span>
+                    
+                    <!-- Single Cluster -->
+                    <span x-show="selectedWarehouseDetails?.max_cluster_count === 1">
+                        <strong>Multi-Cluster:</strong> <span class="text-muted">Not Enabled (Single Cluster)</span><br>
+                    </span>
+                    
+                    <!-- Query Acceleration Service (QAS) -->
+                    <hr style="margin: 8px 0;">
+                    <strong>Query Acceleration Service (QAS):</strong> 
+                    <span x-text="selectedWarehouseDetails?.enable_query_acceleration ? 'Enabled' : 'Disabled'"></span>
+                    <span x-show="selectedWarehouseDetails?.enable_query_acceleration">
+                        (Max Scale Factor: <span x-text="selectedWarehouseDetails?.query_acceleration_max_scale_factor"></span>)
+                    </span><br>
+                    
+                    <!-- Auto-Suspend/Resume Settings -->
+                    <hr style="margin: 8px 0;">
+                    <strong>Auto Settings:</strong><br>
+                    &nbsp;&nbsp;• Auto-Suspend: <span x-text="selectedWarehouseDetails?.auto_suspend ? selectedWarehouseDetails.auto_suspend + ' seconds' : 'Disabled'"></span><br>
+                    &nbsp;&nbsp;• Auto-Resume: <span x-text="selectedWarehouseDetails?.auto_resume ? 'Enabled' : 'Disabled'"></span><br>
+                </span>
             </div>
         </div>
         
-        <div class="card" x-show="config.table_type === 'POSTGRES' || config.table_type === 'SNOWFLAKE_POSTGRES' || config.table_type === 'CRUNCHYDATA'">
+        <div class="card" x-show="config.table_type === 'POSTGRES' || config.table_type === 'SNOWFLAKE_POSTGRES'">
             <div class="card-title">Warehouse Configuration</div>
             <div class="alert alert-info">
                 Warehouse selection is not used for Postgres-based templates. Results are still recorded to Snowflake using the `.env` `SNOWFLAKE_WAREHOUSE`.
@@ -276,200 +215,346 @@
         </div>
 
         <div class="card">
-            <div class="card-title">Test Parameters</div>
-            
-            <div class="form-group">
-                <label class="form-label">Test Duration (seconds)</label>
-                <input type="number" class="form-input" x-model.number="config.duration" min="10" max="3600">
-                <small class="form-text">How long to run the test (10-3600 seconds)</small>
-            </div>
+            <div class="card-title">Queries, Mix, and Targets</div>
+            <p class="text-sm text-gray-700">
+                Templates store all SQL and mix weights. Mix presets only adjust weights (SQL is left unchanged).
+            </p>
 
             <div class="form-group">
-                <label class="form-label">Concurrent Connections</label>
-                <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" max="1000">
-                <small class="form-text">Number of parallel workers (1-1000)</small>
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">Workload Type</label>
-                <select class="form-select" x-model="config.workload_type">
-                    <option value="READ_ONLY">Read Only - Point lookups and scans</option>
-                    <option value="WRITE_ONLY">Write Only - Inserts and updates</option>
-                    <option value="READ_HEAVY">Read Heavy - 80% reads, 20% writes</option>
-                    <option value="WRITE_HEAVY">Write Heavy - 20% reads, 80% writes</option>
-                    <option value="MIXED">Mixed - 50% reads, 50% writes</option>
-                    <option value="CUSTOM">Custom - Define your own queries</option>
+                <label class="form-label">Mix Preset</label>
+                <select class="form-select" x-model="config.mix_preset" @change="applyMixPreset(config.mix_preset)" :disabled="isInteractiveTable(config.table_type)">
+                    <option value="READ_ONLY">Read Only (50/50 reads)</option>
+                    <option value="WRITE_ONLY" x-bind:disabled="isInteractiveTable(config.table_type)">Write Only (70/30 writes)</option>
+                    <option value="READ_HEAVY" x-bind:disabled="isInteractiveTable(config.table_type)">Read Heavy (80/20)</option>
+                    <option value="WRITE_HEAVY" x-bind:disabled="isInteractiveTable(config.table_type)">Write Heavy (20/80)</option>
+                    <option value="MIXED" x-bind:disabled="isInteractiveTable(config.table_type)">Mixed (50/50)</option>
+                    <option value="CUSTOM" x-bind:disabled="isInteractiveTable(config.table_type)">Custom (manual)</option>
                 </select>
+                <small class="form-text">
+                    Presets only change the percentages below. They do <strong>not</strong> change SQL.
+                </small>
+            </div>
+
+            <div x-show="isInteractiveTable(config.table_type)" class="alert alert-warning mt-3">
+                <strong>⚠️ Interactive Table Limitation:</strong> Interactive tables do not support DML operations (INSERT, UPDATE, DELETE). 
+                Only read operations (Point Lookup, Range Scan) are available for benchmarking.
+                <a href="https://docs.snowflake.com/en/sql-reference/sql/create-interactive-table#usage-notes" target="_blank" rel="noopener">Learn more</a>
             </div>
 
             <div class="btn-group mt-2">
                 <button
                     type="button"
                     class="btn btn-secondary"
-                    :disabled="aiSqlAdjustLoading"
+                    :disabled="aiSqlAdjustLoading || !hasSelectedTable()"
                     @click="aiAdjustCustomSql()"
                 >
                     <span class="loading-spinner" x-show="aiSqlAdjustLoading"></span>
-                    <span x-text="aiSqlAdjustLoading ? 'Adjusting…' : 'AI Adjust 4 SQL Statements (Preview)'"></span>
+                    <span x-text="aiSqlAdjustLoading ? 'Generating…' : 'Generate SQL for This Table Type'"></span>
                 </button>
             </div>
 
-            <!-- Query Preview Section -->
-            <div class="mt-4" x-show="config.workload_type !== 'CUSTOM'">
-                <div class="alert alert-info">
-                    <strong>Query Preview</strong> - Queries are generated dynamically based on detected table columns.
-                    For range scans, the runner prefers a time-based scan (if a timestamp/date column exists) and falls back to an ID range scan.
-                </div>
-                
-                <!-- READ_ONLY queries -->
-                <div x-show="config.workload_type === 'READ_ONLY'" class="mt-3">
-                    <h4 class="text-sm font-semibold mb-2">Point Lookup Query (50%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id = ?</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (50%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>-- If time column detected:
-SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE &lt;TIME_COLUMN&gt; &gt;= ?
-ORDER BY &lt;TIME_COLUMN&gt; DESC LIMIT 100
-
--- Otherwise:
-SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id BETWEEN ? AND ? + 100
-ORDER BY id LIMIT 100</code></pre>
-                </div>
-                
-                <!-- WRITE_ONLY queries -->
-                <div x-show="config.workload_type === 'WRITE_ONLY'" class="mt-3">
-                    <h4 class="text-sm font-semibold mb-2">Insert Query (70%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (30%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-SET data = ?, timestamp = CURRENT_TIMESTAMP 
-WHERE id = ?</code></pre>
-                </div>
-                
-                <!-- READ_HEAVY queries -->
-                <div x-show="config.workload_type === 'READ_HEAVY'" class="mt-3">
-                    <h4 class="text-sm font-semibold mb-2">Point Lookup Query (40%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id = ?</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (40%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id BETWEEN ? AND ? + 100
-ORDER BY id LIMIT 100</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Insert Query (15%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (5%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-SET data = ?, timestamp = CURRENT_TIMESTAMP 
-WHERE id = ?</code></pre>
-                </div>
-                
-                <!-- WRITE_HEAVY queries -->
-                <div x-show="config.workload_type === 'WRITE_HEAVY'" class="mt-3">
-                    <h4 class="text-sm font-semibold mb-2">Insert Query (60%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (20%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-SET data = ?, timestamp = CURRENT_TIMESTAMP 
-WHERE id = ?</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Point Lookup Query (10%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id = ?</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (10%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id BETWEEN ? AND ? + 100
-ORDER BY id LIMIT 100</code></pre>
-                </div>
-                
-                <!-- MIXED queries -->
-                <div x-show="config.workload_type === 'MIXED'" class="mt-3">
-                    <h4 class="text-sm font-semibold mb-2">Point Lookup Query (25%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id = ?</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Range Scan Query (25%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>SELECT * FROM <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-WHERE id BETWEEN ? AND ? + 100
-ORDER BY id LIMIT 100</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Insert Query (35%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>INSERT INTO <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-(id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)</code></pre>
-                    
-                    <h4 class="text-sm font-semibold mb-2 mt-3">Update Query (15%)</h4>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto"><code>UPDATE <span x-text="config.database"></span>.<span x-text="config.schema"></span>.<span x-text="config.table_name"></span> 
-SET data = ?, timestamp = CURRENT_TIMESTAMP 
-WHERE id = ?</code></pre>
+            <div class="alert alert-info mt-3">
+                <div class="text-sm">
+                    <div><strong>SQL placeholder:</strong> use <code>{table}</code> for the full table name.</div>
+                    <div x-show="isPostgresFamilyTableType(config.table_type)">
+                        <strong>Parameters:</strong> Postgres uses <code>$1</code>, <code>$2</code>, …
+                    </div>
+                    <div x-show="!isPostgresFamilyTableType(config.table_type)">
+                        <strong>Parameters:</strong> Snowflake uses <code>?</code>.
+                    </div>
+                    <div class="mt-1">
+                        <strong>Strict evaluation:</strong> a run is compliant only if all enabled per-query targets are met.
+                    </div>
                 </div>
             </div>
 
-            <!-- Custom Queries -->
-            <div class="mt-4" x-show="config.workload_type === 'CUSTOM'">
-                <div class="alert alert-info">
-                    <strong>Custom Queries</strong> - Provide your own SQL templates. Use <code>{table}</code> as placeholder for the full table name.
+            <div class="alert alert-info mt-3">
+                <strong>Total mix must equal 100%.</strong>
+                Current total:
+                <code x-text="mixTotal() + '%'"></code>
+            </div>
+
+            <div class="overflow-x-auto mt-3">
+                <table style="width: 100%; border-collapse: collapse; table-layout: fixed;">
+                    <thead style="background: #f3f4f6;">
+                        <tr>
+                            <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 7rem;">Query Type</th>
+                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 5rem;">Mix %</th>
+                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 8rem;">P95 Target (ms)</th>
+                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 8rem;">P99 Target (ms)</th>
+                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 7rem;">Max Error %</th>
+                            <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">SQL (stored in template)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Point Lookup</td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_point_lookup_pct" min="0" max="100">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_point_lookup_p95_latency_ms" min="-1">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_point_lookup_p99_latency_ms" min="-1">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_point_lookup_error_rate_pct" min="-1" max="100" step="0.1">
+                            </td>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                                <template x-if="editingSql !== 'point_lookup'">
+                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
+                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_point_lookup_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('point_lookup')">Edit</button>
+                                    </div>
+                                </template>
+                                <template x-if="editingSql === 'point_lookup'">
+                                    <div>
+                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_point_lookup_query"></textarea>
+                                        <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('point_lookup')">Done</button>
+                                    </div>
+                                </template>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Range Scan</td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_range_scan_pct" min="0" max="100">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_range_scan_p95_latency_ms" min="-1">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_range_scan_p99_latency_ms" min="-1">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_range_scan_error_rate_pct" min="-1" max="100" step="0.1">
+                            </td>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                                <template x-if="editingSql !== 'range_scan'">
+                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
+                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_range_scan_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('range_scan')">Edit</button>
+                                    </div>
+                                </template>
+                                <template x-if="editingSql === 'range_scan'">
+                                    <div>
+                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_range_scan_query"></textarea>
+                                        <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('range_scan')">Done</button>
+                                    </div>
+                                </template>
+                            </td>
+                        </tr>
+                        <tr :class="{ 'opacity-50': isInteractiveTable(config.table_type) }">
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">
+                                Insert
+                                <span x-show="isInteractiveTable(config.table_type)" class="text-xs text-red-600 block">(N/A)</span>
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_insert_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_insert_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_insert_p99_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_insert_error_rate_pct" min="-1" max="100" step="0.1" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                                <template x-if="editingSql !== 'insert' && !isInteractiveTable(config.table_type)">
+                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
+                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_insert_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('insert')">Edit</button>
+                                    </div>
+                                </template>
+                                <template x-if="isInteractiveTable(config.table_type)">
+                                    <span class="text-xs text-gray-500 italic">Not supported on interactive tables</span>
+                                </template>
+                                <template x-if="editingSql === 'insert' && !isInteractiveTable(config.table_type)">
+                                    <div>
+                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_insert_query"></textarea>
+                                        <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('insert')">Done</button>
+                                    </div>
+                                </template>
+                            </td>
+                        </tr>
+                        <tr :class="{ 'opacity-50': isInteractiveTable(config.table_type) }">
+                            <td style="padding: 0.5rem; font-weight: 500;">
+                                Update
+                                <span x-show="isInteractiveTable(config.table_type)" class="text-xs text-red-600 block">(N/A)</span>
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right;">
+                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_update_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_update_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_update_p99_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem; text-align: right;">
+                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_update_error_rate_pct" min="-1" max="100" step="0.1" :disabled="isInteractiveTable(config.table_type)">
+                            </td>
+                            <td style="padding: 0.5rem;">
+                                <template x-if="editingSql !== 'update' && !isInteractiveTable(config.table_type)">
+                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
+                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_update_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('update')">Edit</button>
+                                    </div>
+                                </template>
+                                <template x-if="isInteractiveTable(config.table_type)">
+                                    <span class="text-xs text-gray-500 italic">Not supported on interactive tables</span>
+                                </template>
+                                <template x-if="editingSql === 'update' && !isInteractiveTable(config.table_type)">
+                                    <div>
+                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_update_query"></textarea>
+                                        <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('update')">Done</button>
+                                    </div>
+                                </template>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <small class="form-text mt-2">
+                Tip: leave a target at <code>-1</code> to disable it for that query type.
+            </small>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Test Parameters</div>
+            
+            <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'FIND_MAX_CONCURRENCY'">
+                <label class="form-label">Test Duration (seconds)</label>
+                <input type="number" class="form-input" x-model.number="config.duration" min="10" max="3600">
+                <small class="form-text">How long to run the test (10-3600 seconds)</small>
+            </div>
+
+            <div class="form-group">
+                <label class="form-label">Load Mode</label>
+                <select class="form-select" x-model="config.load_mode">
+                    <option value="CONCURRENCY">Fixed concurrency (workers)</option>
+                    <option value="QPS">Auto-scale workers (Target)</option>
+                    <option value="FIND_MAX_CONCURRENCY">Find Max Concurrency (step-load)</option>
+                </select>
+                <small class="form-text">
+                    Fixed concurrency runs a constant number of workers. Auto-scale dynamically adjusts workers to hit a target.
+                    Find Max Concurrency incrementally increases workers to find the maximum sustainable concurrency.
+                </small>
+            </div>
+
+            <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
+                <label
+                    class="form-label"
+                    x-text="isPostgresFamilyTableType(config.table_type) ? 'Target QPS' : 'Target Snowflake Running'"
+                ></label>
+                <input type="number" class="form-input" x-model.number="config.target_qps" min="1" max="100000" step="1">
+                <small class="form-text" x-show="isPostgresFamilyTableType(config.table_type)">
+                    Desired total operations per second across the template mix (reads + writes)
+                </small>
+                <small class="form-text" x-show="!isPostgresFamilyTableType(config.table_type)">
+                    Desired concurrent Snowflake <code>RUNNING</code> queries for this test’s <code>QUERY_TAG</code>. Throughput (QPS) is measured separately.
+                </small>
+            </div>
+
+            <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'CONCURRENCY'">
+                <label class="form-label">Concurrent Connections</label>
+                <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" max="1000">
+                <small class="form-text">Number of parallel workers (1-1000)</small>
+            </div>
+
+            <div class="mt-2" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
+                <details :open="qpsAdvancedOpen" @toggle="qpsAdvancedOpen = $event.target.open">
+                    <summary class="text-sm font-semibold" style="cursor: pointer;">
+                        Advanced: worker bounds
+                    </summary>
+                    <div class="mt-2">
+                        <div class="form-group">
+                            <label class="form-label">Min Workers</label>
+                            <input type="number" class="form-input" x-model.number="config.min_concurrency" min="1" max="1000" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
+                            <small class="form-text">Starting worker count for auto-scale mode (the controller will scale up/down)</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">Max Workers</label>
+                            <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="-1" max="1000" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
+                            <small class="form-text">
+                                Upper bound for dynamic worker scaling. Use <code>-1</code> for no user cap (still bounded by engine limits).
+                            </small>
+                        </div>
+
+                        <small class="form-text">
+                            Usually you can leave these defaults. Max workers is a safety cap.
+                        </small>
+                    </div>
+                </details>
+            </div>
+
+            <div class="mt-2" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'FIND_MAX_CONCURRENCY'">
+                <div class="p-3 bg-blue-50 rounded border border-blue-200 mb-3" style="background-color: #eff6ff; border-color: #bfdbfe;">
+                    <div class="text-sm" style="color: #1e40af;">
+                        <strong>Find Max Concurrency</strong> automatically finds the maximum sustainable concurrency.
+                        <strong>The test runs until degradation is detected or max workers is reached</strong> (no fixed duration).
+                        <ol class="mt-2 ml-4" style="list-style-type: decimal; margin-left: 1.5rem;">
+                            <li>Starts at the specified concurrency level</li>
+                            <li>Runs for the step duration and measures QPS/latency</li>
+                            <li>If stable, increases concurrency by the increment and repeats</li>
+                            <li>Stops when: QPS drops, latency spikes, errors increase, queue builds up, or max workers reached</li>
+                        </ol>
+                    </div>
                 </div>
 
                 <div class="form-group">
-                    <div class="flex items-center justify-between gap-3">
-                        <label class="form-label mb-0">Point Lookup Query (SELECT)</label>
-                        <div class="flex items-center gap-2">
-                            <span class="text-sm text-gray-600">%</span>
-                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_point_lookup_pct" min="0" max="100">
-                        </div>
-                    </div>
-                    <textarea class="form-textarea" x-model="config.custom_point_lookup_query" placeholder="SELECT * FROM {table} WHERE id = ?"></textarea>
+                    <label class="form-label">Start Concurrency</label>
+                    <input type="number" class="form-input" x-model.number="config.start_concurrency" min="1" max="100" step="1">
+                    <small class="form-text">Initial number of workers (default: 5)</small>
                 </div>
 
                 <div class="form-group">
-                    <div class="flex items-center justify-between gap-3">
-                        <label class="form-label mb-0">Range Scan Query (SELECT)</label>
-                        <div class="flex items-center gap-2">
-                            <span class="text-sm text-gray-600">%</span>
-                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_range_scan_pct" min="0" max="100">
-                        </div>
-                    </div>
-                    <textarea class="form-textarea" x-model="config.custom_range_scan_query" placeholder="SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100"></textarea>
+                    <label class="form-label">Concurrency Increment</label>
+                    <input type="number" class="form-input" x-model.number="config.concurrency_increment" min="1" max="100" step="1">
+                    <small class="form-text">Workers to add each step (default: 10)</small>
                 </div>
 
                 <div class="form-group">
-                    <div class="flex items-center justify-between gap-3">
-                        <label class="form-label mb-0">Insert Query (INSERT)</label>
-                        <div class="flex items-center gap-2">
-                            <span class="text-sm text-gray-600">%</span>
-                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_insert_pct" min="0" max="100">
-                        </div>
-                    </div>
-                    <textarea class="form-textarea" x-model="config.custom_insert_query" placeholder="INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)"></textarea>
+                    <label class="form-label">Step Duration (seconds)</label>
+                    <input type="number" class="form-input" x-model.number="config.step_duration_seconds" min="10" max="300" step="5">
+                    <small class="form-text">How long to test at each concurrency level (default: 30s)</small>
                 </div>
 
                 <div class="form-group">
-                    <div class="flex items-center justify-between gap-3">
-                        <label class="form-label mb-0">Update Query (UPDATE)</label>
-                        <div class="flex items-center gap-2">
-                            <span class="text-sm text-gray-600">%</span>
-                            <input type="number" class="form-input" style="max-width: 6rem;" x-model.number="config.custom_update_pct" min="0" max="100">
-                        </div>
-                    </div>
-                    <textarea class="form-textarea" x-model="config.custom_update_query" placeholder="UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?"></textarea>
+                    <label class="form-label">Max Workers (ceiling)</label>
+                    <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" max="1000" step="1">
+                    <small class="form-text">Maximum concurrency to test (test stops when reached even if still stable)</small>
                 </div>
 
-                <div class="alert alert-info mt-3">
-                    <strong>Total must equal 100%.</strong>
-                    Current total:
-                    <code x-text="(Number(config.custom_point_lookup_pct || 0) + Number(config.custom_range_scan_pct || 0) + Number(config.custom_insert_pct || 0) + Number(config.custom_update_pct || 0)) + '%'"></code>
-                </div>
+                <details class="mt-2">
+                    <summary class="text-sm font-semibold" style="cursor: pointer;">
+                        Advanced: stability thresholds
+                    </summary>
+                    <div class="mt-2">
+                        <div class="form-group">
+                            <label class="form-label">QPS Stability Threshold (%)</label>
+                            <input type="number" class="form-input" x-model.number="config.qps_stability_pct" min="1" max="50" step="1">
+                            <small class="form-text">QPS must stay within this % of previous step to be considered stable (default: 5%)</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">Latency Stability Threshold (%)</label>
+                            <input type="number" class="form-input" x-model.number="config.latency_stability_pct" min="5" max="100" step="5">
+                            <small class="form-text">P95 latency can increase up to this % and still be stable (default: 20%)</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label">Max Error Rate (%)</label>
+                            <input type="number" class="form-input" x-model.number="config.max_error_rate_pct" min="0" max="100" step="0.5">
+                            <small class="form-text">Test stops if error rate exceeds this (default: 1%)</small>
+                        </div>
+                    </div>
+                </details>
             </div>
 
             <div class="form-group">
@@ -486,7 +571,7 @@ WHERE id = ?</code></pre>
 
             <div
                 class="form-group"
-                x-show="config.table_type !== 'POSTGRES' && config.table_type !== 'SNOWFLAKE_POSTGRES' && config.table_type !== 'CRUNCHYDATA'"
+                x-show="config.table_type === 'STANDARD'"
             >
                 <label class="form-label">
                     <input type="checkbox" x-model="config.use_cached_result">
@@ -494,11 +579,21 @@ WHERE id = ?</code></pre>
                 </label>
                 <small class="form-text">
                     If enabled, identical SELECT statements may return cached results. Disable to force query execution each time.
+                    (Only applicable to standard tables; hybrid/interactive tables are optimized for transactional workloads where caching is not beneficial.)
                 </small>
             </div>
         </div>
 
         <div class="btn-group" x-show="!isReadOnly">
+            <button
+                type="button"
+                class="btn btn-primary"
+                :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading"
+                @click="saveAndPrepare()"
+            >
+                <span class="loading-spinner" x-show="saveAndPrepareLoading"></span>
+                <span x-text="saveAndPrepareLoading ? (mode === 'edit' ? 'Updating & Populating…' : 'Saving & Populating…') : (mode === 'edit' ? 'Update & Populate' : 'Save & Populate')"></span>
+            </button>
             <button
                 type="submit"
                 class="btn btn-primary"
@@ -507,17 +602,33 @@ WHERE id = ?</code></pre>
                 <span class="loading-spinner" x-show="isSaving"></span>
                 <span x-text="isSaving ? (mode === 'edit' ? 'Updating…' : 'Saving…') : (mode === 'edit' ? 'Update Template' : 'Save Template')"></span>
             </button>
-            <button type="button" class="btn btn-secondary" @click="cancel">Cancel</button>
+            <button
+                type="button"
+                class="btn btn-primary"
+                x-show="loadedTemplate"
+                :disabled="prepareTemplateLoading"
+                @click="prepareTemplate()"
+            >
+                <span class="loading-spinner" x-show="prepareTemplateLoading"></span>
+                <span x-text="prepareTemplateLoading ? 'Preparing…' : 'Run Benchmark'"></span>
+            </button>
+            <button type="button" class="btn btn-secondary" @click="cancel" x-text="loadedTemplate ? 'Close' : 'Cancel'"></button>
+        </div>
+        
+        <div class="text-sm text-gray-600 mt-3" x-show="!isReadOnly">
+            <strong>Save & Populate</strong> saves the template and generates value pools from your table using Snowflake <code>SAMPLE</code>. 
+            These pools provide realistic parameter values for high-concurrency benchmark runs. 
+            <strong>Save Template</strong> only saves the configuration without populating value pools (you can populate later).
         </div>
         </fieldset>
     </form>
 
-    <!-- AI workload preparation (persisted; never generated at runtime) -->
+    <!-- Value pool population (persisted; never generated at runtime) -->
     <div x-show="!hasResults && !isReadOnly" class="card">
-        <div class="card-title">AI Workload Preparation</div>
+        <div class="card-title">Value Pool Population (Optional)</div>
         <p class="text-sm text-gray-700">
-            Generates and persists large value pools (via Snowflake <code>SAMPLE</code>) and stores metadata on the template.
-            No AI calls occur during benchmark execution.
+            Generates and persists value pools (via Snowflake <code>SAMPLE</code>) and stores metadata on the template.
+            These pools are used to produce realistic parameters during high-concurrency runs. No AI calls occur during benchmark execution.
         </p>
 
         <div x-show="!loadedTemplate" class="alert alert-info mt-3">
@@ -532,12 +643,18 @@ WHERE id = ?</code></pre>
 
         <div x-show="aiPrepResult" class="alert alert-info mt-3">
             <div class="text-sm">
-                <div><strong>Status:</strong> <span x-text="aiPrepResult?.message || ''"></span></div>
+                <div>
+                    <strong>Populated:</strong>
+                    <span x-text="aiPrepResult?.prepared ? 'Yes' : 'No'"></span>
+                    <span x-show="aiPrepResult?.prepared_at">
+                        • <strong>At:</strong> <code x-text="aiPrepResult?.prepared_at || ''"></code>
+                    </span>
+                </div>
                 <div class="mt-1">
-                    <strong>AI available:</strong>
-                    <span x-text="aiPrepResult?.ai_available ? 'Yes' : 'No'"></span>
-                    <span x-show="!aiPrepResult?.ai_available && aiPrepResult?.ai_error">
-                        • <strong>Reason:</strong> <span x-text="aiPrepResult?.ai_error || ''"></span>
+                    <strong>Cortex available:</strong>
+                    <span x-text="aiPrepResult?.cortex_available ? 'Yes' : 'No'"></span>
+                    <span x-show="!aiPrepResult?.cortex_available && aiPrepResult?.cortex_error">
+                        • <strong>Reason:</strong> <span x-text="aiPrepResult?.cortex_error || ''"></span>
                     </span>
                 </div>
                 <div class="mt-1" x-show="aiPrepResult?.pool_id">
@@ -548,6 +665,9 @@ WHERE id = ?</code></pre>
                 </div>
                 <div class="mt-1" x-show="aiPrepResult?.time_column">
                     <strong>Time column:</strong> <code x-text="aiPrepResult?.time_column || ''"></code>
+                </div>
+                <div class="mt-1" x-show="aiPrepResult?.range_mode">
+                    <strong>Range mode:</strong> <code x-text="aiPrepResult?.range_mode || ''"></code>
                 </div>
                 <div class="mt-2" x-show="aiPrepResult?.pools">
                     <strong>Pools:</strong>
@@ -564,30 +684,80 @@ WHERE id = ?</code></pre>
                 @click="prepareAiWorkload()"
             >
                 <span class="loading-spinner" x-show="aiPrepLoading"></span>
-                <span x-text="aiPrepLoading ? 'Preparing…' : 'Prepare AI Workload (Pools + Metadata)'"></span>
-            </button>
-            <button
-                type="button"
-                class="btn btn-secondary"
-                :disabled="aiPrepLoading"
-                @click="reloadTemplate()"
-            >
-                Refresh Template
+                <span x-text="aiPrepLoading ? 'Populating…' : 'Populate Value Pools (Metadata + SAMPLE)'"></span>
             </button>
         </div>
     </div>
     
+    <!-- Value Pool Status (shown in view mode) -->
+    <div x-show="isReadOnly && loadedTemplate" class="card">
+        <div class="card-title">Value Pool Status</div>
+        
+        <div x-show="!config.ai_workload || !config.ai_workload.pool_id" class="alert alert-warning">
+            <strong>Not populated.</strong> This template has not been populated with value pools.
+            <span x-show="hasResults">Copy this template to create an editable version that can be populated.</span>
+        </div>
+
+        <div x-show="aiPrepError && isReadOnly" class="alert alert-error mt-3">
+            <strong>Value pool population failed.</strong>
+            <span x-text="aiPrepError"></span>
+        </div>
+
+        <div x-show="config.ai_workload && config.ai_workload.pool_id" class="alert alert-success">
+            <div class="text-sm">
+                <div>
+                    <strong>Populated:</strong> Yes
+                    <span x-show="config.ai_workload?.prepared_at">
+                        • <strong>At:</strong> <code x-text="config.ai_workload?.prepared_at || ''"></code>
+                    </span>
+                </div>
+                <div class="mt-1" x-show="config.ai_workload?.pool_id">
+                    <strong>Pool ID:</strong> <code x-text="config.ai_workload?.pool_id || ''"></code>
+                </div>
+                <div class="mt-1" x-show="config.ai_workload?.key_column">
+                    <strong>Key column:</strong> <code x-text="config.ai_workload?.key_column || ''"></code>
+                </div>
+                <div class="mt-1" x-show="config.ai_workload?.time_column">
+                    <strong>Time column:</strong> <code x-text="config.ai_workload?.time_column || ''"></code>
+                </div>
+                <div class="mt-1" x-show="config.ai_workload?.range_mode">
+                    <strong>Range mode:</strong> <code x-text="config.ai_workload?.range_mode || ''"></code>
+                </div>
+                <div class="mt-1" x-show="config.ai_workload?.domain_label">
+                    <strong>Domain:</strong> <code x-text="config.ai_workload?.domain_label || ''"></code>
+                </div>
+                <div class="mt-2" x-show="config.ai_workload?.pools">
+                    <strong>Pools:</strong>
+                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto mt-1"><code x-text="JSON.stringify(config.ai_workload?.pools || {}, null, 2)"></code></pre>
+                </div>
+                <div class="mt-2" x-show="config.ai_workload?.ai_notes">
+                    <strong>AI Notes:</strong>
+                    <div class="text-xs text-gray-600 mt-1" x-text="config.ai_workload?.ai_notes || ''"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Actions when template has results -->
     <div x-show="hasResults || isReadOnly" class="card">
         <div class="btn-group">
-            <button type="button" class="btn btn-primary" @click="copyTemplate">
+            <button 
+                type="button" 
+                class="btn btn-primary" 
+                :disabled="prepareTemplateLoading"
+                @click="prepareTemplate()"
+            >
+                <span class="loading-spinner" x-show="prepareTemplateLoading"></span>
+                <span x-text="prepareTemplateLoading ? 'Preparing…' : 'Run Benchmark'"></span>
+            </button>
+            <button type="button" class="btn btn-secondary" @click="copyTemplate">
                 Copy Template
             </button>
             <button type="button" class="btn btn-danger" @click="deleteTemplateWithResults">
                 Delete Template & Results
             </button>
             <button type="button" class="btn btn-secondary" @click="cancel">
-                Back to Templates
+                Close
             </button>
         </div>
     </div>
@@ -604,21 +774,28 @@ function testConfiguration() {
             database: 'UNISTORE_BENCHMARK',
             schema: 'PUBLIC',
             table_name: '',
-            clustering_keys: '',
-            primary_key: '',
-            add_indexes: false,
-            indexes: [],
-            warehouse_mode: 'EXISTING',
             warehouse_name: '',
-            new_warehouse_name: '',
             warehouse_size: 'MEDIUM',
             multi_cluster: false,
             min_clusters: 1,
             max_clusters: 3,
             scaling_policy: 'STANDARD',
             duration: 300,
+            load_mode: 'CONCURRENCY',
+            target_qps: 100,
+            min_concurrency: 5,
             concurrent_connections: 10,
-            workload_type: 'MIXED',
+            // FIND_MAX_CONCURRENCY mode defaults
+            start_concurrency: 5,
+            concurrency_increment: 10,
+            step_duration_seconds: 30,
+            qps_stability_pct: 5.0,
+            latency_stability_pct: 20.0,
+            max_error_rate_pct: 1.0,
+            // Canonical storage model: templates persist CUSTOM SQL + weights.
+            // "Mix preset" is a UI helper that only adjusts weights.
+            workload_type: 'CUSTOM',
+            mix_preset: 'MIXED',
             think_time: 0,
             warmup: 30,
             use_cached_result: true,
@@ -633,6 +810,19 @@ function testConfiguration() {
             custom_range_scan_pct: 25,
             custom_insert_pct: 35,
             custom_update_pct: 15,
+            // Per-query-type targets (SLOs). Use -1 to disable a target.
+            target_point_lookup_p95_latency_ms: -1,
+            target_range_scan_p95_latency_ms: -1,
+            target_insert_p95_latency_ms: -1,
+            target_update_p95_latency_ms: -1,
+            target_point_lookup_p99_latency_ms: -1,
+            target_range_scan_p99_latency_ms: -1,
+            target_insert_p99_latency_ms: -1,
+            target_update_p99_latency_ms: -1,
+            target_point_lookup_error_rate_pct: -1,
+            target_range_scan_error_rate_pct: -1,
+            target_insert_error_rate_pct: -1,
+            target_update_error_rate_pct: -1,
             template_name: '',
             description: ''
         },
@@ -640,6 +830,9 @@ function testConfiguration() {
         availableWarehouses: [],
         selectedWarehouseDetails: null,
         resultsWarehouse: null,
+        availableDatabases: [],
+        availableSchemas: [],
+        availableObjects: [],
         mode: 'new', // 'new', 'edit', or 'view'
         hasResults: false, // true if template has been used
         isReadOnly: false,
@@ -649,15 +842,509 @@ function testConfiguration() {
         aiPrepLoading: false,
         aiPrepError: null,
         aiPrepResult: null,
+        aiPrepStatusFromConfig(msg = 'Loaded from template') {
+            const w = this.config && this.config.ai_workload ? this.config.ai_workload : null;
+            if (!w || typeof w !== 'object') return null;
+            const prepared = Boolean(w.pool_id);
+            const cortexAvailable = Boolean(
+                (w.ai_available != null ? w.ai_available : w.available) || false,
+            );
+            const cortexError =
+                (w.ai_error != null ? w.ai_error : w.availability_error) || null;
+            return {
+                message: msg,
+                prepared,
+                prepared_at: w.prepared_at || null,
+                pool_id: w.pool_id || null,
+                key_column: w.key_column || null,
+                time_column: w.time_column || null,
+                range_mode: w.range_mode || null,
+                pools: w.pools || null,
+                cortex_available: cortexAvailable,
+                cortex_error: cortexError,
+            };
+        },
         aiSqlAdjustLoading: false,
+        saveAndPrepareLoading: false,
+        prepareTemplateLoading: false,
+        qpsAdvancedOpen: false,
+
+        hasSelectedTable() {
+            const db = String(this.config.database || '').trim();
+            const sch = String(this.config.schema || '').trim();
+            const tbl = String(this.config.table_name || '').trim();
+            return Boolean(db && sch && tbl);
+        },
+
+        isPostgresFamilyTableType(tableType) {
+            const tt = String(tableType || '').trim().toUpperCase();
+            return tt === 'POSTGRES' || tt === 'SNOWFLAKE_POSTGRES';
+        },
+
+        isInteractiveTable(tableType) {
+            const tt = String(tableType || '').trim().toUpperCase();
+            return tt === 'INTERACTIVE';
+        },
+
+        mixTotal() {
+            return (
+                Number(this.config.custom_point_lookup_pct || 0) +
+                Number(this.config.custom_range_scan_pct || 0) +
+                Number(this.config.custom_insert_pct || 0) +
+                Number(this.config.custom_update_pct || 0)
+            );
+        },
+
+        editingSql: null, // tracks which SQL field is being edited: 'point_lookup', 'range_scan', 'insert', 'update', or null
+
+        toggleSqlEdit(field) {
+            this.editingSql = this.editingSql === field ? null : field;
+        },
+
+        formatSqlDisplay(sql) {
+            const s = String(sql || '').trim();
+            if (!s) return '(empty)';
+            return s;
+        },
+
+        applyMixPreset(preset) {
+            const p = String(preset || '').trim().toUpperCase();
+            const presets = {
+                READ_ONLY: { custom_point_lookup_pct: 50, custom_range_scan_pct: 50, custom_insert_pct: 0, custom_update_pct: 0 },
+                WRITE_ONLY: { custom_point_lookup_pct: 0, custom_range_scan_pct: 0, custom_insert_pct: 70, custom_update_pct: 30 },
+                READ_HEAVY: { custom_point_lookup_pct: 40, custom_range_scan_pct: 40, custom_insert_pct: 15, custom_update_pct: 5 },
+                WRITE_HEAVY: { custom_point_lookup_pct: 10, custom_range_scan_pct: 10, custom_insert_pct: 60, custom_update_pct: 20 },
+                MIXED: { custom_point_lookup_pct: 25, custom_range_scan_pct: 25, custom_insert_pct: 35, custom_update_pct: 15 },
+            };
+
+            // Always persist CUSTOM workloads; presets only affect weights.
+            this.config.workload_type = 'CUSTOM';
+
+            if (p === 'CUSTOM') {
+                this.config.mix_preset = 'CUSTOM';
+                return;
+            }
+            const w = presets[p];
+            if (!w) {
+                this.config.mix_preset = 'CUSTOM';
+                return;
+            }
+            this.config.custom_point_lookup_pct = w.custom_point_lookup_pct;
+            this.config.custom_range_scan_pct = w.custom_range_scan_pct;
+            this.config.custom_insert_pct = w.custom_insert_pct;
+            this.config.custom_update_pct = w.custom_update_pct;
+            this.config.mix_preset = p;
+        },
+
+        syncMixPresetFromWeights() {
+            const presets = {
+                READ_ONLY: { custom_point_lookup_pct: 50, custom_range_scan_pct: 50, custom_insert_pct: 0, custom_update_pct: 0 },
+                WRITE_ONLY: { custom_point_lookup_pct: 0, custom_range_scan_pct: 0, custom_insert_pct: 70, custom_update_pct: 30 },
+                READ_HEAVY: { custom_point_lookup_pct: 40, custom_range_scan_pct: 40, custom_insert_pct: 15, custom_update_pct: 5 },
+                WRITE_HEAVY: { custom_point_lookup_pct: 10, custom_range_scan_pct: 10, custom_insert_pct: 60, custom_update_pct: 20 },
+                MIXED: { custom_point_lookup_pct: 25, custom_range_scan_pct: 25, custom_insert_pct: 35, custom_update_pct: 15 },
+            };
+
+            const weights = {
+                custom_point_lookup_pct: Number(this.config.custom_point_lookup_pct || 0),
+                custom_range_scan_pct: Number(this.config.custom_range_scan_pct || 0),
+                custom_insert_pct: Number(this.config.custom_insert_pct || 0),
+                custom_update_pct: Number(this.config.custom_update_pct || 0),
+            };
+
+            for (const [k, v] of Object.entries(presets)) {
+                const match =
+                    weights.custom_point_lookup_pct === v.custom_point_lookup_pct &&
+                    weights.custom_range_scan_pct === v.custom_range_scan_pct &&
+                    weights.custom_insert_pct === v.custom_insert_pct &&
+                    weights.custom_update_pct === v.custom_update_pct;
+                if (match) {
+                    this.config.mix_preset = k;
+                    return;
+                }
+            }
+            this.config.mix_preset = 'CUSTOM';
+        },
+
+        ensureCanonicalWorkloadConfig() {
+            // Canonical: templates always store CUSTOM SQL + weights.
+            this.config.workload_type = 'CUSTOM';
+
+            // Backfill mix_preset (UI helper).
+            if (this.config.mix_preset == null) {
+                this.config.mix_preset = 'CUSTOM';
+            }
+
+            const isPg = this.isPostgresFamilyTableType(this.config.table_type);
+            const defaults = isPg
+                ? {
+                    custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = $1',
+                    custom_range_scan_query: 'SELECT * FROM {table} WHERE id BETWEEN $1 AND $2 LIMIT 100',
+                    custom_insert_query: 'INSERT INTO {table} (id, data, timestamp) VALUES ($1, $2, $3)',
+                    custom_update_query: 'UPDATE {table} SET data = $1, timestamp = $2 WHERE id = $3',
+                }
+                : {
+                    custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
+                    custom_range_scan_query: 'SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 LIMIT 100',
+                    custom_insert_query: 'INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
+                    custom_update_query: 'UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?',
+                };
+
+            // Backfill SQL strings if missing.
+            for (const k of ['custom_point_lookup_query', 'custom_range_scan_query', 'custom_insert_query', 'custom_update_query']) {
+                if (!String(this.config[k] || '').trim()) {
+                    this.config[k] = defaults[k];
+                }
+            }
+
+            // Backfill weight fields if missing (use MIXED if everything is zero).
+            const pctKeys = ['custom_point_lookup_pct', 'custom_range_scan_pct', 'custom_insert_pct', 'custom_update_pct'];
+            for (const k of pctKeys) {
+                const n = Number(this.config[k]);
+                this.config[k] = Number.isFinite(n) ? n : 0;
+            }
+            if (this.mixTotal() === 0) {
+                this.applyMixPreset('MIXED');
+            } else {
+                this.syncMixPresetFromWeights();
+            }
+
+            // Backfill target keys to -1 (disabled).
+            for (const k of [
+                'target_point_lookup_p95_latency_ms',
+                'target_range_scan_p95_latency_ms',
+                'target_insert_p95_latency_ms',
+                'target_update_p95_latency_ms',
+                'target_point_lookup_p99_latency_ms',
+                'target_range_scan_p99_latency_ms',
+                'target_insert_p99_latency_ms',
+                'target_update_p99_latency_ms',
+                'target_point_lookup_error_rate_pct',
+                'target_range_scan_error_rate_pct',
+                'target_insert_error_rate_pct',
+                'target_update_error_rate_pct',
+            ]) {
+                if (this.config[k] == null || String(this.config[k]).trim() === '') {
+                    this.config[k] = -1;
+                }
+            }
+
+            // If QPS worker bounds are invalid, auto-open the Advanced section so the user can fix.
+            const loadMode = String(this.config.load_mode || 'CONCURRENCY').trim().toUpperCase();
+            if (loadMode === 'QPS') {
+                const minC = Number(this.config.min_concurrency || 1);
+                const maxC = Number(this.config.concurrent_connections || 1);
+            if (
+                !Number.isFinite(minC) ||
+                !Number.isFinite(maxC) ||
+                minC < 1 ||
+                (maxC !== -1 && maxC < 1) ||
+                (maxC !== -1 && minC > maxC)
+            ) {
+                    this.qpsAdvancedOpen = true;
+                }
+            }
+        },
 
         nextTickAsync() {
             return new Promise((resolve) => this.$nextTick(resolve));
+        },
+
+        forceSelectValue(id, value) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.value = String(value || '');
+        },
+
+        formatWarehouseOption(wh) {
+            // Format: WH_NAME (Gen1/2, Size, MCW 1-X?, QAS?)
+            const gen = wh.resource_constraint === 'STANDARD_GEN_2' ? 'Gen2' : 'Gen1';
+            let parts = [gen, wh.size];
+            
+            // Add MCW only if multi-cluster is enabled (max > 1)
+            if (wh.max_cluster_count > 1) {
+                parts.push(`MCW ${wh.min_cluster_count}-${wh.max_cluster_count}`);
+            }
+            
+            // Add QAS only if enabled
+            if (wh.enable_query_acceleration) {
+                parts.push('QAS');
+            }
+            
+            return `${wh.name} (${parts.join(', ')})`;
+        },
+
+        async onTableTypeChanged() {
+            const tableType = String(this.config.table_type || '').trim().toUpperCase();
+            const isPostgres =
+                tableType === 'POSTGRES' ||
+                tableType === 'SNOWFLAKE_POSTGRES';
+
+            if (isPostgres) {
+                // Avoid persisting/using a Snowflake execution warehouse for Postgres templates.
+                this.config.warehouse_name = '';
+                this.selectedWarehouseDetails = null;
+            }
+
+            // Interactive tables do NOT support DML (INSERT, UPDATE, DELETE).
+            // Only INSERT OVERWRITE is allowed (not supported in benchmark workloads).
+            // Auto-switch to READ_ONLY and zero out INSERT/UPDATE.
+            if (this.isInteractiveTable(tableType)) {
+                this.config.custom_insert_pct = 0;
+                this.config.custom_update_pct = 0;
+                this.config.custom_insert_query = '';
+                this.config.custom_update_query = '';
+                this.applyMixPreset('READ_ONLY');
+            }
+
+            await this.loadCatalog();
+        },
+
+        async loadCatalog() {
+            // Capture saved values before any async operations (x-model can clear values when options aren't rendered yet)
+            const savedDatabase = String(this.config.database || '').trim();
+            const savedSchema = String(this.config.schema || '').trim();
+            const savedTableName = String(this.config.table_name || '').trim();
+            const isEditingTemplate = this.mode === 'edit' || this.mode === 'view';
+
+            try {
+                const t = String(this.config.table_type || '').trim().toLowerCase();
+                const dbResp = await fetch(
+                    `/api/catalog/databases?table_type=${encodeURIComponent(t)}`,
+                );
+                if (!dbResp.ok) {
+                    const errPayload = await dbResp.json().catch(() => ({}));
+                    const detail = errPayload?.detail || `HTTP ${dbResp.status}`;
+                    window.toast.error(`Failed to load databases: ${detail}`);
+                    this.availableDatabases = [];
+                    return;
+                }
+                const dbs = await dbResp.json();
+                this.availableDatabases = dbs || [];
+
+                const normalize = (v) => String(v || '').trim().toUpperCase();
+
+                // Pick desired database:
+                // - If editing template, try to match saved database
+                // - Else fall back to first available
+                let desiredDb = '';
+                const selectedNorm = normalize(savedDatabase);
+                if (selectedNorm) {
+                    const match = (this.availableDatabases || []).find(
+                        (d) => normalize(d?.name) === selectedNorm,
+                    );
+                    desiredDb = match?.name || '';
+                }
+                if (!desiredDb && this.availableDatabases.length > 0 && !isEditingTemplate) {
+                    // Only auto-select first database for new templates
+                    desiredDb = this.availableDatabases[0].name;
+                }
+
+                // Important: set x-model value only after options are rendered, otherwise the browser may keep
+                // showing the placeholder (and can even sync "" back into the model).
+                await this.nextTickAsync();
+                await this.nextTickAsync();
+
+                this.config.database = desiredDb;
+
+                // Force DOM select value to match once options exist.
+                await this.nextTickAsync();
+                this.forceSelectValue('database-select', desiredDb);
+
+                // Restore saved selections in case x-model cleared them while options were unavailable.
+                if (savedSchema) {
+                    this.config.schema = savedSchema;
+                }
+                if (savedTableName) {
+                    this.config.table_name = savedTableName;
+                }
+
+                // Pass preserveSelection=true when editing to keep saved schema/table.
+                await this.onDatabaseChanged(isEditingTemplate);
+            } catch (e) {
+                console.warn('Failed to load catalog:', e);
+                window.toast.error('Failed to load catalog: ' + (e?.message || e));
+                this.availableDatabases = [];
+                this.availableSchemas = [];
+                this.availableObjects = [];
+                // Don't clear saved selections on failure in edit/view; allow the user to retry by changing type/db.
+                if (!isEditingTemplate) {
+                    this.config.database = '';
+                    this.config.schema = '';
+                    this.config.table_name = '';
+                }
+            }
+        },
+
+        async onDatabaseChanged(preserveSelection = false) {
+            const savedSchema = String(this.config.schema || '').trim();
+            const savedTableName = String(this.config.table_name || '').trim();
+            this.availableSchemas = [];
+            this.availableObjects = [];
+
+            const db = String(this.config.database || '').trim();
+            if (!db) {
+                this.config.schema = '';
+                this.config.table_name = '';
+                return;
+            }
+
+            try {
+                const t = String(this.config.table_type || '').trim().toLowerCase();
+                const url =
+                    `/api/catalog/schemas?table_type=${encodeURIComponent(t)}` +
+                    `&database=${encodeURIComponent(db)}`;
+                const resp = await fetch(url);
+                if (!resp.ok) {
+                    const errPayload = await resp.json().catch(() => ({}));
+                    const detail = errPayload?.detail || `HTTP ${resp.status}`;
+                    window.toast.error(`Failed to load schemas: ${detail}`);
+                    this.availableSchemas = [];
+                    this.availableObjects = [];
+                    if (!preserveSelection) {
+                        this.config.schema = '';
+                        this.config.table_name = '';
+                    }
+                    return;
+                }
+                const schemas = await resp.json();
+                this.availableSchemas = schemas || [];
+
+                const normalize = (v) => String(v || '').trim().toUpperCase();
+                const curNorm = normalize(savedSchema);
+                const match = (this.availableSchemas || []).find(
+                    (s) => normalize(s?.name) === curNorm,
+                );
+
+                // Important: set x-model value only after options are rendered.
+                await this.nextTickAsync();
+                await this.nextTickAsync();
+
+                if (match) {
+                    // Match found: use exact name from API (fixes case mismatch with dropdown)
+                    this.config.schema = match.name;
+                } else if (!preserveSelection && this.availableSchemas.length > 0) {
+                    // No match and not preserving: fall back to first available
+                    this.config.schema = this.availableSchemas[0].name;
+                } else {
+                    // No match found: clear (saved schema doesn't exist anymore)
+                    this.config.schema = '';
+                }
+
+                // Force DOM select value to match once options exist.
+                await this.nextTickAsync();
+                this.forceSelectValue('schema-select', this.config.schema);
+
+                // Restore saved table selection before loading objects (in case x-model cleared it).
+                if (savedTableName) {
+                    this.config.table_name = savedTableName;
+                }
+
+                await this.onSchemaChanged(preserveSelection);
+            } catch (e) {
+                console.warn('Failed to load schemas:', e);
+                window.toast.error('Failed to load schemas: ' + (e?.message || e));
+                this.availableSchemas = [];
+                this.availableObjects = [];
+                if (!preserveSelection) {
+                    this.config.schema = '';
+                    this.config.table_name = '';
+                }
+            }
+        },
+
+        async onSchemaChanged(preserveSelection = false) {
+            const savedTableName = String(this.config.table_name || '').trim();
+            this.availableObjects = [];
+
+            const db = String(this.config.database || '').trim();
+            const schema = String(this.config.schema || '').trim();
+            if (!db || !schema) {
+                this.config.table_name = '';
+                return;
+            }
+
+            try {
+                const t = String(this.config.table_type || '').trim().toLowerCase();
+                const url =
+                    `/api/catalog/objects?table_type=${encodeURIComponent(t)}` +
+                    `&database=${encodeURIComponent(db)}` +
+                    `&schema=${encodeURIComponent(schema)}`;
+                const resp = await fetch(url);
+                if (!resp.ok) {
+                    const errPayload = await resp.json().catch(() => ({}));
+                    const detail = errPayload?.detail || `HTTP ${resp.status}`;
+                    window.toast.error(`Failed to load tables: ${detail}`);
+                    this.availableObjects = [];
+                    this.config.table_name = '';
+                    return;
+                }
+                const objs = await resp.json();
+                this.availableObjects = objs || [];
+
+                const normalize = (v) => String(v || '').trim().toUpperCase();
+                const curNorm = normalize(savedTableName);
+                const match = (this.availableObjects || []).find(
+                    (o) => normalize(o?.name) === curNorm,
+                );
+
+                // Important: set x-model value only after options are rendered.
+                await this.nextTickAsync();
+                await this.nextTickAsync();
+
+                if (match) {
+                    // Match found: use exact name from API (fixes case mismatch with dropdown)
+                    this.config.table_name = match.name;
+                } else {
+                    // No match found: clear (saved table doesn't exist or not preserving)
+                    // Do not auto-select a table - require explicit user selection
+                    this.config.table_name = '';
+                }
+
+                // Force DOM select value to match once options exist.
+                await this.nextTickAsync();
+                this.forceSelectValue('table-select', this.config.table_name);
+            } catch (e) {
+                console.warn('Failed to load objects:', e);
+                window.toast.error('Failed to load tables: ' + (e?.message || e));
+                this.availableObjects = [];
+                this.config.table_name = '';
+            }
         },
         
         async init() {
             this.isInitializing = true;
             this.error = null;
+
+            // Keep mix_preset in sync with weight edits.
+            this.$watch('config.custom_point_lookup_pct', () => this.syncMixPresetFromWeights());
+            this.$watch('config.custom_range_scan_pct', () => this.syncMixPresetFromWeights());
+            this.$watch('config.custom_insert_pct', () => this.syncMixPresetFromWeights());
+            this.$watch('config.custom_update_pct', () => this.syncMixPresetFromWeights());
+
+            // Load mode UX:
+            // - When switching into auto-scale mode, default Max Workers to -1 (no user cap)
+            //   unless the user already set a non-default cap.
+            // - When switching back to CONCURRENCY mode, ensure Concurrent Connections is >= 1.
+            this._prevLoadMode = String(this.config.load_mode || 'CONCURRENCY').trim().toUpperCase();
+            this.$watch('config.load_mode', (v) => {
+                const next = String(v || 'CONCURRENCY').trim().toUpperCase();
+                const prev = String(this._prevLoadMode || 'CONCURRENCY').trim().toUpperCase();
+                if (next === 'QPS' && prev !== 'QPS') {
+                    // If coming from default concurrency=10, default to unlimited cap.
+                    const cur = Number(this.config.concurrent_connections);
+                    if (!Number.isFinite(cur) || cur === 10) {
+                        this.config.concurrent_connections = -1;
+                    }
+                }
+                if (next !== 'QPS' && prev === 'QPS') {
+                    const cur = Number(this.config.concurrent_connections);
+                    if (!Number.isFinite(cur) || cur < 1) {
+                        this.config.concurrent_connections = 10;
+                    }
+                }
+                this._prevLoadMode = next;
+            });
 
             // Check URL params for mode
             const urlParams = new URLSearchParams(window.location.search);
@@ -701,9 +1388,10 @@ function testConfiguration() {
                             const v = String(this.config.use_cached_result).trim().toLowerCase();
                             this.config.use_cached_result = !['0', 'false', 'no', 'off'].includes(v);
                         }
+                        this.ensureCanonicalWorkloadConfig();
                         this.config.template_name = template.template_name;
                         this.config.description = template.description;
-                        this.aiPrepResult = (this.config && this.config.ai_workload) ? { message: 'Loaded from template', ...this.config.ai_workload } : null;
+                        this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
                         this.aiPrepError = null;
                         // Clear any stale localStorage selection so it can't override URL intent.
                         localStorage.removeItem('selectedTemplate');
@@ -740,6 +1428,7 @@ function testConfiguration() {
                     if (this.config.warehouse_name) {
                         this.config.warehouse_name = String(this.config.warehouse_name).trim();
                     }
+                    this.ensureCanonicalWorkloadConfig();
                     this.config.template_name = template.template_name;
                     this.config.description = template.description;
                     localStorage.removeItem('selectedTemplate');
@@ -752,10 +1441,8 @@ function testConfiguration() {
             // accidentally persisting/using the results warehouse as an "execution" warehouse.
             if (
                 this.config.table_type === 'POSTGRES' ||
-                this.config.table_type === 'SNOWFLAKE_POSTGRES' ||
-                this.config.table_type === 'CRUNCHYDATA'
+                this.config.table_type === 'SNOWFLAKE_POSTGRES'
             ) {
-                this.config.warehouse_mode = 'EXISTING';
                 this.config.warehouse_name = '';
                 this.selectedWarehouseDetails = null;
             }
@@ -764,6 +1451,7 @@ function testConfiguration() {
             // and then have dropdowns/details change underneath them.
             try {
                 await this.loadWarehouses();
+                await this.loadCatalog();
             } finally {
                 this.isInitializing = false;
             }
@@ -788,7 +1476,7 @@ function testConfiguration() {
 
                     // Choose desired warehouse:
                     // - If template provided one and it exists, use canonical option value.
-                    // - If it doesn't exist, fall back to first available.
+                    // - If it doesn't exist, require explicit user selection.
                     let desiredWarehouseName = '';
                     const selectedNorm = normalize(this.config.warehouse_name);
                     if (selectedNorm) {
@@ -796,9 +1484,6 @@ function testConfiguration() {
                             (w) => normalize(w?.name) === selectedNorm,
                         );
                         desiredWarehouseName = match?.name || '';
-                    }
-                    if (!desiredWarehouseName && this.availableWarehouses.length > 0) {
-                        desiredWarehouseName = this.availableWarehouses[0].name;
                     }
 
                     // Important: set x-model value only after options are rendered,
@@ -881,46 +1566,213 @@ function testConfiguration() {
         },
         
         addIndex() {
-            this.config.indexes.push({
-                columns: '',
-                include: ''
-            });
+            // Removed: table creation (including indexes) is no longer supported.
         },
         
         removeIndex(idx) {
-            this.config.indexes.splice(idx, 1);
+            // Removed: table creation (including indexes) is no longer supported.
         },
         
         async submitTest() {
+            await this._saveTemplate({ prepareAfterSave: false });
+        },
+
+        async saveAndPrepare() {
+            if (this.saveAndPrepareLoading) return;
+            this.saveAndPrepareLoading = true;
+            try {
+                await this._saveTemplate({ prepareAfterSave: true });
+            } finally {
+                this.saveAndPrepareLoading = false;
+            }
+        },
+
+        async _saveTemplate({ prepareAfterSave = false } = {}) {
             if (this.isSaving) {
                 return;
             }
             if (this.isReadOnly) {
+                window.toast.warning('Template is read-only and cannot be updated.');
                 return;
             }
             if (!this.config.template_name) {
                 window.toast.warning('Please provide a template name');
                 return;
             }
-            if (this.config.workload_type === 'CUSTOM') {
-                const total =
-                    Number(this.config.custom_point_lookup_pct || 0) +
-                    Number(this.config.custom_range_scan_pct || 0) +
-                    Number(this.config.custom_insert_pct || 0) +
-                    Number(this.config.custom_update_pct || 0);
-                if (total !== 100) {
-                    window.toast.warning(
-                        `Custom query percentages must sum to 100 (currently ${total}).`,
-                    );
+            // Canonical: templates always persist CUSTOM SQL + weights.
+            this.ensureCanonicalWorkloadConfig();
+
+            const total = this.mixTotal();
+            if (total !== 100) {
+                window.toast.warning(
+                    `Mix percentages must sum to 100 (currently ${total}).`,
+                );
+                return;
+            }
+
+            // Match server validation: SQL is required when a weight > 0.
+            const requiredPairs = [
+                ['custom_point_lookup_pct', 'custom_point_lookup_query', 'Point Lookup'],
+                ['custom_range_scan_pct', 'custom_range_scan_query', 'Range Scan'],
+                ['custom_insert_pct', 'custom_insert_query', 'Insert'],
+                ['custom_update_pct', 'custom_update_query', 'Update'],
+            ];
+            for (const [pctK, sqlK, label] of requiredPairs) {
+                const pct = Number(this.config[pctK] || 0);
+                const sql = String(this.config[sqlK] || '').trim();
+                if (pct > 0 && !sql) {
+                    window.toast.warning(`${label}: SQL is required when weight % > 0.`);
                     return;
+                }
+            }
+
+            // Validate load mode.
+            const loadMode = String(this.config.load_mode || 'CONCURRENCY').trim().toUpperCase();
+            if (!['CONCURRENCY', 'QPS', 'FIND_MAX_CONCURRENCY'].includes(loadMode)) {
+                window.toast.warning('Invalid load mode. Choose Fixed concurrency, Auto-scale, or Find Max Concurrency.');
+                return;
+            }
+
+            if (loadMode === 'FIND_MAX_CONCURRENCY') {
+                const startC = Number(this.config.start_concurrency || 5);
+                const increment = Number(this.config.concurrency_increment || 10);
+                const stepDur = Number(this.config.step_duration_seconds || 30);
+                const maxC = Number(this.config.concurrent_connections || 100);
+                if (!Number.isFinite(startC) || startC < 1) {
+                    window.toast.warning('Start Concurrency must be >= 1.');
+                    return;
+                }
+                if (!Number.isFinite(increment) || increment < 1) {
+                    window.toast.warning('Concurrency Increment must be >= 1.');
+                    return;
+                }
+                if (!Number.isFinite(stepDur) || stepDur < 10) {
+                    window.toast.warning('Step Duration must be >= 10 seconds.');
+                    return;
+                }
+                if (!Number.isFinite(maxC) || maxC < startC) {
+                    window.toast.warning('Max Workers must be >= Start Concurrency.');
+                    return;
+                }
+            }
+
+            if (loadMode === 'QPS') {
+                const targetQps = Number(this.config.target_qps || 0);
+                if (!Number.isFinite(targetQps) || targetQps <= 0) {
+                    window.toast.warning('Target must be a positive number.');
+                    return;
+                }
+                const minC = Number(this.config.min_concurrency || 1);
+                const maxC = Number(this.config.concurrent_connections || 1);
+                if (!Number.isFinite(minC) || minC < 1) {
+                    this.qpsAdvancedOpen = true;
+                    window.toast.warning('Min Workers must be >= 1.');
+                    return;
+                }
+                if (!Number.isFinite(maxC) || (maxC !== -1 && maxC < 1)) {
+                    this.qpsAdvancedOpen = true;
+                    window.toast.warning('Max Workers must be >= 1 (or -1 for no limit).');
+                    return;
+                }
+                if (maxC !== -1 && minC > maxC) {
+                    this.qpsAdvancedOpen = true;
+                    window.toast.warning('Min Workers must be <= Max Workers.');
+                    return;
+                }
+            }
+
+            // Validate targets (SLOs). Use -1 to disable a target.
+            const weights = {
+                POINT_LOOKUP: Number(this.config.custom_point_lookup_pct || 0),
+                RANGE_SCAN: Number(this.config.custom_range_scan_pct || 0),
+                INSERT: Number(this.config.custom_insert_pct || 0),
+                UPDATE: Number(this.config.custom_update_pct || 0),
+            };
+
+            const targetKeys = {
+                POINT_LOOKUP: {
+                    p95: 'target_point_lookup_p95_latency_ms',
+                    p99: 'target_point_lookup_p99_latency_ms',
+                    err: 'target_point_lookup_error_rate_pct',
+                    label: 'Point Lookup',
+                },
+                RANGE_SCAN: {
+                    p95: 'target_range_scan_p95_latency_ms',
+                    p99: 'target_range_scan_p99_latency_ms',
+                    err: 'target_range_scan_error_rate_pct',
+                    label: 'Range Scan',
+                },
+                INSERT: {
+                    p95: 'target_insert_p95_latency_ms',
+                    p99: 'target_insert_p99_latency_ms',
+                    err: 'target_insert_error_rate_pct',
+                    label: 'Insert',
+                },
+                UPDATE: {
+                    p95: 'target_update_p95_latency_ms',
+                    p99: 'target_update_p99_latency_ms',
+                    err: 'target_update_error_rate_pct',
+                    label: 'Update',
+                },
+            };
+
+            const isFiniteNumber = (v) => Number.isFinite(Number(v));
+
+            for (const kind of Object.keys(targetKeys)) {
+                const weight = Number(weights[kind] || 0);
+                if (weight <= 0) continue;
+
+                const keys = targetKeys[kind];
+                const p95 = Number(this.config[keys.p95] ?? -1);
+                const p99 = Number(this.config[keys.p99] ?? -1);
+                const err = Number(this.config[keys.err] ?? -1);
+
+                const p95Enabled = isFiniteNumber(p95) && p95 >= 0;
+                const p99Enabled = isFiniteNumber(p99) && p99 >= 0;
+                const errEnabled = isFiniteNumber(err) && err >= 0;
+
+                if (p95Enabled) {
+                    if (p95 <= 0) {
+                        window.toast.warning(
+                            `${keys.label}: P95 target must be > 0 (ms), or -1 to disable.`,
+                        );
+                        return;
+                    }
+                }
+
+                if (p99Enabled) {
+                    if (p99 <= 0) {
+                        window.toast.warning(
+                            `${keys.label}: P99 target must be > 0 (ms), or -1 to disable.`,
+                        );
+                        return;
+                    }
+                }
+
+                if (errEnabled) {
+                    if (err > 100) {
+                        window.toast.warning(
+                            `${keys.label}: max error % must be between 0 and 100, or -1 to disable.`,
+                        );
+                        return;
+                    }
+                }
+
+                if (!p95Enabled && !p99Enabled && !errEnabled) {
+                    // Both targets disabled: allowed.
+                    continue;
                 }
             }
 
             const tableType = String(this.config.table_type || '').trim().toUpperCase();
             const isPostgres =
                 tableType === 'POSTGRES' ||
-                tableType === 'SNOWFLAKE_POSTGRES' ||
-                tableType === 'CRUNCHYDATA';
+                tableType === 'SNOWFLAKE_POSTGRES';
+
+            if (!isPostgres && !String(this.config.warehouse_name || '').trim()) {
+                window.toast.warning('Please select an existing warehouse');
+                return;
+            }
 
             const selectedWh = String(this.config.warehouse_name || '').trim().toUpperCase();
             if (!isPostgres && this.resultsWarehouse && selectedWh === this.resultsWarehouse) {
@@ -965,13 +1817,64 @@ function testConfiguration() {
                         this.mode === 'edit'
                             ? 'Template updated successfully.'
                             : 'Template created successfully.';
-                    if (this.mode !== 'edit' && createdOrUpdated && createdOrUpdated.template_id) {
-                        // Stay on configure to allow AI preparation before first run.
-                        window.toast.queueNext('success', successMessage);
-                        window.location.href = `/configure?template_id=${encodeURIComponent(createdOrUpdated.template_id)}`;
+
+                    // Keep the user on the configure page (no redirect). Update URL + local state.
+                    if (createdOrUpdated && createdOrUpdated.template_id) {
+                        this.loadedTemplate = createdOrUpdated;
+                        this.hasResults = (createdOrUpdated.usage_count || 0) > 0;
+
+                        // If the template now has results, force view mode. Otherwise edit.
+                        if (this.hasResults) {
+                            this.mode = 'view';
+                            this.isReadOnly = true;
+                        } else {
+                            this.mode = 'edit';
+                            this.isReadOnly = false;
+                        }
+
+                        this.config = { ...this.config, ...(createdOrUpdated.config || {}) };
+                        this.ensureCanonicalWorkloadConfig();
+                        this.config.template_name = createdOrUpdated.template_name;
+                        this.config.description = createdOrUpdated.description;
+                        this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
+                        this.aiPrepError = null;
+
+                        // Ensure URL has template_id so refresh/reload preserves state.
+                        try {
+                            const url = new URL(window.location.href);
+                            url.searchParams.set('template_id', String(createdOrUpdated.template_id));
+                            // Clear mode overrides unless we're explicitly in view mode.
+                            if (this.mode === 'view') {
+                                url.searchParams.set('mode', 'view');
+                            } else {
+                                url.searchParams.delete('mode');
+                            }
+                            window.history.replaceState({}, '', url.pathname + url.search);
+                        } catch (e) {
+                            console.warn('Failed to update URL after save:', e);
+                        }
+                    }
+
+                    if (prepareAfterSave) {
+                        // Run preparation immediately after save, and show results in-place.
+                        // Defer toast until value pools are complete.
+                        await this.prepareAiWorkload();
+                        if (this.aiPrepError) {
+                            // Template saved, but value pool population failed.
+                            window.toast.warning(
+                                (this.mode === 'edit' ? 'Template updated' : 'Template created') +
+                                    ', but value pool population failed: ' +
+                                    this.aiPrepError,
+                            );
+                        } else {
+                            window.toast.success(
+                                this.mode === 'edit'
+                                    ? 'Template updated and value pools populated.'
+                                    : 'Template created and value pools populated.',
+                            );
+                        }
                     } else {
-                        window.toast.queueNext('success', successMessage);
-                        window.location.href = '/templates';
+                        window.toast.success(successMessage);
                     }
                 } else {
                     const error = await response.json().catch(() => ({}));
@@ -1000,9 +1903,10 @@ function testConfiguration() {
                 this.loadedTemplate = template;
                 this.hasResults = (template.usage_count || 0) > 0;
                 this.config = { ...this.config, ...(template.config || {}) };
+                this.ensureCanonicalWorkloadConfig();
                 this.config.template_name = template.template_name;
                 this.config.description = template.description;
-                this.aiPrepResult = (this.config && this.config.ai_workload) ? { message: 'Loaded from template', ...this.config.ai_workload } : null;
+                this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
                 this.aiPrepError = null;
             } catch (e) {
                 console.warn('Failed to reload template:', e);
@@ -1037,6 +1941,20 @@ function testConfiguration() {
                     return;
                 }
                 this.aiPrepResult = payload;
+                // Normalize the response into the same UI shape we use for template-loaded status.
+                if (this.aiPrepResult && typeof this.aiPrepResult === 'object') {
+                    this.aiPrepResult = {
+                        prepared: Boolean(this.aiPrepResult.pool_id),
+                        prepared_at: null,
+                        pool_id: this.aiPrepResult.pool_id || null,
+                        key_column: this.aiPrepResult.key_column || null,
+                        time_column: this.aiPrepResult.time_column || null,
+                        range_mode: this.aiPrepResult.range_mode || null,
+                        pools: this.aiPrepResult.pools || null,
+                        cortex_available: Boolean(this.aiPrepResult.ai_available),
+                        cortex_error: this.aiPrepResult.ai_error || null,
+                    };
+                }
                 // Reload template config so persisted metadata is reflected locally.
                 await this.reloadTemplate();
             } catch (e) {
@@ -1046,9 +1964,58 @@ function testConfiguration() {
             }
         },
 
+        async prepareTemplate() {
+            if (!this.loadedTemplate || !this.loadedTemplate.template_id) {
+                window.toast.warning('No template loaded.');
+                return;
+            }
+            if (this.prepareTemplateLoading) return;
+
+            const tableType = String(this.config.table_type || '').toUpperCase();
+            const isPostgres = tableType === 'POSTGRES' || tableType === 'SNOWFLAKE_POSTGRES';
+
+            this.prepareTemplateLoading = true;
+            try {
+                // For Snowflake-executed templates, enforce that the execution warehouse
+                // isn't the same as the results warehouse.
+                if (!isPostgres) {
+                    const infoResp = await fetch('/api/info');
+                    const info = infoResp.ok ? await infoResp.json() : {};
+                    const resultsWarehouse = String(info.results_warehouse || '').toUpperCase();
+                    const execWarehouse = String(this.config.warehouse_name || '').toUpperCase();
+
+                    if (resultsWarehouse && execWarehouse && resultsWarehouse === execWarehouse) {
+                        window.toast.warning(
+                            `This template is configured to run on ${execWarehouse}, which is also your results warehouse (${resultsWarehouse}). Please edit the template and choose a different warehouse before running.`
+                        );
+                        return;
+                    }
+                }
+
+                const resp = await fetch(`/api/tests/from-template/${encodeURIComponent(this.loadedTemplate.template_id)}`, {
+                    method: 'POST',
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Failed to prepare test');
+                }
+                const data = await resp.json();
+                window.location.href = data.dashboard_url || `/dashboard/${data.test_id}`;
+            } catch (e) {
+                console.error('Failed to prepare template:', e);
+                window.toast.error(`Failed to prepare test: ${e.message || e}`);
+            } finally {
+                this.prepareTemplateLoading = false;
+            }
+        },
+
         async aiAdjustCustomSql() {
             // Preview-only: updates the 4 custom SQL statements + %s in the UI.
             // No DB writes occur until the user saves the template.
+            if (!this.hasSelectedTable()) {
+                window.toast.warning('Select database, schema, and table first.');
+                return;
+            }
             this.aiSqlAdjustLoading = true;
             try {
                 const resp = await fetch('/api/templates/ai/adjust-sql', {
@@ -1066,31 +2033,43 @@ function testConfiguration() {
                     return;
                 }
 
+                const level = String(payload.toast_level || 'success').toLowerCase();
+                const shouldApplyMix = level === 'warning';
+
                 // Apply adjustments locally
                 this.config.workload_type = 'CUSTOM';
                 this.config.custom_point_lookup_query = payload.custom_point_lookup_query || '';
                 this.config.custom_range_scan_query = payload.custom_range_scan_query || '';
                 this.config.custom_insert_query = payload.custom_insert_query || '';
                 this.config.custom_update_query = payload.custom_update_query || '';
-                this.config.custom_point_lookup_pct = Number(payload.custom_point_lookup_pct || 0);
-                this.config.custom_range_scan_pct = Number(payload.custom_range_scan_pct || 0);
-                this.config.custom_insert_pct = Number(payload.custom_insert_pct || 0);
-                this.config.custom_update_pct = Number(payload.custom_update_pct || 0);
+                if (shouldApplyMix) {
+                    this.config.custom_point_lookup_pct = Number(payload.custom_point_lookup_pct || 0);
+                    this.config.custom_range_scan_pct = Number(payload.custom_range_scan_pct || 0);
+                    this.config.custom_insert_pct = Number(payload.custom_insert_pct || 0);
+                    this.config.custom_update_pct = Number(payload.custom_update_pct || 0);
+                }
 
                 // Store column map + ai_workload metadata in config (will persist on save).
                 if (payload.columns) {
                     this.config.columns = payload.columns;
                 }
+                // IMPORTANT: do not clobber prepared pool metadata (pool_id/columns). Only
+                // store ai_workload hints if the template is not already prepared.
                 if (payload.ai_workload) {
-                    this.config.ai_workload = payload.ai_workload;
+                    const existing = this.config.ai_workload;
+                    const isPrepared = existing && typeof existing === 'object' && existing.pool_id;
+                    if (!isPrepared) {
+                        this.config.ai_workload = payload.ai_workload;
+                    }
+                }
+                if (shouldApplyMix) {
+                    this.syncMixPresetFromWeights();
                 }
 
-                const summary = payload.summary || 'AI SQL adjustment completed.';
-                const level = String(payload.toast_level || 'success').toLowerCase();
+                // Toast only when unexpected (i.e., we had to disable an operation + redistribute mix).
                 if (level === 'warning') {
+                    const summary = payload.summary || 'SQL generated with issues.';
                     window.toast.warning(summary);
-                } else {
-                    window.toast.success(summary);
                 }
             } catch (e) {
                 window.toast.error('AI SQL adjustment failed: ' + (e?.message || e));
@@ -1183,21 +2162,25 @@ function testConfiguration() {
                     database: 'UNISTORE_BENCHMARK',
                     schema: 'PUBLIC',
                     table_name: '',
-                    clustering_keys: '',
-                    primary_key: '',
-                    add_indexes: false,
-                    indexes: [],
-                    warehouse_mode: 'EXISTING',
-                    warehouse_name: 'COMPUTE_WH',
-                    new_warehouse_name: '',
+                    warehouse_name: '',
                     warehouse_size: 'MEDIUM',
                     multi_cluster: false,
                     min_clusters: 1,
                     max_clusters: 3,
                     scaling_policy: 'STANDARD',
                     duration: 300,
+                    load_mode: 'CONCURRENCY',
+                    target_qps: 100,
+                    min_concurrency: 5,
                     concurrent_connections: 10,
-                    workload_type: 'MIXED',
+                    start_concurrency: 5,
+                    concurrency_increment: 10,
+                    step_duration_seconds: 30,
+                    qps_stability_pct: 5.0,
+                    latency_stability_pct: 20.0,
+                    max_error_rate_pct: 1.0,
+                    workload_type: 'CUSTOM',
+                    mix_preset: 'MIXED',
                     think_time: 0,
                     warmup: 30,
                     custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
@@ -1211,12 +2194,26 @@ function testConfiguration() {
                     custom_range_scan_pct: 25,
                     custom_insert_pct: 35,
                     custom_update_pct: 15,
+                    // Per-query-type targets (SLOs). Use -1 to disable a target.
+                    target_point_lookup_p95_latency_ms: -1,
+                    target_range_scan_p95_latency_ms: -1,
+                    target_insert_p95_latency_ms: -1,
+                    target_update_p95_latency_ms: -1,
+                    target_point_lookup_p99_latency_ms: -1,
+                    target_range_scan_p99_latency_ms: -1,
+                    target_insert_p99_latency_ms: -1,
+                    target_update_p99_latency_ms: -1,
+                    target_point_lookup_error_rate_pct: -1,
+                    target_range_scan_error_rate_pct: -1,
+                    target_insert_error_rate_pct: -1,
+                    target_update_error_rate_pct: -1,
                     test_name: '',
                     description: '',
                     save_as_template: false,
                     template_name: '',
                     template_description: ''
                 };
+                await this.loadCatalog();
             }
         }
     };

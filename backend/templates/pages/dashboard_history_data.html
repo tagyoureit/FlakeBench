@@ -40,7 +40,7 @@
         <span x-text="error"></span>
     </div>
 
-    <div class="card">
+        <div class="card">
         <div class="card-title">Executions</div>
         <div class="text-sm text-gray-600" style="margin-top: -0.25rem;">
             Default sort: <code>SF_EXECUTION_MS</code> (server-side SQL execution time).
@@ -51,6 +51,10 @@
                 <thead>
                     <tr>
                         <th>Query Kind</th>
+                        <th class="text-right">Cluster</th>
+                        <th class="text-right">Queue Overload (ms)</th>
+                        <th class="text-right">Queue Provisioning (ms)</th>
+                        <th class="text-right">Cache Hit</th>
                         <th class="text-right">SQL Exec (ms)</th>
                         <th class="text-right">End-to-end (ms)</th>
                         <th class="text-right">Rows</th>
@@ -62,7 +66,7 @@
                 <tbody>
                     <template x-if="loading">
                         <tr>
-                            <td colspan="7" style="padding: 1rem;">
+                            <td colspan="11" style="padding: 1rem;">
                                 {% include "components/loading_spinner.html" %}
                             </td>
                         </tr>
@@ -70,6 +74,10 @@
                     <template x-for="row in rows" :key="row.execution_id">
                         <tr>
                             <td x-text="row.query_kind"></td>
+                            <td class="text-right" x-text="row.sf_cluster_number ?? ''"></td>
+                            <td class="text-right" x-text="formatMs(row.sf_queued_overload_ms)"></td>
+                            <td class="text-right" x-text="formatMs(row.sf_queued_provisioning_ms)"></td>
+                            <td class="text-right" x-text="formatPct(row.sf_pct_scanned_from_cache)"></td>
                             <td class="text-right" x-text="formatMs(row.sf_execution_ms)"></td>
                             <td class="text-right" x-text="formatMs(row.app_elapsed_ms)"></td>
                             <td class="text-right" x-text="row.rows_affected ?? ''"></td>
@@ -165,6 +173,13 @@ function historyData() {
             const n = typeof v === "number" ? v : Number(v);
             if (!Number.isFinite(n)) return "";
             return n.toFixed(2);
+        },
+
+        formatPct(v) {
+            const n = typeof v === "number" ? v : Number(v);
+            if (!Number.isFinite(n)) return "";
+            const pct = n > 1 ? n : n * 100.0;
+            return `${pct.toFixed(2)}%`;
         },
 
         formatTimestamp(v) {

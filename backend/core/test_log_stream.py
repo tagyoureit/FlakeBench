@@ -43,6 +43,11 @@ class TestLogQueueHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            # Allow internal components to log to the app console without also
+            # duplicating into the per-test dashboard log stream.
+            if bool(getattr(record, "skip_test_log_stream", False)):
+                return
+
             current = CURRENT_TEST_ID.get()
             if current != self._test_id:
                 return

@@ -1,0 +1,961 @@
+[
+  [
+    {
+      "status"  :   "Statement executed successfully."
+    }
+  ],
+  [
+    {
+      "status"  :   "Statement executed successfully."
+    }
+  ],
+  [
+    {
+      "TEST_ID"  :   "7d08d2f4-683d-44fd-a837-61e4d23cbcf0"  ,
+      "TEST_NAME"  :   "Hybrid Test 001"  ,
+      "TABLE_NAME"  :   "BENCHMARK_TEST_001"  ,
+      "TABLE_TYPE"  :   "HYBRID"  ,
+      "WAREHOUSE"  :   "PERFTESTING_XS_MCW1_20"  ,
+      "STATUS"  :   "COMPLETED"  ,
+      "START_TIME"  :   "2026-01-12T01:01:36.023670"  ,
+      "END_TIME"  :   "2026-01-11T17:03:27.782513"  ,
+      "DURATION_SECONDS"  :   103.311501  ,
+      "CONCURRENT_CONNECTIONS"  :   256  ,
+      "TOTAL_OPERATIONS"  :   9655  ,
+      "READ_OPERATIONS"  :   8664  ,
+      "WRITE_OPERATIONS"  :   991  ,
+      "FAILED_OPERATIONS"  :   762  ,
+      "ERROR_COUNT"  :   0  ,
+      "ERROR_RATE"  :   0.07892283790781979  ,
+      "OPERATIONS_PER_SECOND"  :   104.4906394668029  ,
+      "READS_PER_SECOND"  :   83.8628798936916  ,
+      "WRITES_PER_SECOND"  :   9.592349258385084  ,
+      "P95_LATENCY_MS"  :   1282.7570419995027  ,
+      "READ_P95_LATENCY_MS"  :   1095.6344169990189  ,
+      "WRITE_P95_LATENCY_MS"  :   41298.56650000147  ,
+      "POINT_LOOKUP_P95_LATENCY_MS"  :   1095.5358330011222  ,
+      "RANGE_SCAN_P95_LATENCY_MS"  :   1101.4752499995666  ,
+      "INSERT_P95_LATENCY_MS"  :   11405.70070799913  ,
+      "UPDATE_P95_LATENCY_MS"  :   45365.49108299914  ,
+      "WORKLOAD_TYPE"  :   null  ,
+      "LOAD_MODE"  :   null  ,
+      "CUSTOM_POINT_LOOKUP_PCT"  :   null  ,
+      "CUSTOM_RANGE_SCAN_PCT"  :   null  ,
+      "CUSTOM_INSERT_PCT"  :   null  ,
+      "CUSTOM_UPDATE_PCT"  :   null  ,
+      "COLLECT_QUERY_HISTORY"  :   null  ,
+      "QUERY_TAG"  :   "unistore_benchmark:test_id=7d08d2f4-683d-44fd-a837-61e4d23cbcf0"
+    }
+  ],
+  [
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "N"  :   685  ,
+      "N_SUCCESS"  :   206  ,
+      "N_FAIL"  :   479  ,
+      "FAIL_PCT"  :   "69.93"  ,
+      "APP_P95_MS"  :   9898.1  ,
+      "SF_TOTAL_P95_MS"  :   10882.8  ,
+      "SF_EXEC_P95_MS"  :   2336.0  ,
+      "SF_TX_BLOCKED_P95_MS"  :   9622.0  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   289.5
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "N"  :   306  ,
+      "N_SUCCESS"  :   23  ,
+      "N_FAIL"  :   283  ,
+      "FAIL_PCT"  :   "92.48"  ,
+      "APP_P95_MS"  :   37470.2  ,
+      "SF_TOTAL_P95_MS"  :   45288.6  ,
+      "SF_EXEC_P95_MS"  :   1984.4  ,
+      "SF_TX_BLOCKED_P95_MS"  :   44442.2  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "POINT_LOOKUP"  ,
+      "N"  :   6738  ,
+      "N_SUCCESS"  :   6738  ,
+      "N_FAIL"  :   0  ,
+      "FAIL_PCT"  :   "0.00"  ,
+      "APP_P95_MS"  :   1095.4  ,
+      "SF_TOTAL_P95_MS"  :   803.6  ,
+      "SF_EXEC_P95_MS"  :   346.8  ,
+      "SF_TX_BLOCKED_P95_MS"  :   0.0  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   248.1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "RANGE_SCAN"  ,
+      "N"  :   1926  ,
+      "N_SUCCESS"  :   1926  ,
+      "N_FAIL"  :   0  ,
+      "FAIL_PCT"  :   "0.00"  ,
+      "APP_P95_MS"  :   1102.1  ,
+      "SF_TOTAL_P95_MS"  :   807.0  ,
+      "SF_EXEC_P95_MS"  :   310.0  ,
+      "SF_TX_BLOCKED_P95_MS"  :   0.0  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   258.0
+    }  ,
+    {
+      "WARMUP"  :   true  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "N"  :   19  ,
+      "N_SUCCESS"  :   8  ,
+      "N_FAIL"  :   11  ,
+      "FAIL_PCT"  :   "57.89"  ,
+      "APP_P95_MS"  :   30662.0  ,
+      "SF_TOTAL_P95_MS"  :   29765.7  ,
+      "SF_EXEC_P95_MS"  :   1724.8  ,
+      "SF_TX_BLOCKED_P95_MS"  :   27994.3  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   930.1
+    }  ,
+    {
+      "WARMUP"  :   true  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "N"  :   34  ,
+      "N_SUCCESS"  :   31  ,
+      "N_FAIL"  :   3  ,
+      "FAIL_PCT"  :   "8.82"  ,
+      "APP_P95_MS"  :   11035.4  ,
+      "SF_TOTAL_P95_MS"  :   10213.3  ,
+      "SF_EXEC_P95_MS"  :   2569.8  ,
+      "SF_TX_BLOCKED_P95_MS"  :   9034.8  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "WARMUP"  :   true  ,
+      "QUERY_KIND"  :   "POINT_LOOKUP"  ,
+      "N"  :   291  ,
+      "N_SUCCESS"  :   291  ,
+      "N_FAIL"  :   0  ,
+      "FAIL_PCT"  :   "0.00"  ,
+      "APP_P95_MS"  :   2812.3  ,
+      "SF_TOTAL_P95_MS"  :   3121.5  ,
+      "SF_EXEC_P95_MS"  :   1463.8  ,
+      "SF_TX_BLOCKED_P95_MS"  :   0.0  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   66.8
+    }  ,
+    {
+      "WARMUP"  :   true  ,
+      "QUERY_KIND"  :   "RANGE_SCAN"  ,
+      "N"  :   85  ,
+      "N_SUCCESS"  :   85  ,
+      "N_FAIL"  :   0  ,
+      "FAIL_PCT"  :   "0.00"  ,
+      "APP_P95_MS"  :   2763.3  ,
+      "SF_TOTAL_P95_MS"  :   780.0  ,
+      "SF_EXEC_P95_MS"  :   43.0  ,
+      "SF_TX_BLOCKED_P95_MS"  :   0.0  ,
+      "SF_QUEUE_OVERLOAD_P95_MS"  :   0.0
+    }
+  ],
+  [
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496dace: Statement '01c1abde-0307-7651-0005-5fdf0496e33a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179749802000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496c69a: Statement '01c1abde-0307-75bd-0005-5fdf04969702' has locked table 'BENCHMARK_TEST_001' in transaction 1768179735847000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496e0ce: Statement '01c1abdd-0307-76de-0005-5fdf049676f6' has locked table 'BENCHMARK_TEST_001' in transaction 1768179715178000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf0496947a: Statement '01c1abdd-0307-77dc-0005-5fdf04961ce2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712225000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf049731fa: Statement '01c1abde-0307-76de-0005-5fdf0496cbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179747270000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496a396: Statement '01c1abdd-0307-7651-0005-5fdf049639f2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712329000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf04967e96: Statement '01c1abde-0307-76de-0005-5fdf049679fe' has locked table 'BENCHMARK_TEST_001' in transaction 1768179724287000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496c4ca: Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496b57e: Statement '01c1abdd-0307-7651-0005-5fdf04963a16' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712732000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf04969572: Statement '01c1abde-0307-76de-0005-5fdf049679ce' has locked table 'BENCHMARK_TEST_001' in transaction 1768179723077000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496d026: Statement '01c1abdd-0307-75bd-0005-5fdf04969272' has locked table 'BENCHMARK_TEST_001' in transaction 1768179714067000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496c7f2: Statement '01c1abde-0307-76de-0005-5fdf0496c0d6' has locked table 'BENCHMARK_TEST_001' in transaction 1768179736359000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf04969d82: Statement '01c1abdd-0307-7651-0005-5fdf04963af6' has locked table 'BENCHMARK_TEST_001' in transaction 1768179715596000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496d25e: Statement '01c1abde-0307-77dc-0005-5fdf0496adb2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179742401000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf04972282: Statement '01c1abde-0307-77dc-0005-5fdf04971122' has locked table 'BENCHMARK_TEST_001' in transaction 1768179767887000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abdd-0307-77dc-0005-5fdf04961f16: Statement '01c1abdd-0307-7651-0005-5fdf04963a4e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713520000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf049695e6: Statement '01c1abde-0307-75bd-0005-5fdf0496940e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179724731000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496c23a: Statement '01c1abde-0307-76de-0005-5fdf04967c42' has locked table 'BENCHMARK_TEST_001' in transaction 1768179729027000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496bcca: Statement '01c1abdd-0307-75bd-0005-5fdf04969272' has locked table 'BENCHMARK_TEST_001' in transaction 1768179714067000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496afc2: Statement '01c1abde-0307-7651-0005-5fdf0496b7d2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740140000001 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496beb6: Statement '01c1abde-0307-77dc-0005-5fdf0496ab86' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740949000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496d0fe: Statement '01c1abde-0307-77dc-0005-5fdf0496ab86' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740949000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496b97e: Statement '01c1abde-0307-75bd-0005-5fdf04969696' has locked table 'BENCHMARK_TEST_001' in transaction 1768179734432000001 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf04969e72: Statement '01c1abde-0307-7651-0005-5fdf0496bece' has locked table 'BENCHMARK_TEST_001' in transaction 1768179746269000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf04969c5a: Statement '01c1abde-0307-7651-0005-5fdf0496bbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179742990000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496dcba: Statement '01c1abde-0307-76de-0005-5fdf0496cf56' has locked table 'BENCHMARK_TEST_001' in transaction 1768179750615000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf04969d46: Statement '01c1abdd-0307-7651-0005-5fdf04963af6' has locked table 'BENCHMARK_TEST_001' in transaction 1768179715596000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496fe76: Statement '01c1abde-0307-77dc-0005-5fdf0497108a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179766983000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496b7a2: Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496aa72: Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0497332a: Statement '01c1abde-0307-76de-0005-5fdf0496cbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179747270000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496b95e: Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496ad0a: Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496ba62: Statement '01c1abde-0307-75bd-0005-5fdf04969702' has locked table 'BENCHMARK_TEST_001' in transaction 1768179735847000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496c9b6: Statement '01c1abde-0307-7651-0005-5fdf0496b8ae' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740706000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496e402: Statement '01c1abdd-0307-76de-0005-5fdf0496777a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179717348000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496adba: Statement '01c1abde-0307-76de-0005-5fdf0496c06a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179735816000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf049703c6: Statement '01c1abde-0307-7651-0005-5fdf0496ea7a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179760366000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf049712e2: Statement '01c1abde-0307-77dc-0005-5fdf0496af9e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179744212000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf04971636: Statement '01c1abde-0307-76de-0005-5fdf0496cbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179747270000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf04969966: Statement '01c1abde-0307-75bd-0005-5fdf04969702' has locked table 'BENCHMARK_TEST_001' in transaction 1768179735847000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496a636: Statement '01c1abde-0307-76de-0005-5fdf049679fe' has locked table 'BENCHMARK_TEST_001' in transaction 1768179724287000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496f052: Statement '01c1abdd-0307-76de-0005-5fdf0496777a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179717348000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-7651-0005-5fdf0496bf72: Statement '01c1abde-0307-77dc-0005-5fdf0496adb2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179742401000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-75bd-0005-5fdf04969882: Statement '01c1abde-0307-75bd-0005-5fdf04969696' has locked table 'BENCHMARK_TEST_001' in transaction 1768179734432000001 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-76de-0005-5fdf0496f5c2: Statement '01c1abde-0307-76de-0005-5fdf0496cf72' has locked table 'BENCHMARK_TEST_001' in transaction 1768179750601000001 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496adde: Statement '01c1abde-0307-75bd-0005-5fdf04969746' has locked table 'BENCHMARK_TEST_001' in transaction 1768179737007000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   true  ,
+      "QUERY_KIND"  :   "INSERT"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abdd-0307-75bd-0005-5fdf0496927a: Statement '01c1abdd-0307-75bd-0005-5fdf0496923e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712932000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   true  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abdd-0307-75bd-0005-5fdf04969272: Statement '01c1abde-0307-7651-0005-5fdf0496b8ae' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740706000000 and this lock has not ye"  ,
+      "N"  :   1
+    }  ,
+    {
+      "WARMUP"  :   false  ,
+      "QUERY_KIND"  :   "UPDATE"  ,
+      "ERROR_PREFIX"  :   "000625 (57014): 01c1abde-0307-77dc-0005-5fdf0496dc3a: Statement '01c1abde-0307-76de-0005-5fdf04967c56' has locked table 'BENCHMARK_TEST_001' in transaction 1768179729270000000 and this lock has not ye"  ,
+      "N"  :   1
+    }
+  ],
+  [
+    {
+      "QUERY_TYPE"  :   "SELECT"  ,
+      "ERROR_CODE"  :   0  ,
+      "ERROR_PREFIX"  :   ""  ,
+      "N"  :   8533  ,
+      "TOTAL_P95_MS"  :   780.4  ,
+      "EXEC_P95_MS"  :   323.9  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   253.4
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   0  ,
+      "ERROR_PREFIX"  :   ""  ,
+      "N"  :   215  ,
+      "TOTAL_P95_MS"  :   10855.3  ,
+      "EXEC_P95_MS"  :   2332.4  ,
+      "TX_BLOCKED_P95_MS"  :   9620.2  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   286.8
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   0  ,
+      "ERROR_PREFIX"  :   ""  ,
+      "N"  :   25  ,
+      "TOTAL_P95_MS"  :   45282.2  ,
+      "EXEC_P95_MS"  :   1991.8  ,
+      "TX_BLOCKED_P95_MS"  :   44424.4  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   31.2
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   16  ,
+      "TOTAL_P95_MS"  :   428.3  ,
+      "EXEC_P95_MS"  :   335.0  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   13  ,
+      "TOTAL_P95_MS"  :   745.4  ,
+      "EXEC_P95_MS"  :   646.0  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-77dc-0005-5fdf04961d52' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713731000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   13  ,
+      "TOTAL_P95_MS"  :   351.4  ,
+      "EXEC_P95_MS"  :   249.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-77dc-0005-5fdf04961ce2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712225000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   10  ,
+      "TOTAL_P95_MS"  :   419.3  ,
+      "EXEC_P95_MS"  :   311.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-77dc-0005-5fdf0496af9e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179744212000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   10  ,
+      "TOTAL_P95_MS"  :   314.2  ,
+      "EXEC_P95_MS"  :   234.2  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496f29e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179754266000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   9  ,
+      "TOTAL_P95_MS"  :   3562.4  ,
+      "EXEC_P95_MS"  :   3455.0  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179747270000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   8  ,
+      "TOTAL_P95_MS"  :   252.9  ,
+      "EXEC_P95_MS"  :   171.3  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-77dc-0005-5fdf04961ce2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712225000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   8  ,
+      "TOTAL_P95_MS"  :   642.1  ,
+      "EXEC_P95_MS"  :   468.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf04967ea2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179732772000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   7  ,
+      "TOTAL_P95_MS"  :   305.9  ,
+      "EXEC_P95_MS"  :   260.4  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-76de-0005-5fdf0496777a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179717348000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   7  ,
+      "TOTAL_P95_MS"  :   2228.4  ,
+      "EXEC_P95_MS"  :   1666.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179747270000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   7  ,
+      "TOTAL_P95_MS"  :   1937.9  ,
+      "EXEC_P95_MS"  :   1247.4  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cd4e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179748287000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   7  ,
+      "TOTAL_P95_MS"  :   524.3  ,
+      "EXEC_P95_MS"  :   457.4  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-75bd-0005-5fdf04969696' has locked table 'BENCHMARK_TEST_001' in transaction 1768179734432000001 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   7  ,
+      "TOTAL_P95_MS"  :   780.0  ,
+      "EXEC_P95_MS"  :   719.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   77.8
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-77dc-0005-5fdf0496af9e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179744212000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   6  ,
+      "TOTAL_P95_MS"  :   300.5  ,
+      "EXEC_P95_MS"  :   213.0  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-7651-0005-5fdf0496b8ae' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740706000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-75bd-00"  ,
+      "N"  :   6  ,
+      "TOTAL_P95_MS"  :   1469.0  ,
+      "EXEC_P95_MS"  :   1285.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   65.3
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf04967ea2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179732772000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   6  ,
+      "TOTAL_P95_MS"  :   348.0  ,
+      "EXEC_P95_MS"  :   294.3  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-77dc-0005-5fdf0496ab86' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740949000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   6  ,
+      "TOTAL_P95_MS"  :   1440.8  ,
+      "EXEC_P95_MS"  :   935.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   59.3
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cf72' has locked table 'BENCHMARK_TEST_001' in transaction 1768179750601000001 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   4652.8  ,
+      "EXEC_P95_MS"  :   4428.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-7651-0005-5fdf04963a4e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179713520000000 and this lock has not yet been released.\nYour statement '01c1abdd-0307-76de-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   2172.0  ,
+      "EXEC_P95_MS"  :   2059.0  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-76de-0005-5fdf0496777a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179717348000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   243.2  ,
+      "EXEC_P95_MS"  :   170.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf04967c56' has locked table 'BENCHMARK_TEST_001' in transaction 1768179729270000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   679.4  ,
+      "EXEC_P95_MS"  :   628.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cf32' has locked table 'BENCHMARK_TEST_001' in transaction 1768179749629000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   920.0  ,
+      "EXEC_P95_MS"  :   879.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-76de-0005-5fdf0496777a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179717348000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   261.4  ,
+      "EXEC_P95_MS"  :   178.2  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cfc6' has locked table 'BENCHMARK_TEST_001' in transaction 1768179750716000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   5470.6  ,
+      "EXEC_P95_MS"  :   5034.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf04967c56' has locked table 'BENCHMARK_TEST_001' in transaction 1768179729270000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   2760.6  ,
+      "EXEC_P95_MS"  :   2678.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-77dc-0005-5fdf0496af9e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179744212000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   416.8  ,
+      "EXEC_P95_MS"  :   375.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-75bd-0005-5fdf04969696' has locked table 'BENCHMARK_TEST_001' in transaction 1768179734432000001 and this lock has not yet been released.\nYour statement '01c1abde-0307-75bd-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   1639.2  ,
+      "EXEC_P95_MS"  :   1434.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   73.2
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-77dc-0005-5fdf04961ce2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712225000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   5  ,
+      "TOTAL_P95_MS"  :   1494.2  ,
+      "EXEC_P95_MS"  :   1399.0  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-77dc-0005-5fdf0496a5de' has locked table 'BENCHMARK_TEST_001' in transaction 1768179733053000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   714.9  ,
+      "EXEC_P95_MS"  :   595.9  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   19.8
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cfc6' has locked table 'BENCHMARK_TEST_001' in transaction 1768179750716000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   531.7  ,
+      "EXEC_P95_MS"  :   475.9  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-76de-0005-5fdf0496777a' has locked table 'BENCHMARK_TEST_001' in transaction 1768179717348000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-75bd-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   416.5  ,
+      "EXEC_P95_MS"  :   296.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cd4e' has locked table 'BENCHMARK_TEST_001' in transaction 1768179748287000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   4122.5  ,
+      "EXEC_P95_MS"  :   3892.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-7651-0005-5fdf04963a16' has locked table 'BENCHMARK_TEST_001' in transaction 1768179712732000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   891.6  ,
+      "EXEC_P95_MS"  :   437.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-75bd-0005-5fdf04969272' has locked table 'BENCHMARK_TEST_001' in transaction 1768179714067000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   452.1  ,
+      "EXEC_P95_MS"  :   366.5  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abdd-0307-76de-0005-5fdf049676f6' has locked table 'BENCHMARK_TEST_001' in transaction 1768179715178000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   221.5  ,
+      "EXEC_P95_MS"  :   189.5  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-7651-0005-5fdf0496b8ae' has locked table 'BENCHMARK_TEST_001' in transaction 1768179740706000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   1051.9  ,
+      "EXEC_P95_MS"  :   953.7  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   4.9
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf04967922' has locked table 'BENCHMARK_TEST_001' in transaction 1768179722011000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   3521.3  ,
+      "EXEC_P95_MS"  :   2891.6  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   592.4
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cf72' has locked table 'BENCHMARK_TEST_001' in transaction 1768179750601000001 and this lock has not yet been released.\nYour statement '01c1abde-0307-75bd-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   1528.6  ,
+      "EXEC_P95_MS"  :   1167.1  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-75bd-0005-5fdf049694d2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179728700000001 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   1644.7  ,
+      "EXEC_P95_MS"  :   1284.8  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   212.5
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-77dc-0005-5fdf0496adb2' has locked table 'BENCHMARK_TEST_001' in transaction 1768179742401000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   655.1  ,
+      "EXEC_P95_MS"  :   550.4  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   32.4
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cf32' has locked table 'BENCHMARK_TEST_001' in transaction 1768179749629000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   6880.6  ,
+      "EXEC_P95_MS"  :   6658.4  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cf32' has locked table 'BENCHMARK_TEST_001' in transaction 1768179749629000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   753.4  ,
+      "EXEC_P95_MS"  :   576.4  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179747270000000 and this lock has not yet been released.\nYour statement '01c1abdf-0307-75bd-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   551.9  ,
+      "EXEC_P95_MS"  :   433.1  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf049679ce' has locked table 'BENCHMARK_TEST_001' in transaction 1768179723077000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-77dc-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   744.8  ,
+      "EXEC_P95_MS"  :   459.7  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   306.7
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf049679ce' has locked table 'BENCHMARK_TEST_001' in transaction 1768179723077000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   886.3  ,
+      "EXEC_P95_MS"  :   447.3  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   425.3
+    }  ,
+    {
+      "QUERY_TYPE"  :   "INSERT"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf0496cbda' has locked table 'BENCHMARK_TEST_001' in transaction 1768179747270000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-76de-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   4835.4  ,
+      "EXEC_P95_MS"  :   4133.4  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }  ,
+    {
+      "QUERY_TYPE"  :   "UPDATE"  ,
+      "ERROR_CODE"  :   625  ,
+      "ERROR_PREFIX"  :   "Statement '01c1abde-0307-76de-0005-5fdf04967c56' has locked table 'BENCHMARK_TEST_001' in transaction 1768179729270000000 and this lock has not yet been released.\nYour statement '01c1abde-0307-7651-00"  ,
+      "N"  :   4  ,
+      "TOTAL_P95_MS"  :   248.1  ,
+      "EXEC_P95_MS"  :   196.7  ,
+      "TX_BLOCKED_P95_MS"  :   0.0  ,
+      "QUEUED_OVERLOAD_P95_MS"  :   0.0
+    }
+  ]
+]
+

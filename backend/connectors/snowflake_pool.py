@@ -7,7 +7,7 @@ and support for multiple warehouse connections.
 
 import logging
 from typing import Dict, Optional, Any, List, cast
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import asyncio
 from datetime import datetime
 from concurrent.futures import Executor, ThreadPoolExecutor
@@ -19,6 +19,15 @@ from snowflake.connector.errors import (
 )
 
 from backend.config import settings
+
+
+class PoolInitializationError(Exception):
+    """Raised when the connection pool fails to initialize enough connections."""
+
+    def __init__(self, message: str, errors: List[str]):
+        super().__init__(message)
+        self.errors = errors
+
 
 logger = logging.getLogger(__name__)
 
@@ -146,20 +155,94 @@ class SnowflakeConnectionPool:
             if self._initialized:
                 return
 
-            logger.info("Creating initial Snowflake connections...")
+            total = int(self.pool_size)
+            logger.info(
+                "Creating %d initial Snowflake connections (max_parallel_creates=%d)...",
+                total,
+                int(self._max_parallel_creates),
+            )
+            t0 = asyncio.get_running_loop().time()
+            next_pct_log = 10
 
             # Create initial pool connections with bounded parallelism.
+            # Fail-fast: if error rate exceeds threshold, abort early rather than
+            # waiting for all connections to fail (which can take minutes).
+            FAIL_FAST_ERROR_THRESHOLD = 0.5  # Abort if >=50% of attempts fail
+            FAIL_FAST_MIN_ATTEMPTS = min(16, total)  # Scale down for small pools
+
             connections: list[SnowflakeConnection | BaseException] = []
-            remaining = int(self.pool_size)
+            remaining = total
+            created_ok = 0
+            total_errors = 0
+            batches_completed = 0
             while remaining > 0:
                 batch_n = min(remaining, self._max_parallel_creates)
                 tasks = [self._create_connection() for _ in range(batch_n)]
-                connections.extend(await asyncio.gather(*tasks, return_exceptions=True))
+                batch = await asyncio.gather(*tasks, return_exceptions=True)
+                connections.extend(batch)
                 remaining -= batch_n
+                batch_ok = sum(1 for c in batch if not isinstance(c, BaseException))
+                batch_errors = batch_n - batch_ok
+                created_ok += batch_ok
+                total_errors += batch_errors
+                attempted = total - remaining
+                batches_completed += 1
 
+                # Fail-fast check: abort early on high error rates
+                # - If entire batch failed (100% errors in batch), abort immediately after 1st batch
+                # - Otherwise, wait for min attempts and check overall error rate
+                should_fail_fast = False
+                if batch_errors == batch_n and batch_n > 0:
+                    # Entire batch failed - likely a connectivity issue
+                    should_fail_fast = True
+                elif attempted >= FAIL_FAST_MIN_ATTEMPTS and total_errors > 0:
+                    error_rate = total_errors / attempted
+                    if error_rate >= FAIL_FAST_ERROR_THRESHOLD:
+                        should_fail_fast = True
+
+                if should_fail_fast and remaining > 0:
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    error_rate = total_errors / attempted if attempted > 0 else 1.0
+                    # Collect error messages from failed connections
+                    error_msgs = [
+                        str(c) for c in connections if isinstance(c, BaseException)
+                    ]
+                    logger.error(
+                        "🔴 Fail-fast triggered: %d/%d connections failed (%.0f%% error rate) after %.1fs. Aborting pool initialization.",
+                        total_errors,
+                        attempted,
+                        error_rate * 100,
+                        elapsed,
+                    )
+                    raise PoolInitializationError(
+                        f"Connection error rate too high ({total_errors}/{attempted} failed, {error_rate * 100:.0f}%). Aborting.",
+                        errors=error_msgs[:5],  # First 5 errors
+                    )
+
+                if total > 0:
+                    pct = int((attempted * 100) / total)
+                else:
+                    pct = 100
+                if remaining > 0 and pct >= next_pct_log:
+                    errors = attempted - created_ok
+                    elapsed = asyncio.get_running_loop().time() - t0
+                    logger.info(
+                        "Snowflake pool init progress: %d/%d attempted, %d created, %d errors (%.1fs elapsed)",
+                        attempted,
+                        total,
+                        created_ok,
+                        errors,
+                        elapsed,
+                    )
+                    while next_pct_log <= pct:
+                        next_pct_log += 10
+
+            connection_errors: List[str] = []
             for conn in connections:
                 if isinstance(conn, BaseException):
+                    error_msg = str(conn)
                     logger.error(f"Failed to create initial connection: {conn}")
+                    connection_errors.append(error_msg)
                 else:
                     self._pool.append(conn)
                     self._connection_times[id(conn)] = datetime.now()
@@ -169,6 +252,16 @@ class SnowflakeConnectionPool:
             logger.info(
                 f"Connection pool initialized with {len(self._pool)} connections"
             )
+
+            # If we have connection errors, raise with details so callers can handle
+            if connection_errors:
+                error_msg = f"Failed to create {len(connection_errors)}/{total} connections during pool initialization"
+                logger.error(
+                    "🔴 %s. First error: %s",
+                    error_msg,
+                    connection_errors[0][:200] if connection_errors else "unknown",
+                )
+                raise PoolInitializationError(error_msg, errors=connection_errors)
 
     def _get_connection_params(self) -> Dict[str, Any]:
         """Get connection parameters for snowflake.connector."""
@@ -450,6 +543,7 @@ class SnowflakeConnectionPool:
             (results, info) where info includes:
               - query_id: Snowflake QUERY_ID (cursor.sfqid) when available
               - rowcount: cursor.rowcount (may be -1 depending on statement)
+              - total_elapsed_time_ms: Snowflake execution time in milliseconds (if available)
         """
         async with self.get_connection() as conn:
             if warehouse and warehouse != self.warehouse:
@@ -468,13 +562,85 @@ class SnowflakeConnectionPool:
 
                 query_id = getattr(cursor, "sfqid", None)
                 rowcount = getattr(cursor, "rowcount", None)
+                total_elapsed_time_ms: Optional[float] = None
+                query_result_format = getattr(cursor, "_query_result_format", None)
+                if query_result_format and hasattr(query_result_format, "get"):
+                    elapsed_raw = query_result_format.get("total_elapsed_time")
+                    if elapsed_raw is not None:
+                        try:
+                            total_elapsed_time_ms = float(elapsed_raw)
+                        except (ValueError, TypeError):
+                            pass
                 results: List[tuple] = []
                 if fetch:
                     results = await self._run_in_executor(cursor.fetchall)
 
-                return results, {"query_id": query_id, "rowcount": rowcount}
+                return results, {
+                    "query_id": query_id,
+                    "rowcount": rowcount,
+                    "total_elapsed_time_ms": total_elapsed_time_ms,
+                }
             finally:
                 await self._run_in_executor(cursor.close)
+
+    async def update_query_tag(self, new_tag: str) -> int:
+        """
+        Update the QUERY_TAG session parameter on all existing connections.
+
+        This is used to transition from warmup to measurement phase so that
+        Snowflake's QUERY_HISTORY can distinguish warmup vs measurement queries.
+
+        Args:
+            new_tag: New QUERY_TAG value (e.g., "unistore_benchmark:test_id=XXX:phase=RUNNING")
+
+        Returns:
+            Number of connections successfully updated
+        """
+        # Update the stored session parameter so new connections also get the new tag.
+        self._session_parameters["QUERY_TAG"] = str(new_tag)
+
+        # Gather all connections (pooled + in-use) under lock, then update outside lock.
+        async with self._lock:
+            all_conns: list[SnowflakeConnection] = list(self._pool) + list(
+                self._in_use.values()
+            )
+
+        if not all_conns:
+            return 0
+
+        # Run ALTER SESSION on each connection (best-effort, parallel).
+        alter_sql = f"ALTER SESSION SET QUERY_TAG = '{new_tag}'"
+        updated = 0
+        sem = asyncio.Semaphore(min(16, len(all_conns)))
+
+        async def _update_conn(conn: SnowflakeConnection) -> bool:
+            async with sem:
+                try:
+
+                    def _do_alter():
+                        cur = conn.cursor()
+                        try:
+                            cur.execute(alter_sql)
+                        finally:
+                            cur.close()
+
+                    await self._run_in_executor(_do_alter)
+                    return True
+                except Exception:
+                    # Best-effort: if ALTER fails, the connection may still work.
+                    return False
+
+        results = await asyncio.gather(
+            *[_update_conn(c) for c in all_conns], return_exceptions=True
+        )
+        updated = sum(1 for r in results if r is True)
+        logger.debug(
+            "Updated QUERY_TAG on %d/%d connections to: %s",
+            updated,
+            len(all_conns),
+            new_tag[:100],
+        )
+        return updated
 
     async def get_pool_stats(self) -> Dict[str, Any]:
         """
@@ -494,36 +660,100 @@ class SnowflakeConnectionPool:
             }
 
     async def close_all(self):
-        """Close all connections in the pool."""
+        """
+        Close all connections in the pool (best effort).
+
+        Closing Snowflake connections can occasionally block on network calls (session delete,
+        telemetry flush, etc). To avoid stalling the app during test PROCESSING/teardown,
+        we:
+        - close connections outside the pool lock
+        - disable connector retries for close()
+        - bound close() by temporarily lowering the connection's network/socket timeouts
+        - close in parallel with bounded concurrency
+        - suppress connector network ERROR spam during close and emit a single summary log
+        """
+        # Copy connections and clear state under lock, then close outside the lock.
         async with self._lock:
             logger.info("Closing all Snowflake connections...")
-
-            # Close connections in pool
-            for conn in self._pool:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
-            # Close in-use connections
-            for conn in self._in_use.values():
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
+            conns: list[SnowflakeConnection] = list(self._pool) + list(
+                self._in_use.values()
+            )
             self._pool.clear()
             self._in_use.clear()
             self._connection_times.clear()
             self._last_health_check.clear()
             self._initialized = False
 
-            logger.info("All connections closed")
+        if not conns:
+            logger.info("All connections closed (0 connections)")
+        else:
+            # Bound shutdown behavior (seconds). We intentionally keep this low so teardown
+            # cannot hang for minutes on degraded connectivity.
+            close_timeout_s = 10
+            close_parallel = max(1, min(32, int(self._max_parallel_creates) * 4))
+            close_parallel = min(close_parallel, len(conns))
+            sem = asyncio.Semaphore(int(close_parallel))
+
+            # Suppress connector-internal ERROR logs during close; we will log one summary.
+            net_logger = logging.getLogger("snowflake.connector.network")
+            prev_level = net_logger.level
+            net_logger.setLevel(logging.CRITICAL)
+
+            closed_count = 0
+            try:
+
+                def _close_conn(c: SnowflakeConnection) -> None:
+                    # Best-effort: shorten timeouts so close() cannot block for long.
+                    with suppress(Exception):
+                        setattr(
+                            c,
+                            "_network_timeout",
+                            min(
+                                int(
+                                    getattr(c, "_network_timeout", close_timeout_s)
+                                    or close_timeout_s
+                                ),
+                                int(close_timeout_s),
+                            ),
+                        )
+                    with suppress(Exception):
+                        setattr(
+                            c,
+                            "_socket_timeout",
+                            min(
+                                int(
+                                    getattr(c, "_socket_timeout", close_timeout_s)
+                                    or close_timeout_s
+                                ),
+                                int(close_timeout_s),
+                            ),
+                        )
+                    with suppress(Exception):
+                        c.close(retry=False)
+
+                async def _close_one(c: SnowflakeConnection) -> None:
+                    nonlocal closed_count
+                    async with sem:
+                        await self._run_in_executor(_close_conn, c)
+                    closed_count += 1
+
+                tasks = [asyncio.create_task(_close_one(c)) for c in conns]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                net_logger.setLevel(prev_level)
+
+            logger.info(
+                "All connections closed (%d/%d attempted, parallel=%d, close_timeout=%ds)",
+                int(closed_count),
+                int(len(conns)),
+                int(close_parallel),
+                int(close_timeout_s),
+            )
 
         # Shut down any owned executor outside the lock (best effort).
         if self._owns_executor and self._executor is not None:
             try:
-                self._executor.shutdown(wait=False)  # type: ignore[attr-defined]
+                self._executor.shutdown(wait=False)
             except Exception:
                 pass
             self._executor = None
@@ -582,7 +812,54 @@ async def close_default_pool():
     global _default_executor
     if _default_executor is not None:
         try:
-            _default_executor.shutdown(wait=False)  # type: ignore[attr-defined]
+            _default_executor.shutdown(wait=False)
         except Exception:
             pass
         _default_executor = None
+
+
+# Telemetry pool (isolated from results persistence)
+_telemetry_pool: Optional[SnowflakeConnectionPool] = None
+_telemetry_executor: Executor | None = None
+
+
+def get_telemetry_pool() -> SnowflakeConnectionPool:
+    """Get or create a dedicated Snowflake pool for telemetry sampling."""
+    global _telemetry_pool, _telemetry_executor
+
+    if _telemetry_pool is None:
+        if _telemetry_executor is None:
+            _telemetry_executor = ThreadPoolExecutor(
+                max_workers=max(
+                    1, min(4, int(settings.SNOWFLAKE_RESULTS_EXECUTOR_MAX_WORKERS))
+                ),
+                thread_name_prefix="sf-telemetry",
+            )
+        _telemetry_pool = SnowflakeConnectionPool(
+            account=settings.SNOWFLAKE_ACCOUNT,
+            user=settings.SNOWFLAKE_USER,
+            password=settings.SNOWFLAKE_PASSWORD,
+            warehouse=settings.SNOWFLAKE_WAREHOUSE,
+            database=settings.SNOWFLAKE_DATABASE,
+            schema=settings.SNOWFLAKE_SCHEMA,
+            role=settings.SNOWFLAKE_ROLE,
+            pool_size=1,
+            max_overflow=0,
+            timeout=settings.SNOWFLAKE_POOL_TIMEOUT,
+            recycle=settings.SNOWFLAKE_POOL_RECYCLE,
+            executor=_telemetry_executor,
+            owns_executor=True,
+            max_parallel_creates=1,
+        )
+
+    return _telemetry_pool
+
+
+async def close_telemetry_pool() -> None:
+    """Close the dedicated telemetry pool (best effort)."""
+    global _telemetry_pool, _telemetry_executor
+    if _telemetry_pool is not None:
+        await _telemetry_pool.close_all()
+        _telemetry_pool = None
+    # close_all() shuts down owned executors; clear the global handle too.
+    _telemetry_executor = None

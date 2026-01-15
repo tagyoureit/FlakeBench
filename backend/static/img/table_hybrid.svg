@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
+  <g fill="none" stroke="#0ea5e9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- "Hybrid" = mixed scan + point lookups: lines + key/value dots -->
+    <path d="M10 18h28" />
+    <path d="M10 28h24" />
+    <path d="M10 38h32" />
+    <path d="M10 48h22" />
+
+    <rect x="44" y="14" width="10" height="10" rx="2" />
+    <rect x="40" y="26" width="10" height="10" rx="2" />
+    <rect x="48" y="38" width="10" height="10" rx="2" />
+  </g>
+</svg>

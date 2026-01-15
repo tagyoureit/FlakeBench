@@ -2,7 +2,7 @@
 Database Schema Setup Script
 
 Creates the necessary database schema for storing benchmark test results.
-Executes the SQL DDL from:
+Executes the SQL DDL from (rerunnable, idempotent):
 - sql/schema/results_tables.sql
 - sql/schema/templates_table.sql
 - sql/schema/template_value_pools_table.sql

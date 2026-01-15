@@ -90,10 +90,10 @@ class Metrics(BaseModel):
     successful_operations: int = Field(0, description="Successful operations")
     failed_operations: int = Field(0, description="Failed operations")
 
-    # Operations per second (instantaneous)
-    current_ops_per_second: float = Field(0.0, description="Current ops/sec")
-    avg_ops_per_second: float = Field(0.0, description="Average ops/sec")
-    peak_ops_per_second: float = Field(0.0, description="Peak ops/sec")
+    # QPS (queries per second)
+    current_qps: float = Field(0.0, description="Current QPS")
+    avg_qps: float = Field(0.0, description="Average QPS")
+    peak_qps: float = Field(0.0, description="Peak QPS")
 
     # Operation breakdown
     read_metrics: OperationMetrics = Field(
@@ -124,6 +124,9 @@ class Metrics(BaseModel):
 
     # Connection pool metrics
     active_connections: int = Field(0, description="Active connections")
+    target_workers: int = Field(
+        0, description="Target worker count (desired concurrency)"
+    )
     idle_connections: int = Field(0, description="Idle connections")
     connection_errors: int = Field(0, description="Connection errors")
     connection_timeouts: int = Field(0, description="Connection timeouts")
@@ -175,9 +178,9 @@ class Metrics(BaseModel):
             "elapsed": self.elapsed_seconds,
             "ops": {
                 "total": self.total_operations,
-                "current_per_sec": self.current_ops_per_second,
-                "avg_per_sec": self.avg_ops_per_second,
-                "peak_per_sec": self.peak_ops_per_second,
+                "current_per_sec": self.current_qps,
+                "avg_per_sec": self.avg_qps,
+                "peak_per_sec": self.peak_qps,
             },
             "operations": {
                 "reads": self.read_metrics.count,
@@ -201,8 +204,12 @@ class Metrics(BaseModel):
             },
             "connections": {
                 "active": self.active_connections,
+                "target": self.target_workers,
                 "idle": self.idle_connections,
             },
+            # Extension point for control-loop + warehouse telemetry.
+            # Persisted in METRICS_SNAPSHOTS.CUSTOM_METRICS as well.
+            "custom_metrics": self.custom_metrics or {},
         }
 
 
@@ -218,7 +225,7 @@ class MetricsSnapshot(BaseModel):
 
     # Core metrics
     total_operations: int = Field(..., description="Total operations")
-    operations_per_second: float = Field(..., description="Ops/sec")
+    qps: float = Field(..., description="QPS")
 
     # Latency (simplified)
     p50_latency_ms: float = Field(..., description="P50 latency")
@@ -250,7 +257,7 @@ class MetricsSnapshot(BaseModel):
             timestamp=metrics.timestamp,
             elapsed_seconds=metrics.elapsed_seconds,
             total_operations=metrics.total_operations,
-            operations_per_second=metrics.current_ops_per_second,
+            qps=metrics.current_qps,
             p50_latency_ms=metrics.overall_latency.p50,
             p95_latency_ms=metrics.overall_latency.p95,
             p99_latency_ms=metrics.overall_latency.p99,

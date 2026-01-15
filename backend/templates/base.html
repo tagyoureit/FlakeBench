@@ -11,7 +11,9 @@
     <script src="/static/js/ws.js"></script>
     <script src="/static/js/toast.js"></script>
     <script defer src="/static/js/templates_manager.js"></script>
-    <script defer src="/static/js/dashboard.js"></script>
+    <script defer src="/static/js/dashboard.js?v=3"></script>
+    <script defer src="/static/js/history.js"></script>
+    <script defer src="/static/js/compare_detail.js"></script>
     <script defer src="/static/js/alpine.min.js"></script>
     <script src="/static/js/chart.min.js"></script>
     
@@ -58,6 +60,26 @@
         }
 
         document.addEventListener('DOMContentLoaded', updateActiveNavbarTab);
+        
+        // Clean up Alpine components BEFORE HTMX swaps content to prevent
+        // "X is not defined" errors during navigation transitions.
+        document.body.addEventListener('htmx:beforeSwap', function(event) {
+            if (window.Alpine && event.detail && event.detail.target) {
+                const target = event.detail.target;
+                // Destroy all Alpine components in the target before swapping
+                const alpineElements = target.querySelectorAll('[x-data]');
+                alpineElements.forEach(function(el) {
+                    try {
+                        if (el._x_dataStack) {
+                            window.Alpine.destroyTree(el);
+                        }
+                    } catch (_) {
+                        // Ignore cleanup errors
+                    }
+                });
+            }
+        });
+        
         document.body.addEventListener('htmx:afterSwap', function(event) {
             updateActiveNavbarTab();
             // Initialize Alpine components in swapped content (avoid double-init on initial load).
@@ -67,7 +89,18 @@
                 }, 0);
             }
         });
-        document.body.addEventListener('htmx:historyRestore', updateActiveNavbarTab);
+        document.body.addEventListener('htmx:historyRestore', function(event) {
+            updateActiveNavbarTab();
+            // Re-initialize Alpine components after history restore (back/forward navigation).
+            if (window.Alpine) {
+                const target = event.detail && event.detail.elt ? event.detail.elt : document.getElementById('main-content');
+                if (target) {
+                    setTimeout(() => {
+                        window.Alpine.initTree(target);
+                    }, 0);
+                }
+            }
+        });
         window.addEventListener('popstate', updateActiveNavbarTab);
     </script>
 

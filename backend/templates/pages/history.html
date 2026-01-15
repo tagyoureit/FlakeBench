@@ -71,6 +71,239 @@
 
     <div class="card">
         <div class="flex justify-between items-center mb-4">
+            <div class="card-title mb-0">
+                Compare
+                (<span x-text="compareTests.length"></span>/2)
+            </div>
+            <div class="btn-group">
+                <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    @click="clearCompare"
+                    :disabled="compareTests.length === 0"
+                >
+                    Clear
+                </button>
+            </div>
+        </div>
+
+        <div x-show="compareError" class="alert alert-error mb-4">
+            <strong>Compare error.</strong>
+            <span x-text="compareError"></span>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Search Tests</label>
+            <input
+                type="text"
+                class="form-input"
+                x-model="searchQuery"
+                @input.debounce.300ms="searchTests"
+                placeholder="Search by test name..."
+            >
+        </div>
+
+        <div x-show="searchError" class="alert alert-error mb-4">
+            <strong>Search failed.</strong>
+            <span x-text="searchError"></span>
+        </div>
+
+        <div x-show="searchLoading" class="text-center py-4">
+            {% include "components/loading_spinner.html" %}
+        </div>
+
+        <div class="mb-4" x-show="!searchLoading && searchResults.length > 0">
+            <div class="font-semibold mb-2">Search Results</div>
+            <div class="table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Test Name</th>
+                            <th>Table Type</th>
+                            <th>Date</th>
+                            <th>QPS</th>
+                            <th>P95 Latency</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="test in searchResults" :key="test.test_id">
+                            <tr>
+                                <td x-text="test.test_name"></td>
+                                <td x-text="test.table_type"></td>
+                                <td x-text="new Date(test.created_at).toLocaleDateString()"></td>
+                                <td x-text="Number(test.ops_per_sec || 0).toFixed(0)"></td>
+                                <td x-text="Number(test.p95_latency || 0).toFixed(2) + ' ms'"></td>
+                                <td>
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm"
+                                        :class="isCompared(test.test_id) ? 'btn-secondary' : 'btn-primary'"
+                                        @click="toggleCompare(test.test_id)"
+                                        :disabled="!isCompared(test.test_id) && compareTests.length >= 2"
+                                    >
+                                        <span x-text="isCompared(test.test_id) ? 'Remove' : 'Add to compare'"></span>
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div x-show="compareTests.length > 0" class="mb-4">
+            <div class="font-semibold mb-2">Selected for Comparison</div>
+            <div class="flex flex-wrap gap-2">
+                <template x-for="test in compareTests" :key="test.test_id">
+                    <div class="inline-flex items-center px-3 py-1 rounded-full bg-blue-100 text-blue-800">
+                        <span x-text="test.test_name" class="mr-2"></span>
+                        <button
+                            type="button"
+                            class="text-blue-600 hover:text-blue-800"
+                            @click="toggleCompare(test.test_id)"
+                            title="Remove from compare"
+                        >&times;</button>
+                    </div>
+                </template>
+            </div>
+        </div>
+
+        <div x-show="compareTests.length < 2" class="alert alert-info">
+            Select 2 tests (from search or from the table below) to compare high-level metrics.
+        </div>
+
+        <div x-show="compareTests.length === 2" class="mt-4">
+            <div class="font-semibold mb-2">High-level Comparison</div>
+            <div class="table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Metric</th>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <th x-text="test.test_name"></th>
+                            </template>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td class="font-semibold">Table Type</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td x-text="test.table_type"></td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">Warehouse Size</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td
+                                    x-text="['POSTGRES', 'SNOWFLAKE_POSTGRES'].includes((test.table_type || '').toUpperCase()) ? '—' : test.warehouse_size"
+                                ></td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">Concurrent Connections</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td x-text="test.concurrent_connections"></td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">Operations / Second</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td>
+                                    <span x-text="Number(test.ops_per_sec || 0).toFixed(0)"></span>
+                                    <span
+                                        class="ml-2 text-sm"
+                                        :class="test.ops_per_sec === Math.max(...compareTests.map(t => t.ops_per_sec)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                        x-show="test.ops_per_sec === Math.max(...compareTests.map(t => t.ops_per_sec))"
+                                    >
+                                        ✓ Best
+                                    </span>
+                                </td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">P50 Latency (ms)</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td>
+                                    <span x-text="Number(test.p50_latency || 0).toFixed(2)"></span>
+                                    <span
+                                        class="ml-2 text-sm"
+                                        :class="test.p50_latency === Math.min(...compareTests.map(t => t.p50_latency)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                        x-show="test.p50_latency === Math.min(...compareTests.map(t => t.p50_latency))"
+                                    >
+                                        ✓ Best
+                                    </span>
+                                </td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">P95 Latency (ms)</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td>
+                                    <span x-text="Number(test.p95_latency || 0).toFixed(2)"></span>
+                                    <span
+                                        class="ml-2 text-sm"
+                                        :class="test.p95_latency === Math.min(...compareTests.map(t => t.p95_latency)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                        x-show="test.p95_latency === Math.min(...compareTests.map(t => t.p95_latency))"
+                                    >
+                                        ✓ Best
+                                    </span>
+                                </td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">P99 Latency (ms)</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td>
+                                    <span x-text="Number(test.p99_latency || 0).toFixed(2)"></span>
+                                    <span
+                                        class="ml-2 text-sm"
+                                        :class="test.p99_latency === Math.min(...compareTests.map(t => t.p99_latency)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                        x-show="test.p99_latency === Math.min(...compareTests.map(t => t.p99_latency))"
+                                    >
+                                        ✓ Best
+                                    </span>
+                                </td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">Error Rate (%)</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td>
+                                    <span x-text="Number(test.error_rate || 0).toFixed(2)"></span>
+                                    <span
+                                        class="ml-2 text-sm"
+                                        :class="test.error_rate === Math.min(...compareTests.map(t => t.error_rate)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                        x-show="test.error_rate === Math.min(...compareTests.map(t => t.error_rate))"
+                                    >
+                                        ✓ Best
+                                    </span>
+                                </td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">Test Duration (s)</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td x-text="Number(test.duration || 0).toFixed(0)"></td>
+                            </template>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="btn-group mt-4">
+                <button
+                    type="button"
+                    class="btn btn-primary btn-sm"
+                    @click="openDeepCompare"
+                >
+                    Deep Compare
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="flex justify-between items-center mb-4">
             <div class="card-title mb-0">Test Results</div>
             <div>
                 <span class="text-sm text-gray-600">
@@ -104,7 +337,7 @@
                             <span x-show="sortField === 'created_at'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
                         </th>
                         <th @click="sortBy('ops_per_sec')" class="cursor-pointer">
-                            Ops/sec
+                            QPS
                             <span x-show="sortField === 'ops_per_sec'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
                         </th>
                         <th @click="sortBy('p95_latency')" class="cursor-pointer">
@@ -128,13 +361,26 @@
                             <td>
                                 <span 
                                     class="status-badge"
-                                    :class="{
-                                        'status-completed': test.status === 'COMPLETED',
-                                        'status-running': test.status === 'RUNNING',
-                                        'status-failed': test.status === 'FAILED',
-                                        'status-paused': test.status === 'PAUSED'
-                                    }"
-                                    x-text="test.status">
+                                    :class="(() => {
+                                        const phase = test.phase ? test.phase.toUpperCase() : null;
+                                        const status = test.status ? test.status.toUpperCase() : '';
+                                        if (phase && status === 'RUNNING') {
+                                            return {
+                                                'status-preparing': phase === 'PREPARING',
+                                                'status-warmup': phase === 'WARMUP' || phase === 'WARM-UP',
+                                                'status-running': phase === 'RUNNING',
+                                                'status-processing': phase === 'PROCESSING'
+                                            };
+                                        }
+                                        return {
+                                            'status-completed': status === 'COMPLETED',
+                                            'status-running': status === 'RUNNING',
+                                            'status-failed': status === 'FAILED',
+                                            'status-paused': status === 'PAUSED',
+                                            'status-cancelled': status === 'CANCELLED'
+                                        };
+                                    })()"
+                                    x-text="test.phase && test.status === 'RUNNING' ? test.phase : test.status">
                                 </span>
                             </td>
                             <td>
@@ -144,6 +390,14 @@
                                         class="btn btn-primary btn-sm"
                                         @click="viewTest(test)">
                                         View
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="btn btn-secondary btn-sm"
+                                        @click="toggleCompare(test.test_id)"
+                                        :disabled="!isCompared(test.test_id) && compareTests.length >= 2"
+                                    >
+                                        <span x-text="isCompared(test.test_id) ? 'Remove' : 'Compare'"></span>
                                     </button>
                                     <button 
                                         type="button" 
@@ -189,169 +443,8 @@
             </button>
         </div>
     </div>
+
 </div>
 {% endblock %}
 
-{% block extra_scripts %}
-<script>
-function testHistory() {
-    return {
-        tests: [],
-        error: null,
-        filters: {
-            table_type: '',
-            warehouse_size: '',
-            status: '',
-            date_range: 'all'
-        },
-        sortField: 'created_at',
-        sortDirection: 'desc',
-        currentPage: 1,
-        pageSize: 20,
-        totalPages: 1,
-        
-        init() {
-            this.loadTests();
-        },
-        
-        async loadTests() {
-            try {
-                this.error = null;
-                const params = new URLSearchParams({
-                    page: this.currentPage,
-                    page_size: this.pageSize,
-                    ...this.filters
-                });
-                
-                const response = await fetch(`/api/tests?${params}`);
-                if (!response.ok) {
-                    const payload = await response.json().catch(() => ({}));
-                    const detail = payload && payload.detail ? payload.detail : null;
-                    this.error =
-                        (detail && (detail.message || detail.detail || detail)) ||
-                        `Failed to load test results (HTTP ${response.status})`;
-                    this.tests = [];
-                    this.totalPages = 1;
-                    return;
-                }
-
-                const data = await response.json();
-                this.tests = data.results || [];
-                this.totalPages = data.total_pages || 1;
-            } catch (error) {
-                console.error('Failed to load tests:', error);
-                this.error = error?.message || String(error);
-                this.tests = [];
-                this.totalPages = 1;
-            }
-        },
-        
-        get sortedTests() {
-            return [...this.tests].sort((a, b) => {
-                let aVal = a[this.sortField];
-                let bVal = b[this.sortField];
-                
-                if (this.sortField === 'created_at') {
-                    aVal = new Date(aVal);
-                    bVal = new Date(bVal);
-                }
-                
-                if (this.sortDirection === 'asc') {
-                    return aVal > bVal ? 1 : -1;
-                } else {
-                    return aVal < bVal ? 1 : -1;
-                }
-            });
-        },
-        
-        sortBy(field) {
-            if (this.sortField === field) {
-                this.sortDirection = this.sortDirection === 'asc' ? 'desc' : 'asc';
-            } else {
-                this.sortField = field;
-                this.sortDirection = 'desc';
-            }
-        },
-        
-        applyFilters() {
-            this.currentPage = 1;
-            this.loadTests();
-        },
-        
-        resetFilters() {
-            this.filters = {
-                table_type: '',
-                warehouse_size: '',
-                status: '',
-                date_range: 'all'
-            };
-            this.applyFilters();
-        },
-        
-        previousPage() {
-            if (this.currentPage > 1) {
-                this.currentPage--;
-                this.loadTests();
-            }
-        },
-        
-        nextPage() {
-            if (this.currentPage < this.totalPages) {
-                this.currentPage++;
-                this.loadTests();
-            }
-        },
-        
-        dashboardUrl(test) {
-            const id = test && test.test_id ? String(test.test_id) : '';
-            const status = test && test.status ? String(test.status).toUpperCase() : '';
-            if (!id) return '/dashboard';
-            if (status === 'COMPLETED') return `/dashboard/history/${id}`;
-            return `/dashboard/${id}`;
-        },
-
-        viewTest(test) {
-            window.location.href = this.dashboardUrl(test);
-        },
-        
-        async rerunTest(testId) {
-            const confirmed = await window.toast.confirm(
-                'Re-run this test with the same configuration?',
-                { confirmText: 'Re-run', confirmVariant: 'primary', timeoutMs: 10_000 },
-            );
-            if (!confirmed) return;
-
-            try {
-                const response = await fetch(`/api/tests/${testId}/rerun`, {
-                    method: 'POST'
-                });
-                const data = await response.json();
-                window.location.href = `/dashboard/${data.new_test_id}`;
-            } catch (error) {
-                console.error('Failed to rerun test:', error);
-                window.toast.error('Failed to rerun test');
-            }
-        },
-        
-        async deleteTest(testId) {
-            const confirmed = await window.toast.confirm(
-                'Delete this test result? This cannot be undone.',
-                { confirmText: 'Delete', confirmVariant: 'danger', timeoutMs: 10_000 },
-            );
-            if (!confirmed) return;
-
-            try {
-                await fetch(`/api/tests/${testId}`, {
-                    method: 'DELETE'
-                });
-                this.loadTests();
-                window.toast.success('Test deleted.');
-            } catch (error) {
-                console.error('Failed to delete test:', error);
-                window.toast.error('Failed to delete test');
-            }
-        }
-    };
-}
-</script>
-{% endblock %}
+{# testHistory() is defined in /static/js/history.js and loaded globally #}

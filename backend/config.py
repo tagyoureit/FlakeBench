@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     # operations. Keeping these bounded helps ensure `uvicorn --reload` can shut down cleanly
     # even if Snowflake connectivity is degraded.
     SNOWFLAKE_CONNECT_LOGIN_TIMEOUT: int = 15
-    SNOWFLAKE_CONNECT_NETWORK_TIMEOUT: int = 15
-    SNOWFLAKE_CONNECT_SOCKET_TIMEOUT: int = 15
+    SNOWFLAKE_CONNECT_NETWORK_TIMEOUT: int = 60
+    SNOWFLAKE_CONNECT_SOCKET_TIMEOUT: int = 60
 
     # Benchmark/workload connector timeouts (seconds).
     #
@@ -43,8 +43,8 @@ class Settings(BaseSettings):
     # high enough that we observe warehouse-side queueing/slowdowns instead of
     # client-side timeouts.
     SNOWFLAKE_BENCHMARK_CONNECT_LOGIN_TIMEOUT: int = 15
-    SNOWFLAKE_BENCHMARK_CONNECT_NETWORK_TIMEOUT: int = 60
-    SNOWFLAKE_BENCHMARK_CONNECT_SOCKET_TIMEOUT: int = 60
+    SNOWFLAKE_BENCHMARK_CONNECT_NETWORK_TIMEOUT: int = 300
+    SNOWFLAKE_BENCHMARK_CONNECT_SOCKET_TIMEOUT: int = 300
 
     # Optional key-pair authentication
     SNOWFLAKE_PRIVATE_KEY_PATH: str = ""
@@ -55,7 +55,9 @@ class Settings(BaseSettings):
     # ========================================================================
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
-    POSTGRES_DATABASE: str = "benchmark"
+    # Fallback database if template config doesn't specify one.
+    # Templates now use the database selected in the UI dropdown.
+    POSTGRES_DATABASE: str = "postgres"
     POSTGRES_USER: str = "postgres"
     POSTGRES_PASSWORD: str = ""
 
@@ -66,16 +68,10 @@ class Settings(BaseSettings):
     # Snowflake Postgres interface
     SNOWFLAKE_POSTGRES_HOST: str = ""
     SNOWFLAKE_POSTGRES_PORT: int = 5432
+    # Fallback database if template config doesn't specify one.
     SNOWFLAKE_POSTGRES_DATABASE: str = ""
     SNOWFLAKE_POSTGRES_USER: str = ""
     SNOWFLAKE_POSTGRES_PASSWORD: str = ""
-
-    # CrunchyData
-    CRUNCHYDATA_HOST: str = ""
-    CRUNCHYDATA_PORT: int = 5432
-    CRUNCHYDATA_DATABASE: str = ""
-    CRUNCHYDATA_USER: str = ""
-    CRUNCHYDATA_PASSWORD: str = ""
 
     # ========================================================================
     # Application Settings

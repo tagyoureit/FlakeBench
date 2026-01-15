@@ -38,8 +38,8 @@ class LoadPattern(ABC):
     and executed during a performance test.
     """
 
-    def __init__(self, target_ops_per_second: float, duration_seconds: int):
-        self.target_ops_per_second = target_ops_per_second
+    def __init__(self, target_qps: float, duration_seconds: int):
+        self.target_qps = target_qps
         self.duration_seconds = duration_seconds
         self.start_time: Optional[float] = None
 
@@ -56,10 +56,10 @@ class LoadPattern(ABC):
     @abstractmethod
     def get_current_rate(self) -> float:
         """
-        Get the current target operations per second.
+        Get the current target queries per second.
 
         Returns:
-            float: Current target ops/sec
+            float: Current target QPS
         """
         pass
 
@@ -91,7 +91,7 @@ class SteadyLoadPattern(LoadPattern):
 
     def get_current_rate(self) -> float:
         """Returns constant target rate"""
-        return self.target_ops_per_second
+        return self.target_qps
 
 
 class BurstLoadPattern(LoadPattern):
@@ -104,13 +104,13 @@ class BurstLoadPattern(LoadPattern):
 
     def __init__(
         self,
-        target_ops_per_second: float,
+        target_qps: float,
         duration_seconds: int,
         burst_multiplier: float = 5.0,
         burst_duration_seconds: int = 10,
         burst_interval_seconds: int = 60,
     ):
-        super().__init__(target_ops_per_second, duration_seconds)
+        super().__init__(target_qps, duration_seconds)
         self.burst_multiplier = burst_multiplier
         self.burst_duration = burst_duration_seconds
         self.burst_interval = burst_interval_seconds
@@ -122,9 +122,9 @@ class BurstLoadPattern(LoadPattern):
         position_in_cycle = elapsed % self.burst_interval
 
         if position_in_cycle < self.burst_duration:
-            return self.target_ops_per_second * self.burst_multiplier
+            return self.target_qps * self.burst_multiplier
         else:
-            return self.target_ops_per_second
+            return self.target_qps
 
 
 class RampUpLoadPattern(LoadPattern):
@@ -138,21 +138,19 @@ class RampUpLoadPattern(LoadPattern):
 
     def __init__(
         self,
-        target_ops_per_second: float,
+        target_qps: float,
         duration_seconds: int,
-        start_ops_per_second: Optional[float] = None,
+        start_qps: Optional[float] = None,
     ):
-        super().__init__(target_ops_per_second, duration_seconds)
-        self.start_rate = start_ops_per_second or (target_ops_per_second * 0.1)
+        super().__init__(target_qps, duration_seconds)
+        self.start_rate = start_qps or (target_qps * 0.1)
 
     def get_current_rate(self) -> float:
         """Returns linearly increasing rate"""
         elapsed = self.elapsed_seconds()
         progress = min(elapsed / self.duration_seconds, 1.0)
 
-        current_rate = (
-            self.start_rate + (self.target_ops_per_second - self.start_rate) * progress
-        )
+        current_rate = self.start_rate + (self.target_qps - self.start_rate) * progress
         return current_rate
 
 
@@ -166,22 +164,19 @@ class RampDownLoadPattern(LoadPattern):
 
     def __init__(
         self,
-        target_ops_per_second: float,
+        target_qps: float,
         duration_seconds: int,
-        end_ops_per_second: Optional[float] = None,
+        end_qps: Optional[float] = None,
     ):
-        super().__init__(target_ops_per_second, duration_seconds)
-        self.end_rate = end_ops_per_second or (target_ops_per_second * 0.1)
+        super().__init__(target_qps, duration_seconds)
+        self.end_rate = end_qps or (target_qps * 0.1)
 
     def get_current_rate(self) -> float:
         """Returns linearly decreasing rate"""
         elapsed = self.elapsed_seconds()
         progress = min(elapsed / self.duration_seconds, 1.0)
 
-        current_rate = (
-            self.target_ops_per_second
-            - (self.target_ops_per_second - self.end_rate) * progress
-        )
+        current_rate = self.target_qps - (self.target_qps - self.end_rate) * progress
         return current_rate
 
 
@@ -196,13 +191,13 @@ class SineWaveLoadPattern(LoadPattern):
 
     def __init__(
         self,
-        target_ops_per_second: float,
+        target_qps: float,
         duration_seconds: int,
         amplitude_factor: float = 0.5,
         period_seconds: int = 60,
     ):
-        super().__init__(target_ops_per_second, duration_seconds)
-        self.amplitude = target_ops_per_second * amplitude_factor
+        super().__init__(target_qps, duration_seconds)
+        self.amplitude = target_qps * amplitude_factor
         self.period = period_seconds
 
     def get_current_rate(self) -> float:
@@ -212,7 +207,7 @@ class SineWaveLoadPattern(LoadPattern):
         angle = (2 * math.pi * elapsed) / self.period
 
         variation = self.amplitude * math.sin(angle)
-        current_rate = self.target_ops_per_second + variation
+        current_rate = self.target_qps + variation
 
         return max(0, current_rate)
 
@@ -228,13 +223,13 @@ class RealisticLoadPattern(LoadPattern):
 
     def __init__(
         self,
-        target_ops_per_second: float,
+        target_qps: float,
         duration_seconds: int,
         peak_start_hour: int = 9,
         peak_end_hour: int = 17,
         off_peak_multiplier: float = 0.2,
     ):
-        super().__init__(target_ops_per_second, duration_seconds)
+        super().__init__(target_qps, duration_seconds)
         self.peak_start = peak_start_hour
         self.peak_end = peak_end_hour
         self.off_peak_multiplier = off_peak_multiplier
@@ -244,9 +239,9 @@ class RealisticLoadPattern(LoadPattern):
         current_hour = datetime.now().hour
 
         if self.peak_start <= current_hour < self.peak_end:
-            return self.target_ops_per_second
+            return self.target_qps
         else:
-            return self.target_ops_per_second * self.off_peak_multiplier
+            return self.target_qps * self.off_peak_multiplier
 
 
 class StepLoadPattern(LoadPattern):
@@ -259,18 +254,16 @@ class StepLoadPattern(LoadPattern):
 
     def __init__(
         self,
-        target_ops_per_second: float,
+        target_qps: float,
         duration_seconds: int,
         num_steps: int = 5,
         step_duration_seconds: Optional[int] = None,
     ):
-        super().__init__(target_ops_per_second, duration_seconds)
+        super().__init__(target_qps, duration_seconds)
         self.num_steps = num_steps
         self.step_duration = step_duration_seconds or (duration_seconds // num_steps)
 
-        self.step_rates = [
-            target_ops_per_second * (i + 1) / num_steps for i in range(num_steps)
-        ]
+        self.step_rates = [target_qps * (i + 1) / num_steps for i in range(num_steps)]
 
     def get_current_rate(self) -> float:
         """Returns rate for current step"""
@@ -299,7 +292,7 @@ class CompositeLoadPattern(LoadPattern):
         if not patterns:
             raise ValueError("Composite pattern requires at least one pattern")
 
-        avg_rate = sum(p.target_ops_per_second for p, _ in patterns) / len(patterns)
+        avg_rate = sum(p.target_qps for p, _ in patterns) / len(patterns)
         super().__init__(avg_rate, total_duration)
 
         self.patterns = patterns
@@ -335,7 +328,7 @@ class CompositeLoadPattern(LoadPattern):
 
 def create_load_pattern(
     pattern_type: LoadPatternType,
-    target_ops_per_second: float,
+    target_qps: float,
     duration_seconds: int,
     **kwargs,
 ) -> LoadPattern:
@@ -344,7 +337,7 @@ def create_load_pattern(
 
     Args:
         pattern_type: Type of load pattern
-        target_ops_per_second: Target operations per second
+        target_qps: Target queries per second
         duration_seconds: Duration of the pattern
         **kwargs: Additional arguments for specific patterns
 
@@ -352,32 +345,32 @@ def create_load_pattern(
         LoadPattern instance
     """
     if pattern_type == LoadPatternType.STEADY:
-        return SteadyLoadPattern(target_ops_per_second, duration_seconds)
+        return SteadyLoadPattern(target_qps, duration_seconds)
 
     elif pattern_type == LoadPatternType.BURST:
-        return BurstLoadPattern(target_ops_per_second, duration_seconds, **kwargs)
+        return BurstLoadPattern(target_qps, duration_seconds, **kwargs)
 
     elif pattern_type == LoadPatternType.RAMP_UP:
-        return RampUpLoadPattern(target_ops_per_second, duration_seconds, **kwargs)
+        return RampUpLoadPattern(target_qps, duration_seconds, **kwargs)
 
     elif pattern_type == LoadPatternType.RAMP_DOWN:
-        return RampDownLoadPattern(target_ops_per_second, duration_seconds, **kwargs)
+        return RampDownLoadPattern(target_qps, duration_seconds, **kwargs)
 
     elif pattern_type == LoadPatternType.SINE_WAVE:
-        return SineWaveLoadPattern(target_ops_per_second, duration_seconds, **kwargs)
+        return SineWaveLoadPattern(target_qps, duration_seconds, **kwargs)
 
     elif pattern_type == LoadPatternType.REALISTIC:
-        return RealisticLoadPattern(target_ops_per_second, duration_seconds, **kwargs)
+        return RealisticLoadPattern(target_qps, duration_seconds, **kwargs)
 
     elif pattern_type == LoadPatternType.STEP:
-        return StepLoadPattern(target_ops_per_second, duration_seconds, **kwargs)
+        return StepLoadPattern(target_qps, duration_seconds, **kwargs)
 
     else:
         raise ValueError(f"Unknown load pattern type: {pattern_type}")
 
 
 def create_standard_test_pattern(
-    target_ops_per_second: float,
+    target_qps: float,
     test_duration_seconds: int,
     warmup_seconds: int = 30,
     cooldown_seconds: int = 30,
@@ -386,7 +379,7 @@ def create_standard_test_pattern(
     Create a standard test pattern: warmup -> steady -> cooldown.
 
     Args:
-        target_ops_per_second: Target rate during steady state
+        target_qps: Target rate during steady state
         test_duration_seconds: Duration of steady state
         warmup_seconds: Duration of warmup ramp-up
         cooldown_seconds: Duration of cooldown ramp-down
@@ -398,20 +391,20 @@ def create_standard_test_pattern(
 
     if warmup_seconds > 0:
         warmup = RampUpLoadPattern(
-            target_ops_per_second,
+            target_qps,
             warmup_seconds,
-            start_ops_per_second=target_ops_per_second * 0.1,
+            start_qps=target_qps * 0.1,
         )
         patterns.append((warmup, warmup_seconds))
 
-    steady = SteadyLoadPattern(target_ops_per_second, test_duration_seconds)
+    steady = SteadyLoadPattern(target_qps, test_duration_seconds)
     patterns.append((steady, test_duration_seconds))
 
     if cooldown_seconds > 0:
         cooldown = RampDownLoadPattern(
-            target_ops_per_second,
+            target_qps,
             cooldown_seconds,
-            end_ops_per_second=target_ops_per_second * 0.1,
+            end_qps=target_qps * 0.1,
         )
         patterns.append((cooldown, cooldown_seconds))
 

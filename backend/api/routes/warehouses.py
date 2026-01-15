@@ -33,7 +33,12 @@ async def list_warehouses(exclude_results: bool = Query(False)):
         warehouses: list[dict[str, Any]] = []
         results_wh = str(settings.SNOWFLAKE_WAREHOUSE).strip().upper()
         for row in results:
-            # SHOW WAREHOUSES returns many columns, scaling_policy is at index 30
+            # SHOW WAREHOUSES column indices (0-based):
+            # 0=name, 1=state, 2=type, 3=size, 4=min_cluster_count, 5=max_cluster_count
+            # 6=started_clusters, 7=running, 8=queued, 9=is_default, 10=is_current
+            # 11=is_interactive, 12=auto_suspend, 13=auto_resume
+            # 23=enable_query_acceleration, 24=query_acceleration_max_scale_factor
+            # 31=scaling_policy, 33=resource_constraint (Gen1/Gen2)
             wh = {
                 "name": row[0],
                 "state": row[1],
@@ -46,9 +51,18 @@ async def list_warehouses(exclude_results: bool = Query(False)):
                 "queued": row[8] if row[8] else 0,
                 "is_default": row[9] == "Y" if row[9] else False,
                 "is_current": row[10] == "Y" if row[10] else False,
-                "auto_suspend": row[11],
-                "auto_resume": row[12] == "true" if row[12] else False,
-                "scaling_policy": row[30] if len(row) > 30 and row[30] else "STANDARD",
+                "auto_suspend": row[12],
+                "auto_resume": row[13] == "true" if row[13] else False,
+                "scaling_policy": row[31] if len(row) > 31 and row[31] else "STANDARD",
+                # QAS (Query Acceleration Service)
+                "enable_query_acceleration": row[23] == "true"
+                if len(row) > 23 and row[23]
+                else False,
+                "query_acceleration_max_scale_factor": row[24]
+                if len(row) > 24 and row[24]
+                else 0,
+                # Warehouse generation: STANDARD_GEN_1, STANDARD_GEN_2, or NULL (Gen 1)
+                "resource_constraint": row[33] if len(row) > 33 else None,
             }
             wh_name = str(wh["name"]).strip().upper()
             if exclude_results and wh_name == results_wh:
@@ -88,6 +102,12 @@ async def get_warehouse_details(warehouse_name: str):
             )
 
         row = results[0]
+        # SHOW WAREHOUSES column indices (0-based):
+        # 0=name, 1=state, 2=type, 3=size, 4=min_cluster_count, 5=max_cluster_count
+        # 6=started_clusters, 7=running, 8=queued, 9=is_default, 10=is_current
+        # 11=is_interactive, 12=auto_suspend, 13=auto_resume
+        # 23=enable_query_acceleration, 24=query_acceleration_max_scale_factor
+        # 31=scaling_policy, 33=resource_constraint (Gen1/Gen2)
         return {
             "name": row[0],
             "state": row[1],
@@ -100,9 +120,18 @@ async def get_warehouse_details(warehouse_name: str):
             "queued": row[8] if row[8] else 0,
             "is_default": row[9] == "Y" if row[9] else False,
             "is_current": row[10] == "Y" if row[10] else False,
-            "auto_suspend": row[11],
-            "auto_resume": row[12] == "true" if row[12] else False,
-            "scaling_policy": row[30] if len(row) > 30 and row[30] else "STANDARD",
+            "auto_suspend": row[12],
+            "auto_resume": row[13] == "true" if row[13] else False,
+            "scaling_policy": row[31] if len(row) > 31 and row[31] else "STANDARD",
+            # QAS (Query Acceleration Service)
+            "enable_query_acceleration": row[23] == "true"
+            if len(row) > 23 and row[23]
+            else False,
+            "query_acceleration_max_scale_factor": row[24]
+            if len(row) > 24 and row[24]
+            else 0,
+            # Warehouse generation: STANDARD_GEN_1, STANDARD_GEN_2, or NULL (Gen 1)
+            "resource_constraint": row[33] if len(row) > 33 else None,
         }
 
     except HTTPException:

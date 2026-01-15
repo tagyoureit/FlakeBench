@@ -9,10 +9,15 @@ query generation across:
 This module intentionally avoids heavy scans. It uses:
 - DESCRIBE TABLE (column names/types)
 - MIN/MAX aggregates on chosen key columns (ID + optional time column)
+
+Note: Hybrid tables are detected and handled specially - SAMPLE queries are
+avoided because hybrid tables don't support efficient random sampling (no
+micro-partition optimization).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Sequence
@@ -20,6 +25,98 @@ from typing import Optional, Sequence
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+async def _is_hybrid_table(pool, full_table_name: str) -> bool:
+    """
+    Detect if a table is a hybrid table using SHOW TABLES.
+
+    Hybrid tables require special handling because:
+    - SAMPLE queries are inefficient (no micro-partition optimization)
+    - No query result caching
+    - Row-level storage optimized for OLTP, not analytical sampling
+
+    Returns True if the table is a hybrid table, False otherwise.
+    """
+    # Parse the fully qualified table name: "DB"."SCHEMA"."TABLE" or DB.SCHEMA.TABLE
+    # Handle both quoted and unquoted identifiers
+    parts = re.split(r'\.(?=(?:[^"]*"[^"]*")*[^"]*$)', full_table_name)
+    if len(parts) != 3:
+        logger.warning(
+            "Could not parse table name %s for hybrid detection, assuming standard table",
+            full_table_name,
+        )
+        return False
+
+    db_name = parts[0].strip('"')
+    schema_name = parts[1].strip('"')
+    table_name = parts[2].strip('"')
+
+    try:
+        # Escape single quotes for safety (SHOW TABLES uses string literals).
+        safe_name = str(table_name).replace("'", "''")
+        show_sql = (
+            f'SHOW TABLES LIKE \'{safe_name}\' IN SCHEMA "{db_name}"."{schema_name}"'
+        )
+
+        # Preferred path: if this is our SnowflakeConnectionPool, use cursor.description
+        # to reliably locate the `is_hybrid` column (Snowflake sometimes inserts columns,
+        # shifting tuple indices across versions).
+        if hasattr(pool, "get_connection") and hasattr(pool, "_run_in_executor"):
+            async with pool.get_connection() as conn:
+                cursor = await pool._run_in_executor(conn.cursor)
+                try:
+                    await pool._run_in_executor(cursor.execute, show_sql)
+                    desc = list(getattr(cursor, "description", None) or [])
+                    rows = await pool._run_in_executor(cursor.fetchall)
+                finally:
+                    await pool._run_in_executor(cursor.close)
+
+            if desc:
+                col_names = [str(d[0] or "").strip().lower() for d in desc]
+                try:
+                    idx = col_names.index("is_hybrid")
+                except ValueError:
+                    idx = None
+
+                if idx is not None:
+                    for row in rows:
+                        if (
+                            row
+                            and len(row) > idx
+                            and str(row[idx]).strip().upper() == "Y"
+                        ):
+                            logger.debug(
+                                "Table %s detected as hybrid table", full_table_name
+                            )
+                            return True
+                    return False
+
+            # Fall through to tuple-based heuristics using the fetched rows.
+            rows_fallback = rows
+        else:
+            rows_fallback = await pool.execute_query(show_sql)
+
+        if not rows_fallback:
+            return False
+
+        # Heuristic fallback: in current SHOW TABLES output, the last 4 Y/N flags are
+        # typically: is_hybrid, is_iceberg, is_dynamic, is_immutable.
+        for row in rows_fallback:
+            if not row or len(row) < 4:
+                continue
+            tail4 = [str(v or "").strip().upper() for v in row[-4:]]
+            if all(v in {"Y", "N"} for v in tail4):
+                return tail4[0] == "Y"
+
+        return False
+    except Exception as e:
+        logger.warning(
+            "Failed to detect hybrid table status for %s: %s, assuming standard table",
+            full_table_name,
+            e,
+        )
+        return False
 
 
 @dataclass(frozen=True)
@@ -212,11 +309,20 @@ async def _best_key_candidate_from_sample(
     return None
 
 
-async def profile_snowflake_table(pool, full_table_name: str) -> TableProfile:
+async def profile_snowflake_table(
+    pool,
+    full_table_name: str,
+    *,
+    include_bounds: bool = True,
+) -> TableProfile:
     """
     Profile a Snowflake table using minimal metadata queries.
 
     pool must provide: `await pool.execute_query(query, params=None)`
+
+    Note: For hybrid tables, we skip SAMPLE-based key candidate detection
+    because SAMPLE is inefficient on hybrid tables (no micro-partition
+    optimization, different storage architecture).
     """
     desc_rows = await pool.execute_query(f"DESCRIBE TABLE {full_table_name}")
     # Rows look like: (name, type, kind, null?, default?, ..., comment)
@@ -228,12 +334,29 @@ async def profile_snowflake_table(pool, full_table_name: str) -> TableProfile:
         col_type = str(row[1]).upper() if len(row) > 1 else ""
         columns[col_name] = col_type
 
+    # Detect hybrid table to skip expensive SAMPLE queries
+    is_hybrid = await _is_hybrid_table(pool, full_table_name)
+    if is_hybrid:
+        logger.info(
+            "Table %s is a hybrid table - skipping SAMPLE-based key detection",
+            full_table_name,
+        )
+
     candidates = _id_candidates(columns)
     id_col: Optional[str]
     if not candidates:
         id_col = None
     elif len(candidates) == 1:
         id_col = candidates[0]
+    elif is_hybrid:
+        # For hybrid tables, use heuristic selection (first candidate) to avoid
+        # expensive SAMPLE queries that can timeout on large hybrid tables.
+        id_col = candidates[0]
+        logger.debug(
+            "Using heuristic key selection for hybrid table %s: %s",
+            full_table_name,
+            id_col,
+        )
     else:
         # Break ties via SAMPLE-based distinctness (cheap) before falling back to first candidate.
         id_col = await _best_key_candidate_from_sample(
@@ -245,23 +368,25 @@ async def profile_snowflake_table(pool, full_table_name: str) -> TableProfile:
 
     id_min: Optional[int] = None
     id_max: Optional[int] = None
-    if id_col:
-        rows = await pool.execute_query(
-            f'SELECT MIN("{id_col}") AS MIN_ID, MAX("{id_col}") AS MAX_ID FROM {full_table_name}'
-        )
-        if rows and len(rows[0]) >= 2:
-            id_min = int(rows[0][0]) if rows[0][0] is not None else None
-            id_max = int(rows[0][1]) if rows[0][1] is not None else None
-
     time_min: Optional[datetime] = None
     time_max: Optional[datetime] = None
-    if time_col:
-        rows = await pool.execute_query(
-            f'SELECT MIN("{time_col}") AS MIN_T, MAX("{time_col}") AS MAX_T FROM {full_table_name}'
-        )
-        if rows and len(rows[0]) >= 2:
-            time_min = rows[0][0]
-            time_max = rows[0][1]
+
+    if include_bounds:
+        if id_col:
+            rows = await pool.execute_query(
+                f'SELECT MIN("{id_col}") AS MIN_ID, MAX("{id_col}") AS MAX_ID FROM {full_table_name}'
+            )
+            if rows and len(rows[0]) >= 2:
+                id_min = int(rows[0][0]) if rows[0][0] is not None else None
+                id_max = int(rows[0][1]) if rows[0][1] is not None else None
+
+        if time_col:
+            rows = await pool.execute_query(
+                f'SELECT MIN("{time_col}") AS MIN_T, MAX("{time_col}") AS MAX_T FROM {full_table_name}'
+            )
+            if rows and len(rows[0]) >= 2:
+                time_min = rows[0][0]
+                time_max = rows[0][1]
 
     profile = TableProfile(
         full_table_name=full_table_name,
@@ -274,7 +399,178 @@ async def profile_snowflake_table(pool, full_table_name: str) -> TableProfile:
     )
 
     logger.info(
-        "Profiled table %s: id=%s[%s..%s], time=%s[%s..%s]",
+        "Profiled Snowflake table %s: id=%s[%s..%s], time=%s[%s..%s]",
+        full_table_name,
+        profile.id_column,
+        profile.id_min,
+        profile.id_max,
+        profile.time_column,
+        profile.time_min,
+        profile.time_max,
+    )
+    return profile
+
+
+def _pick_id_column_case_insensitive(columns: dict[str, str]) -> Optional[str]:
+    """
+    Pick a likely key column (used for point lookups / updates) - case insensitive.
+
+    For PostgreSQL which stores unquoted identifiers in lowercase.
+    """
+
+    def _is_numeric_type(typ: str) -> bool:
+        t = str(typ or "").upper()
+        return any(x in t for x in ("NUMBER", "INT", "BIGINT", "DECIMAL", "SERIAL"))
+
+    upper_to_orig = {k.upper(): k for k in columns}
+
+    if "ID" in upper_to_orig:
+        return upper_to_orig["ID"]
+
+    id_like: list[str] = []
+    key_like: list[str] = []
+    contains_id: list[str] = []
+    contains_key: list[str] = []
+
+    for name, typ in columns.items():
+        if not _is_numeric_type(typ):
+            continue
+        n = str(name or "").upper()
+        if n == "ID":
+            continue
+        if n.endswith("_ID") or n.endswith("ID"):
+            id_like.append(name)
+            continue
+        if n.endswith("_KEY") or n.endswith("KEY"):
+            key_like.append(name)
+            continue
+        if "ID" in n:
+            contains_id.append(name)
+            continue
+        if "KEY" in n:
+            contains_key.append(name)
+            continue
+
+    for bucket in (id_like, key_like, contains_id, contains_key):
+        if bucket:
+            return bucket[0]
+
+    return None
+
+
+def _pick_time_column_case_insensitive(columns: dict[str, str]) -> Optional[str]:
+    """
+    Pick a time column - case insensitive.
+
+    For PostgreSQL which stores unquoted identifiers in lowercase.
+    """
+    upper_to_orig = {k.upper(): k for k in columns}
+
+    preferred = [
+        "TIMESTAMP",
+        "CREATED_AT",
+        "UPDATED_AT",
+        "EVENT_TIME",
+        "CREATED",
+        "UPDATED",
+        "DATE",
+    ]
+    for name in preferred:
+        if name in upper_to_orig:
+            orig_name = upper_to_orig[name]
+            typ = columns.get(orig_name, "")
+            if any(t in typ.upper() for t in ("TIMESTAMP", "DATE", "TIME")):
+                return orig_name
+
+    for name, typ in columns.items():
+        if any(t in typ.upper() for t in ("TIMESTAMP", "DATE", "TIME")):
+            return name
+
+    return None
+
+
+async def profile_postgres_table(
+    pool,
+    full_table_name: str,
+    *,
+    include_bounds: bool = True,
+) -> TableProfile:
+    """
+    Profile a PostgreSQL table using minimal metadata queries.
+
+    Unlike profile_snowflake_table, this preserves original column case
+    and uses unquoted identifiers in queries (PostgreSQL folds to lowercase).
+
+    pool must provide: `await pool.fetch_all(query, *params)`
+    """
+    parts = full_table_name.split(".")
+    if len(parts) == 2:
+        schema_name, table_name = parts
+    else:
+        schema_name = "public"
+        table_name = full_table_name
+
+    rows = await pool.fetch_all(
+        """
+        SELECT column_name, data_type, udt_name
+        FROM information_schema.columns
+        WHERE table_schema = $1
+          AND table_name = $2
+        ORDER BY ordinal_position
+        """,
+        schema_name,
+        table_name,
+    )
+
+    columns: dict[str, str] = {}
+    for row in rows:
+        if not row:
+            continue
+        col_name = str(row["column_name"] if hasattr(row, "__getitem__") else row[0])
+        data_type = str(row["data_type"] if hasattr(row, "__getitem__") else row[1])
+        columns[col_name] = data_type.upper()
+
+    id_col = _pick_id_column_case_insensitive(columns)
+    time_col = _pick_time_column_case_insensitive(columns)
+
+    id_min: Optional[int] = None
+    id_max: Optional[int] = None
+    time_min: Optional[datetime] = None
+    time_max: Optional[datetime] = None
+
+    if include_bounds:
+        if id_col:
+            bound_rows = await pool.fetch_all(
+                f"SELECT MIN({id_col}) AS min_id, MAX({id_col}) AS max_id FROM {full_table_name}"
+            )
+            if bound_rows and len(bound_rows) > 0:
+                row = bound_rows[0]
+                min_val = row["min_id"] if hasattr(row, "__getitem__") else row[0]
+                max_val = row["max_id"] if hasattr(row, "__getitem__") else row[1]
+                id_min = int(min_val) if min_val is not None else None
+                id_max = int(max_val) if max_val is not None else None
+
+        if time_col:
+            bound_rows = await pool.fetch_all(
+                f"SELECT MIN({time_col}) AS min_t, MAX({time_col}) AS max_t FROM {full_table_name}"
+            )
+            if bound_rows and len(bound_rows) > 0:
+                row = bound_rows[0]
+                time_min = row["min_t"] if hasattr(row, "__getitem__") else row[0]
+                time_max = row["max_t"] if hasattr(row, "__getitem__") else row[1]
+
+    profile = TableProfile(
+        full_table_name=full_table_name,
+        id_column=id_col,
+        id_min=id_min,
+        id_max=id_max,
+        time_column=time_col,
+        time_min=time_min,
+        time_max=time_max,
+    )
+
+    logger.info(
+        "Profiled PostgreSQL table %s: id=%s[%s..%s], time=%s[%s..%s]",
         full_table_name,
         profile.id_column,
         profile.id_min,

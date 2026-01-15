@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true">
+  <g fill="none" stroke="#64748b" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- "Standard" = plain table: simple rounded rectangle -->
+    <rect x="10" y="14" width="44" height="36" rx="6" />
+    <path d="M10 24h44" />
+  </g>
+</svg>

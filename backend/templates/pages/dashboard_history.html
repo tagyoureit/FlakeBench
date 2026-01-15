@@ -24,20 +24,51 @@
                     <span x-text="templateInfo ? (templateInfo.table_full_name || '') : ''"></span>
                     (<span x-text="templateInfo ? (templateInfo.table_type || '') : ''"></span>)
                 </div>
-                <div class="mt-1">
+                <div class="mt-1" x-show="!isPostgresTable()">
                     <strong>Warehouse:</strong>
-                    <span x-text="templateInfo ? (templateInfo.warehouse || 'default') : 'default'"></span>
-                    <span x-show="templateInfo && templateInfo.warehouse_size">(<span x-text="templateInfo ? (templateInfo.warehouse_size || '') : ''"></span>)</span>
+                    <span x-text="warehouseDisplay()"></span>
+                </div>
+                <div class="mt-1" x-show="isPostgresTable()">
+                    <strong>Database:</strong>
+                    <span>Postgres</span>
+                </div>
+                <div class="mt-1" x-show="isPostgresTable() && postgresPoolDisplay()">
+                    <strong>Postgres:</strong>
+                    <span x-text="postgresPoolDisplay()"></span>
+                </div>
+                <div class="mt-1" x-show="isPostgresTable() && postgresConnectionsDisplay()">
+                    <strong>Postgres:</strong>
+                    <span x-text="postgresConnectionsDisplay()"></span>
                 </div>
                 <div class="mt-1">
                     <strong>Workload:</strong>
-                    <span x-text="templateInfo ? (templateInfo.workload_type || '') : ''"></span>
-                    • <strong>Concurrency:</strong> <span x-text="templateInfo ? (templateInfo.concurrent_connections ?? '') : ''"></span>
-                    • <strong>Duration:</strong> <span x-text="templateInfo ? (templateInfo.duration_seconds ?? '') : ''"></span>s
+                    <span x-text="workloadDisplay()"></span>
+                </div>
+                <div class="mt-1">
+                    <span x-show="String(templateInfo?.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
+                        <strong>Workers:</strong>
+                        <span x-text="templateInfo ? (templateInfo.concurrent_connections ?? '') : ''"></span>
+                    </span>
+                    <span x-show="String(templateInfo?.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
+                        <strong>Target:</strong>
+                        <span x-text="templateInfo ? (templateInfo.qps_target_mode === 'SF_RUNNING' ? 'Snowflake Running' : 'QPS') : ''"></span>
+                        = <span x-text="templateInfo ? (templateInfo.target_qps ?? '') : ''"></span>
+                        • <strong>Workers:</strong>
+                        <span x-text="templateInfo ? ((templateInfo.min_concurrency ?? '') + '-' + (templateInfo.concurrent_connections ?? '')) : ''"></span>
+                    </span>
+                    • <strong>Duration:</strong>
+                    <span x-text="templateInfo && templateInfo.duration_seconds != null ? formatSecondsTenths(templateInfo.duration_seconds) : ''"></span>s
                 </div>
                 <div class="mt-1">
                     <strong>Status:</strong>
-                    <span x-text="templateInfo ? (templateInfo.status || '') : ''"></span>
+                    <span x-text="phaseLabel() || (templateInfo ? (templateInfo.status || '') : '')"></span>
+                </div>
+                <div class="mt-1" x-show="templateInfo && templateInfo.query_tag">
+                    <strong>Query Tag:</strong>
+                    <code
+                        style="font-size: 0.75rem; background: #f3f4f6; padding: 0.125rem 0.375rem; border-radius: 0.25rem; word-break: break-all;"
+                        x-text="templateInfo ? (templateInfo.query_tag || '') : ''"
+                    ></code>
                 </div>
             </div>
         </div>
@@ -48,9 +79,197 @@
                 Read-only analysis dashboard. For realtime execution and controls, use the live dashboard.
             </div>
             <div style="margin-top: 0.75rem;">
-                <a class="btn btn-primary" :href="testId ? `/dashboard/${testId}` : '/dashboard'">
+                <a 
+                    class="btn btn-primary" 
+                    :href="testId ? `/dashboard/${testId}` : '/dashboard'"
+                    :class="{ 'btn-disabled': !templateInfo || templateInfo.status !== 'RUNNING' }"
+                    :style="(!templateInfo || templateInfo.status !== 'RUNNING') ? 'pointer-events: none; opacity: 0.5;' : ''"
+                >
                     Open Live Dashboard
                 </a>
+            </div>
+        </div>
+    </div>
+
+    <div class="ai-analysis-card" x-show="!aiAnalysisModal" x-cloak>
+        <div class="ai-analysis-card-content">
+            <div class="ai-analysis-card-icon">✦</div>
+            <div class="ai-analysis-card-text">
+                <div class="ai-analysis-card-title">AI Analysis</div>
+                <div class="ai-analysis-card-desc">Get AI-powered insights and recommendations for this benchmark</div>
+            </div>
+            <button
+                type="button"
+                class="btn btn-primary ai-analysis-card-btn"
+                @click="openAiAnalysis()"
+                :disabled="!testId || (templateInfo && templateInfo.status !== 'COMPLETED') || aiAnalysisLoading"
+            >
+                <span x-show="aiAnalysisLoading" class="ai-btn-spinner"></span>
+                <span x-text="aiAnalysisLoading ? 'Analyzing...' : 'Analyze'"></span>
+            </button>
+        </div>
+    </div>
+
+    <div
+        x-show="aiAnalysisModal"
+        x-cloak
+        class="ai-analysis-panel"
+        @keydown.escape.window="closeAiAnalysis()"
+    >
+        <div class="ai-analysis-header">
+            <h2>AI Analysis</h2>
+            <button
+                type="button"
+                class="ai-analysis-close"
+                @click="closeAiAnalysis()"
+            >
+                &times;
+            </button>
+        </div>
+
+        <div class="ai-analysis-body">
+            <div x-show="aiAnalysisLoading" class="ai-analysis-loading">
+                <div class="ai-analysis-spinner"></div>
+                <div class="ai-analysis-loading-text">Generating AI analysis...</div>
+            </div>
+
+            <div x-show="aiAnalysisError" class="alert alert-error" style="margin-bottom: 1rem;">
+                <span x-text="aiAnalysisError"></span>
+            </div>
+
+            <div x-show="!aiAnalysisLoading && aiAnalysis">
+                <div
+                    class="analysis-content"
+                    x-html="formatMarkdown(aiAnalysis?.analysis)"
+                ></div>
+
+                <div class="ai-analysis-chat-section">
+                    <h3 class="ai-analysis-chat-title">Chat with AI</h3>
+                    
+                    <div
+                        x-ref="chatContainer"
+                        class="ai-analysis-chat-container"
+                    >
+                        <template x-for="(msg, idx) in chatHistory" :key="idx">
+                            <div :style="msg.role === 'user' ? 'text-align: right; margin-bottom: 0.75rem;' : 'text-align: left; margin-bottom: 0.75rem;'">
+                                <div
+                                    :style="msg.role === 'user' 
+                                        ? 'display: inline-block; background: #3b82f6; color: white; padding: 0.5rem 0.75rem; border-radius: 0.5rem; max-width: 80%; text-align: left;'
+                                        : 'display: inline-block; background: #e5e7eb; color: #1f2937; padding: 0.5rem 0.75rem; border-radius: 0.5rem; max-width: 80%; text-align: left;'"
+                                    x-html="msg.role === 'user' ? msg.content : formatMarkdown(msg.content)"
+                                ></div>
+                            </div>
+                        </template>
+                        <div x-show="chatLoading" style="text-align: left; margin-bottom: 0.75rem;">
+                            <div style="display: inline-block; background: #e5e7eb; color: #6b7280; padding: 0.5rem 0.75rem; border-radius: 0.5rem;">
+                                Thinking...
+                            </div>
+                        </div>
+                    </div>
+
+                    <form @submit.prevent="sendChatMessage()" class="ai-analysis-chat-form">
+                        <input
+                            type="text"
+                            x-model="chatMessage"
+                            placeholder="Ask a follow-up question..."
+                            class="ai-analysis-chat-input"
+                            :disabled="chatLoading"
+                        />
+                        <button
+                            type="submit"
+                            class="btn btn-primary"
+                            :disabled="!chatMessage.trim() || chatLoading"
+                        >
+                            Send
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" x-show="hasStepHistory()">
+        <div class="card-title">Find Max Concurrency - Step History</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Step-by-step progression showing how concurrency was scaled until degradation was detected.
+        </div>
+
+        <div style="margin-top: 1rem;">
+            <div class="metrics-grid" style="margin-bottom: 1rem;">
+                <div class="metric-card">
+                    <div class="metric-label">Best Concurrency</div>
+                    <div class="metric-value" x-text="formatInt(stepHistorySummary()?.best_concurrency)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Best QPS</div>
+                    <div class="metric-value" x-text="formatMs(stepHistorySummary()?.best_qps)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Baseline P95</div>
+                    <div class="metric-value" x-text="formatMs(stepHistorySummary()?.baseline_p95_ms) + ' ms'"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Total Steps</div>
+                    <div class="metric-value" x-text="formatInt(stepHistorySummary()?.total_steps)"></div>
+                </div>
+            </div>
+
+            <div x-show="stepHistorySummary()?.final_reason" style="margin-bottom: 1rem; padding: 0.75rem; background: #fef3c7; border-radius: 0.375rem; border-left: 4px solid #f59e0b;">
+                <strong>Conclusion:</strong> <span x-text="stepHistorySummary()?.final_reason"></span>
+            </div>
+
+            <div 
+                style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; user-select: none;"
+                @click="toggleStepHistory()"
+            >
+                <span 
+                    style="display: inline-block; width: 1rem; text-align: center; transition: transform 0.15s;"
+                    :style="stepHistoryExpanded ? 'transform: rotate(90deg);' : ''"
+                >▶</span>
+                <span style="font-weight: 600;">Step-by-step details</span>
+                <span style="color: #6b7280; font-size: 0.875rem;" x-text="stepHistoryExpanded ? '(click to collapse)' : '(click to expand)'"></span>
+            </div>
+
+            <div x-show="stepHistoryExpanded" class="table" style="margin-top: 0.5rem;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="text-right">Step</th>
+                            <th class="text-right">Workers</th>
+                            <th class="text-right">QPS</th>
+                            <th class="text-right">P95 (ms)</th>
+                            <th class="text-right">P99 (ms)</th>
+                            <th class="text-right">P99% (Δ)</th>
+                            <th class="text-right">Error %</th>
+                            <th x-show="hasSloTargets()">SLO</th>
+                            <th>Stable</th>
+                            <th>Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="step in stepHistory()" :key="step.step">
+                            <tr :style="step.stable === false && !step.is_backoff ? 'background: #fef2f2;' : (step.is_backoff ? 'background: #fffbeb;' : '')">
+                                <td class="text-right" x-text="step.step"></td>
+                                <td class="text-right" x-text="formatInt(step.concurrency)"></td>
+                                <td class="text-right" x-text="formatMs(step.qps)"></td>
+                                <td class="text-right" x-text="formatMs(step.p95_latency_ms)"></td>
+                                <td class="text-right" x-text="formatMs(step.p99_latency_ms)"></td>
+                                <td class="text-right" x-text="formatSignedPct(stepP99DiffPct(step))"></td>
+                                <td class="text-right" x-text="formatMs(step.error_rate_pct) + '%'"></td>
+                                <td x-show="hasSloTargets()">
+                                    <span class="status-badge" :class="stepSloBadgeClass(step)" x-text="stepSloStatus(step)"></span>
+                                </td>
+                                <td>
+                                    <span 
+                                        :style="step.stable ? 'color: #059669;' : 'color: #dc2626;'"
+                                        x-text="step.is_backoff ? 'Backoff' : (step.stable ? 'Yes' : 'No')"
+                                    ></span>
+                                </td>
+                                <td style="color: #6b7280; font-size: 0.875rem;" x-text="step.stop_reason || '-'"></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
@@ -63,6 +282,76 @@
             <canvas id="throughputChart"></canvas>
         </div>
     </div>
+
+    <div class="card">
+        <div class="card-title">Worker Concurrency (captured)</div>
+        <div class="chart-container">
+            <canvas id="concurrencyChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card" x-show="!['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())">
+        <div style="display:flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+            <div class="card-title" style="margin-bottom: 0;">Snowflake Running Queries (Server)</div>
+            <div style="display:flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <div style="font-weight: 600;">Breakdown:</div>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="sfRunningBreakdown === 'read_write' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setSfRunningBreakdown('read_write')"
+                >
+                    Read / Write
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="sfRunningBreakdown === 'by_kind' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setSfRunningBreakdown('by_kind')"
+                >
+                    Point / Range / Insert / Update
+                </button>
+            </div>
+        </div>
+        <div style="color: #6b7280; margin-top: 0.5rem;">
+            Captured during the run from <code>INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE</code> (per-test <code>QUERY_TAG</code>) and stored in per-second snapshots.
+            "Total" is the sum of benchmark statements (best-effort). If kind tagging is unavailable for a run, the chart falls back to Snowflake's per-test Running total.
+        </div>
+        <div class="chart-container" style="margin-top: 0.75rem;">
+            <canvas id="sfRunningChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
+        <div style="display:flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap;">
+            <div class="card-title" style="margin-bottom: 0;">Operations Per Second (app)</div>
+            <div style="display:flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <div style="font-weight: 600;">Breakdown:</div>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="opsSecBreakdown === 'read_write' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setOpsSecBreakdown('read_write')"
+                >
+                    Read / Write
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="opsSecBreakdown === 'by_kind' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setOpsSecBreakdown('by_kind')"
+                >
+                    Point / Range / Insert / Update
+                </button>
+            </div>
+        </div>
+        <div style="color: #6b7280; margin-top: 0.5rem;">
+            App-side operations per second breakdown, captured from internal counters during execution.
+        </div>
+        <div class="chart-container" style="margin-top: 0.75rem;">
+            <canvas id="opsSecChart"></canvas>
+        </div>
+    </div>
     
     <div class="card">
         <div class="card-title">Latency Distribution (end-to-end)</div>
@@ -71,6 +360,239 @@
         </div>
         <div style="margin-top: 0.5rem; color: #6b7280;">
             Note: charts are based on end-to-end app timings collected during execution.
+        </div>
+    </div>
+
+    <div
+        class="card"
+        x-show="templateInfo && isFinalMetricsReady() && !['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())"
+    >
+        <div class="card-title">Warehouse Queueing + MCW (post-processed)</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Derived from <code>INFORMATION_SCHEMA.QUERY_HISTORY</code> after the run completes.
+        </div>
+
+        <div x-show="templateInfo && templateInfo.warehouse_metrics_available" style="margin-top: 1rem;">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Clusters Used</span>
+                        <span
+                            class="info-icon"
+                            title="Clusters used: number of active clusters observed for the warehouse during the run (post-processed from QUERY_HISTORY)."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatInt(templateInfo?.warehouse_metrics?.clusters_used)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Queued (Overload)</span>
+                        <span
+                            class="info-icon"
+                            title="Queued time (overload): total time queries spent queued due to warehouse overload (post-processed from QUERY_HISTORY)."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatMsWithUnit(templateInfo?.warehouse_metrics?.total_queued_overload_ms)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Queued (Provisioning)</span>
+                        <span
+                            class="info-icon"
+                            title="Queued time (provisioning): total time queries spent queued while the warehouse was provisioning/resuming (post-processed from QUERY_HISTORY)."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatMsWithUnit(templateInfo?.warehouse_metrics?.total_queued_provisioning_ms)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Queries w/ Overload Queue</span>
+                        <span
+                            class="info-icon"
+                            title="Count of queries that experienced overload queueing during the run (post-processed from QUERY_HISTORY)."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatInt(templateInfo?.warehouse_metrics?.queries_with_overload_queue)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Read Cache Hit</span>
+                        <span
+                            class="info-icon"
+                            title="Read cache hit: percent of reads served from the warehouse local cache during this run (post-processed)."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatPct(templateInfo?.warehouse_metrics?.read_cache_hit_pct)"></div>
+                </div>
+            </div>
+        </div>
+
+        <div
+            x-show="templateInfo && !templateInfo.warehouse_metrics_available"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            Warehouse/cluster metrics are unavailable for this run (usually because query-history collection was disabled).
+        </div>
+
+        <div x-show="templateInfo && templateInfo.cluster_breakdown_available" style="margin-top: 1rem;">
+            <div 
+                style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; user-select: none;"
+                @click="toggleClusterBreakdown()"
+            >
+                <span 
+                    style="display: inline-block; width: 1rem; text-align: center; transition: transform 0.15s;"
+                    :style="clusterBreakdownExpanded ? 'transform: rotate(90deg);' : ''"
+                >▶</span>
+                <span style="font-weight: 600;">Per-cluster breakdown</span>
+                <span style="color: #6b7280; font-size: 0.875rem;" x-text="clusterBreakdownExpanded ? '(click to collapse)' : '(click to expand)'"></span>
+            </div>
+            <div class="table" style="margin-top: 0.5rem;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="text-right">Cluster</th>
+                            <th class="text-right">Query Count</th>
+                            <th class="text-right">P50 Exec (ms)</th>
+                            <th class="text-right">P95 Exec (ms)</th>
+                            <th class="text-right">Avg Queue Overload (ms)</th>
+                            <th class="text-right">Avg Queue Provisioning (ms)</th>
+                            <th>Mix (counts)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr x-show="clusterBreakdownSummary()" style="background: #f8fafc; font-weight: 500;">
+                            <td class="text-right" x-text="clusterBreakdownSummary()?.cluster_count + ' clusters'"></td>
+                            <td class="text-right" x-text="formatInt(clusterBreakdownSummary()?.total_queries)"></td>
+                            <td class="text-right" x-text="formatMs(clusterBreakdownSummary()?.avg_p50_exec_ms)"></td>
+                            <td class="text-right" x-text="formatMs(clusterBreakdownSummary()?.avg_p95_exec_ms)"></td>
+                            <td class="text-right" x-text="formatMs(clusterBreakdownSummary()?.avg_queued_overload_ms)"></td>
+                            <td class="text-right" x-text="formatMs(clusterBreakdownSummary()?.avg_queued_provisioning_ms)"></td>
+                            <td style="color: #6b7280;">
+                                <span x-text="`PL ${formatInt(clusterBreakdownSummary()?.total_point_lookups)} • RS ${formatInt(clusterBreakdownSummary()?.total_range_scans)} • INS ${formatInt(clusterBreakdownSummary()?.total_inserts)} • UPD ${formatInt(clusterBreakdownSummary()?.total_updates)}`"></span>
+                            </td>
+                        </tr>
+                        <template x-for="c in (templateInfo?.cluster_breakdown || [])" :key="c.cluster_number">
+                            <tr x-show="clusterBreakdownExpanded">
+                                <td class="text-right" x-text="c.cluster_number"></td>
+                                <td class="text-right" x-text="formatInt(c.query_count)"></td>
+                                <td class="text-right" x-text="formatMs(c.p50_exec_ms)"></td>
+                                <td class="text-right" x-text="formatMs(c.p95_exec_ms)"></td>
+                                <td class="text-right" x-text="formatMs(c.avg_queued_overload_ms)"></td>
+                                <td class="text-right" x-text="formatMs(c.avg_queued_provisioning_ms)"></td>
+                                <td style="color: #6b7280;">
+                                    <span x-text="`PL ${formatInt(c.point_lookups)} • RS ${formatInt(c.range_scans)} • INS ${formatInt(c.inserts)} • UPD ${formatInt(c.updates)}`"></span>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" x-show="templateInfo && isFinalMetricsReady() && !['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())">
+        <div class="card-title">MCW Nodes + Queue (per-second)</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Aligned to per-second metrics snapshots. "Active clusters" comes from <code>V_WAREHOUSE_TIMESERIES.ACTIVE_CLUSTERS</code>.
+        </div>
+
+        <div
+            x-show="warehouseTsAvailable"
+            style="margin-top: 0.75rem; display:flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;"
+        >
+            <div style="font-weight: 600;">Queue view:</div>
+            <button
+                type="button"
+                class="btn btn-sm"
+                :class="warehouseQueueMode === 'avg' ? 'btn-primary' : 'btn-secondary'"
+                @click="setWarehouseQueueMode('avg')"
+            >
+                Avg queued ms (per query / second)
+            </button>
+            <button
+                type="button"
+                class="btn btn-sm"
+                :class="warehouseQueueMode === 'total' ? 'btn-primary' : 'btn-secondary'"
+                @click="setWarehouseQueueMode('total')"
+            >
+                Total queued ms (sum / second)
+            </button>
+        </div>
+
+        <div x-show="warehouseTsError" class="alert alert-error" style="margin-top: 1rem;">
+            <strong>Failed to load warehouse time series.</strong>
+            <span x-text="warehouseTsError"></span>
+        </div>
+
+        <div x-show="!warehouseTsError && warehouseTsLoading" style="margin-top: 1rem;">
+            {% include "components/loading_spinner.html" %}
+        </div>
+
+        <div
+            x-show="warehouseTsLoaded && !warehouseTsError && !warehouseTsLoading && !warehouseTsAvailable"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            No per-second warehouse data available for this run (requires query-history collection + post-processing).
+        </div>
+
+        <div
+            x-show="warehouseTsAvailable"
+            class="chart-container"
+            style="margin-top: 1rem;"
+        >
+            <canvas id="warehouseQueueChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card" x-show="mode === 'history'">
+        <div class="card-title">Error Summary</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Aggregated from <code>INFORMATION_SCHEMA.QUERY_HISTORY</code> (Snowflake, filtered by <code>QUERY_TAG</code>)
+            plus app-captured local failures (connector/runtime, <code>LOCAL_*</code>).
+        </div>
+
+        <div x-show="errorSummaryError" class="alert alert-error" style="margin-top: 1rem;">
+            <strong>Failed to load error summary.</strong>
+            <span x-text="errorSummaryError"></span>
+        </div>
+
+        <div x-show="!errorSummaryError && errorSummaryLoading" style="margin-top: 1rem;">
+            {% include "components/loading_spinner.html" %}
+        </div>
+
+        <div
+            x-show="errorSummaryLoaded && !errorSummaryError && !errorSummaryLoading && (!errorSummaryRows || errorSummaryRows.length === 0)"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            No errors found for this test.
+        </div>
+
+        <div x-show="errorSummaryLoaded && !errorSummaryError && !errorSummaryLoading && errorSummaryRows && errorSummaryRows.length" style="margin-top: 1rem;">
+            <div class="table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Source</th>
+                            <th>Error Summary</th>
+                            <th>Error Message</th>
+                            <th class="text-right">Count</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="row in errorSummaryRows" :key="(row.source || '') + '|' + (row.summary || '') + '|' + (row.message || '')">
+                            <tr>
+                                <td x-text="row.source"></td>
+                                <td style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;" x-text="row.summary"></td>
+                                <td style="color: #374151;" x-text="row.message"></td>
+                                <td class="text-right" x-text="formatInt(row.count)"></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 </div>

@@ -122,24 +122,8 @@ class TemplateLoader:
             schema_name=table_data.get("schema", "PUBLIC"),
             columns=table_data.get("columns", {}),
         )
-
-        if table_type == TableType.STANDARD or table_type == TableType.INTERACTIVE:
-            config.clustering_keys = table_data.get("clustering_keys")
-            config.data_retention_days = table_data.get("data_retention_days", 1)
-
-        if table_type == TableType.HYBRID:
-            config.primary_key = table_data.get("primary_key")
-
-            indexes = []
-            for idx in table_data.get("indexes", []):
-                indexes.append(
-                    {
-                        "name": idx.get("name"),
-                        "columns": idx.get("columns", []),
-                        "include": idx.get("include_columns", []),
-                    }
-                )
-            config.indexes = indexes if indexes else None
+        # NOTE: Table creation is disabled; schema/index/clustering settings in templates are ignored.
+        # The runtime will introspect the existing table schema instead.
 
         return config
 
@@ -227,7 +211,7 @@ class TemplateLoader:
 
         targets = test_data.get("targets", {})
         if targets:
-            scenario.target_ops_per_second = targets.get("min_ops_per_second", 100)
+            scenario.target_qps = targets.get("min_qps", 100)
 
         return scenario
 

@@ -11,6 +11,8 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import pytest
+
 from backend.models import TableType, TableConfig
 from backend.core.table_managers import (
     create_table_manager,
@@ -32,7 +34,6 @@ def test_factory():
             name="test_standard",
             table_type=TableType.STANDARD,
             columns={"id": "NUMBER", "value": "VARCHAR"},
-            clustering_keys=["id"],
         )
         manager = create_table_manager(standard_config)
         assert isinstance(manager, StandardTableManager)
@@ -42,7 +43,6 @@ def test_factory():
         hybrid_config = TableConfig(
             name="test_hybrid",
             table_type=TableType.HYBRID,
-            primary_key=["id"],
             columns={"id": "NUMBER", "value": "VARCHAR"},
         )
         manager = create_table_manager(hybrid_config)
@@ -84,195 +84,98 @@ def test_factory():
 
 def test_standard_manager():
     """Test standard table manager validation."""
-    print("\n🔍 Testing StandardTableManager")
-    print("=" * 60)
+    config = TableConfig(
+        name="test_standard",
+        table_type=TableType.STANDARD,
+        columns={
+            "id": "NUMBER",
+            "date": "DATE",
+            "customer_id": "VARCHAR(100)",
+            "amount": "DECIMAL(10,2)",
+        },
+        data_retention_days=7,
+        database="TEST_DB",
+        schema_name="PUBLIC",
+    )
 
-    try:
-        config = TableConfig(
-            name="test_standard",
-            table_type=TableType.STANDARD,
-            columns={
-                "id": "NUMBER",
-                "date": "DATE",
-                "customer_id": "VARCHAR(100)",
-                "amount": "DECIMAL(10,2)",
-            },
-            clustering_keys=["date", "customer_id"],
-            data_retention_days=7,
-            database="TEST_DB",
-            schema_name="PUBLIC",
-        )
+    manager = StandardTableManager(config)
 
-        manager = StandardTableManager(config)
+    # Full table name is still derived from config (Snowflake-style qualification).
+    assert manager.get_full_table_name() == "TEST_DB.PUBLIC.test_standard"
 
-        # Test full table name
-        full_name = manager.get_full_table_name()
-        assert full_name == "TEST_DB.PUBLIC.test_standard"
-        print(f"✅ Full table name: {full_name}")
-
-        # Test column definitions
-        columns = manager.get_column_definitions()
-        assert len(columns) == 4
-        print(f"✅ Column definitions: {len(columns)} columns")
-
-        # Test properties
-        assert not manager.is_created
-        print("✅ Initial state: not created")
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Standard manager test failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    # No schema introspection happens until setup(); object_type starts unset.
+    assert manager.object_type is None
+    assert isinstance(manager.stats, dict)
 
 
 def test_hybrid_manager():
     """Test hybrid table manager validation."""
-    print("\n🔍 Testing HybridTableManager")
-    print("=" * 60)
+    config = TableConfig(
+        name="test_hybrid",
+        table_type=TableType.HYBRID,
+        columns={
+            "id": "NUMBER",
+            "customer_id": "VARCHAR(100)",
+            "date": "DATE",
+            "amount": "DECIMAL(10,2)",
+        },
+    )
 
-    try:
-        config = TableConfig(
-            name="test_hybrid",
-            table_type=TableType.HYBRID,
-            primary_key=["id"],
-            columns={
-                "id": "NUMBER",
-                "customer_id": "VARCHAR(100)",
-                "date": "DATE",
-                "amount": "DECIMAL(10,2)",
-            },
-            indexes=[
-                {"name": "idx_customer", "columns": ["customer_id"]},
-                {"name": "idx_date", "columns": ["date"], "include": ["amount"]},
-            ],
-        )
+    manager = HybridTableManager(config)
+    assert manager.object_type is None
 
-        manager = HybridTableManager(config)
-
-        # Test configuration
-        assert manager.config.primary_key == ["id"]
-        assert len(manager.config.indexes or []) == 2
-        print(f"✅ Hybrid manager configured: PK={manager.config.primary_key}")
-
-        # Test validation (hybrid without PK should fail)
-        try:
-            bad_config = TableConfig(
-                name="bad_hybrid",
-                table_type=TableType.HYBRID,
-                columns={"id": "NUMBER"},
-            )
-            HybridTableManager(bad_config)
-            print("❌ Should have failed: hybrid without PK")
-            return False
-        except ValueError as e:
-            print(f"✅ Validation works: {e}")
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Hybrid manager test failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+    # Hybrid tables no longer require PK metadata (existing objects only).
+    bad_config = TableConfig(
+        name="bad_hybrid",
+        table_type=TableType.HYBRID,
+        columns={"id": "NUMBER"},
+    )
+    HybridTableManager(bad_config)
 
 
 def test_postgres_manager():
-    """Test Postgres table manager type conversion."""
-    print("\n🔍 Testing PostgresTableManager")
-    print("=" * 60)
+    """Test Postgres table manager qualification behavior."""
+    config = TableConfig(
+        name="test_postgres",
+        table_type=TableType.POSTGRES,
+        columns={"id": "NUMBER", "value": "VARCHAR"},
+    )
 
-    try:
-        config = TableConfig(
-            name="test_postgres",
-            table_type=TableType.POSTGRES,
-            primary_key=["id"],
-            columns={
-                "id": "NUMBER",
-                "name": "VARCHAR(100)",
-                "created_at": "TIMESTAMP",
-                "data": "VARIANT",
-            },
-            postgres_indexes=[
-                {"name": "idx_name", "columns": ["name"], "type": "btree"},
-                {"name": "idx_data", "columns": ["data"], "type": "gin"},
-            ],
-        )
+    manager = PostgresTableManager(config)
+    assert manager.get_full_table_name() == "public.test_postgres"
+    assert manager.object_type is None
 
-        manager = PostgresTableManager(config)
 
-        # Test type conversion
-        col_def = "id NUMBER"
-        pg_def = manager._convert_to_postgres_type(col_def)
-        assert "NUMERIC" in pg_def
-        print(f"✅ Type conversion: {col_def} -> {pg_def}")
-
-        col_def = "data VARIANT"
-        pg_def = manager._convert_to_postgres_type(col_def)
-        assert "JSONB" in pg_def
-        print(f"✅ Type conversion: {col_def} -> {pg_def}")
-
-        # Test indexes configured
-        assert len(manager.config.postgres_indexes or []) == 2
-        print(
-            f"✅ Postgres indexes configured: {len(manager.config.postgres_indexes or [])}"
-        )
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Postgres manager test failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+def test_postgres_column_type_mapping_preserves_string_lengths():
+    """
+    Postgres schema introspection must preserve CHAR/VARCHAR lengths so custom workloads
+    don't generate values that violate CHAR(n) constraints (e.g. CHAR(1)).
+    """
+    assert PostgresTableManager._map_column_type("character", "bpchar", 1) == "CHAR(1)"
+    assert (
+        PostgresTableManager._map_column_type("character varying", "varchar", 15)
+        == "VARCHAR(15)"
+    )
+    assert PostgresTableManager._map_column_type("text", "text", None) == "VARCHAR"
 
 
 def test_interactive_manager():
     """Test interactive table manager placeholder."""
-    print("\n🔍 Testing InteractiveTableManager (Placeholder)")
-    print("=" * 60)
+    config = TableConfig(
+        name="test_interactive",
+        table_type=TableType.INTERACTIVE,
+        cluster_by=["date"],
+        columns={"id": "NUMBER", "date": "DATE"},
+    )
+    _manager = InteractiveTableManager(config)
 
-    try:
-        config = TableConfig(
-            name="test_interactive",
+    with pytest.raises(ValueError):
+        bad_config = TableConfig(
+            name="bad_interactive",
             table_type=TableType.INTERACTIVE,
-            cluster_by=["date"],
-            columns={"id": "NUMBER", "date": "DATE"},
+            columns={"id": "NUMBER"},
         )
-
-        manager = InteractiveTableManager(config)
-
-        # Should fail for now
-        assert not manager.is_created
-        print("✅ Interactive manager created (placeholder)")
-        print("⚠️  Interactive tables not yet fully supported")
-
-        # Test validation (interactive without CLUSTER BY should fail)
-        try:
-            bad_config = TableConfig(
-                name="bad_interactive",
-                table_type=TableType.INTERACTIVE,
-                columns={"id": "NUMBER"},
-            )
-            InteractiveTableManager(bad_config)
-            print("❌ Should have failed: interactive without CLUSTER BY")
-            return False
-        except ValueError as e:
-            print(f"✅ Validation works: {e}")
-
-        return True
-
-    except Exception as e:
-        print(f"❌ Interactive manager test failed: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
+        InteractiveTableManager(bad_config)
 
 
 def main():
