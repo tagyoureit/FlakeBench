@@ -11,6 +11,7 @@ from datetime import datetime
 from collections import deque
 from enum import Enum
 
+
 from backend.models import (
     Metrics,
     MetricsSnapshot,
@@ -98,6 +99,15 @@ class MetricsCollector:
         # Peak tracking
         self._last_snapshot_time: Optional[datetime] = None
         self._last_snapshot_ops: int = 0
+        self._process = None
+        try:
+            import psutil as psutil_mod
+
+            self._process = psutil_mod.Process()
+            # Prime cpu_percent so subsequent calls return a delta.
+            self._process.cpu_percent(interval=None)
+        except Exception:
+            self._process = None
 
         logger.info(
             f"MetricsCollector initialized: window={window_size}, interval={snapshot_interval_seconds}s"
@@ -239,6 +249,18 @@ class MetricsCollector:
                 self.metrics.rows_per_second = (
                     self.metrics.rows_read + self.metrics.rows_written
                 ) / self.metrics.elapsed_seconds
+
+            # Best-effort host resource sampling (per-process).
+            if self._process is not None:
+                try:
+                    self.metrics.cpu_percent = float(
+                        self._process.cpu_percent(interval=None)
+                    )
+                    self.metrics.memory_mb = float(self._process.memory_info().rss) / (
+                        1024 * 1024
+                    )
+                except Exception:
+                    pass
 
             # Update last snapshot tracking
             self._last_snapshot_time = self.metrics.timestamp

@@ -5,9 +5,11 @@ Orchestrates performance test execution with concurrent workload generation.
 """
 
 import asyncio
+import importlib
 import json
 import logging
 import math
+import os
 import re
 from collections import deque
 from collections.abc import Iterator
@@ -107,6 +109,27 @@ class TestExecutor:
         # Metrics
         self.metrics = Metrics()
         self._metrics_lock = asyncio.Lock()
+        self._psutil = None
+        self._process = None
+        self._host_cpu_cores: int | None = None
+        self._cgroup_prev_usage: float | None = None
+        self._cgroup_prev_time_mono: float | None = None
+        try:
+            psutil_mod = importlib.import_module("psutil")
+            self._psutil = psutil_mod
+            self._process = psutil_mod.Process()
+            # Prime cpu_percent so subsequent calls return a delta.
+            self._process.cpu_percent(interval=None)
+            # Prime host cpu_percent so subsequent calls return a delta.
+            self._psutil.cpu_percent(interval=None)
+            try:
+                cores = self._psutil.cpu_count(logical=True)
+                self._host_cpu_cores = int(cores) if cores else None
+            except Exception:
+                self._host_cpu_cores = None
+        except Exception:
+            self._psutil = None
+            self._process = None
         # Metrics epoch (generation) for phase transitions.
         #
         # We use this to prevent late completions from a previous phase (e.g. warmup)
@@ -866,14 +889,29 @@ class TestExecutor:
         # (n + worker_id) scheme caused heavy overlap across workers and
         # produced massive Snowflake result-cache hit rates (artificially low
         # P95 latencies).
+        #
+        # For multi-process/multi-node runs, we shard the pool space across
+        # worker groups to reduce cross-node overlap. This assumes each group
+        # runs the same local concurrency.
         if not hasattr(self, "_worker_pool_seq"):
             self._worker_pool_seq = {}
         key = (int(worker_id), (kind or "").upper(), (column or "").upper())
         n = int(getattr(self, "_worker_pool_seq", {}).get(key, 0))
         getattr(self, "_worker_pool_seq")[key] = n + 1
-        stride = int(getattr(self.scenario, "concurrent_connections", 1) or 1)
-        stride = max(1, stride)
-        idx = (n * stride + int(worker_id)) % len(values)
+        local_concurrency = int(
+            getattr(self.scenario, "concurrent_connections", 1) or 1
+        )
+        local_concurrency = max(1, local_concurrency)
+        group_id = int(getattr(self.scenario, "worker_group_id", 0) or 0)
+        group_count = int(getattr(self.scenario, "worker_group_count", 1) or 1)
+        group_count = max(1, group_count)
+        if group_id < 0:
+            group_id = 0
+        if group_id >= group_count:
+            group_id = group_count - 1
+        global_stride = local_concurrency * group_count
+        global_worker_id = (group_id * local_concurrency) + int(worker_id)
+        idx = (n * global_stride + global_worker_id) % len(values)
         return values[idx]
 
     async def execute(self) -> TestResult:
@@ -1811,7 +1849,8 @@ class TestExecutor:
 
                 current_cc = start_cc
                 step_num = 0
-                backoff_attempted = False
+                backoff_attempts = 0
+                max_backoff_attempts = 3
 
                 def _build_step_history():
                     return [
@@ -2097,7 +2136,11 @@ class TestExecutor:
                             qps_change_pct = ((step_qps - prev.qps) / prev.qps) * 100.0
                             if qps_change_pct < -qps_stability_pct:
                                 stable = False
-                                stop_reason = f"QPS dropped {-qps_change_pct:.1f}% vs previous ({prev.qps:.1f} → {step_qps:.1f})"
+                                stop_reason = (
+                                    f"QPS dropped {-qps_change_pct:.1f}% vs previous "
+                                    f"({prev.qps:.1f} → {step_qps:.1f}); "
+                                    f"qps_stability_pct={qps_stability_pct:.1f}%"
+                                )
 
                         # Latency should not increase too much vs the previous stable step.
                         #
@@ -2232,9 +2275,13 @@ class TestExecutor:
                                 str(step_result.stop_reason).strip() or None
                             )
 
+                        recovered = False
                         # Try backoff: go back to best_concurrency and verify it's still stable
-                        if not backoff_attempted and best_concurrency < current_cc:
-                            backoff_attempted = True
+                        if (
+                            backoff_attempts < max_backoff_attempts
+                            and best_concurrency < current_cc
+                        ):
+                            backoff_attempts += 1
                             logger.info(
                                 f"FIND_MAX: Degradation detected at {current_cc}. Backing off to verify {best_concurrency} is stable..."
                             )
@@ -2262,16 +2309,32 @@ class TestExecutor:
                                     )
                                     mid_result = await run_step(midpoint)
                                     step_results.append(mid_result)
-                                    if mid_result.stable and mid_result.qps > best_qps:
-                                        best_concurrency = midpoint
-                                        best_qps = mid_result.qps
-                                        logger.info(
-                                            f"FIND_MAX: Midpoint {midpoint} is better! New best: {best_qps:.1f} QPS"
+                                    if mid_result.stable and mid_result.qps >= best_qps:
+                                        if mid_result.qps > best_qps:
+                                            best_concurrency = midpoint
+                                            best_qps = mid_result.qps
+                                            logger.info(
+                                                f"FIND_MAX: Midpoint {midpoint} is better! New best: {best_qps:.1f} QPS"
+                                            )
+                                        recovered = True
+                                        next_cc = min(
+                                            max_cc, int(midpoint) + int(increment)
                                         )
+                                        logger.info(
+                                            "FIND_MAX: Recovery observed at %d workers; continuing search (backoff %d/%d) at %d workers",
+                                            midpoint,
+                                            backoff_attempts,
+                                            max_backoff_attempts,
+                                            next_cc,
+                                        )
+                                        current_cc = next_cc
                             else:
                                 logger.info(
                                     f"FIND_MAX: Backoff to {best_concurrency} also unstable - stopping"
                                 )
+
+                        if recovered:
+                            continue
 
                         logger.info(f"FIND_MAX: Stopping - {step_result.stop_reason}")
                         break
@@ -4249,8 +4312,115 @@ class TestExecutor:
                     self._last_snapshot_mono = now_mono
                     self._last_snapshot_ops = self.metrics.total_operations
 
+                    # Best-effort resource sampling (process + host + cgroup limits).
+                    if self._process is not None:
+                        try:
+                            self.metrics.cpu_percent = float(
+                                self._process.cpu_percent(interval=None)
+                            )
+                            self.metrics.memory_mb = float(
+                                self._process.memory_info().rss
+                            ) / (1024 * 1024)
+                        except Exception:
+                            pass
+
+                    host_cpu_percent: float | None = None
+                    host_memory_mb: float | None = None
+                    host_memory_total_mb: float | None = None
+                    host_memory_available_mb: float | None = None
+                    host_memory_percent: float | None = None
+                    host_cpu_cores: int | None = self._host_cpu_cores
+                    if self._psutil is not None:
+                        try:
+                            host_cpu_percent = float(
+                                self._psutil.cpu_percent(interval=None)
+                            )
+                        except Exception:
+                            host_cpu_percent = None
+                        try:
+                            vm = self._psutil.virtual_memory()
+                            host_memory_total_mb = float(vm.total) / (1024 * 1024)
+                            host_memory_available_mb = float(vm.available) / (
+                                1024 * 1024
+                            )
+                            host_memory_mb = float(vm.total - vm.available) / (
+                                1024 * 1024
+                            )
+                            host_memory_percent = float(vm.percent)
+                        except Exception:
+                            host_memory_mb = None
+
+                    cgroup_cpu_percent: float | None = None
+                    cgroup_cpu_quota_cores: float | None = None
+                    cgroup_memory_mb: float | None = None
+                    cgroup_memory_limit_mb: float | None = None
+                    cgroup_memory_percent: float | None = None
+                    cgroup = self._read_cgroup_limits()
+                    if cgroup:
+                        cgroup_cpu_quota_cores = cgroup.get("cpu_quota_cores")
+                        cgroup_memory_mb = cgroup.get("memory_mb")
+                        cgroup_memory_limit_mb = cgroup.get("memory_limit_mb")
+                        if (
+                            cgroup_memory_mb is not None
+                            and cgroup_memory_limit_mb is not None
+                            and cgroup_memory_limit_mb > 0
+                        ):
+                            cgroup_memory_percent = (
+                                cgroup_memory_mb / cgroup_memory_limit_mb
+                            ) * 100.0
+                        cgroup_cpu_percent = self._sample_cgroup_cpu_percent(
+                            usage=cgroup.get("cpu_usage"),
+                            usage_unit=cgroup.get("cpu_usage_unit"),
+                            cpu_cores=(
+                                cgroup_cpu_quota_cores
+                                or float(host_cpu_cores or 0)
+                                or None
+                            ),
+                        )
+
                     # Attach controller + warehouse telemetry for the live dashboard.
                     custom = dict(self.metrics.custom_metrics or {})
+                    resources = dict(custom.get("resources") or {})
+                    if self.metrics.cpu_percent is not None:
+                        resources["cpu_percent"] = float(self.metrics.cpu_percent)
+                        resources["process_cpu_percent"] = float(
+                            self.metrics.cpu_percent
+                        )
+                    if self.metrics.memory_mb is not None:
+                        resources["memory_mb"] = float(self.metrics.memory_mb)
+                        resources["process_memory_mb"] = float(self.metrics.memory_mb)
+                    if host_cpu_percent is not None:
+                        resources["host_cpu_percent"] = float(host_cpu_percent)
+                    if host_cpu_cores is not None:
+                        resources["host_cpu_cores"] = int(host_cpu_cores)
+                    if host_memory_mb is not None:
+                        resources["host_memory_mb"] = float(host_memory_mb)
+                    if host_memory_total_mb is not None:
+                        resources["host_memory_total_mb"] = float(host_memory_total_mb)
+                    if host_memory_available_mb is not None:
+                        resources["host_memory_available_mb"] = float(
+                            host_memory_available_mb
+                        )
+                    if host_memory_percent is not None:
+                        resources["host_memory_percent"] = float(host_memory_percent)
+                    if cgroup_cpu_percent is not None:
+                        resources["cgroup_cpu_percent"] = float(cgroup_cpu_percent)
+                    if cgroup_cpu_quota_cores is not None:
+                        resources["cgroup_cpu_quota_cores"] = float(
+                            cgroup_cpu_quota_cores
+                        )
+                    if cgroup_memory_mb is not None:
+                        resources["cgroup_memory_mb"] = float(cgroup_memory_mb)
+                    if cgroup_memory_limit_mb is not None:
+                        resources["cgroup_memory_limit_mb"] = float(
+                            cgroup_memory_limit_mb
+                        )
+                    if cgroup_memory_percent is not None:
+                        resources["cgroup_memory_percent"] = float(
+                            cgroup_memory_percent
+                        )
+                    if resources:
+                        custom["resources"] = resources
                     custom["qps"] = {
                         "raw": float(getattr(self.metrics, "current_qps", 0.0) or 0.0),
                         "smoothed": float(self._qps_smoothed or 0.0),
@@ -4484,6 +4654,167 @@ class TestExecutor:
         )
 
         return result
+
+    def _read_text(self, path: str) -> str | None:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
+        except Exception:
+            return None
+
+    def _read_int(self, path: str) -> int | None:
+        raw = self._read_text(path)
+        if raw is None:
+            return None
+        try:
+            return int(raw.strip())
+        except Exception:
+            return None
+
+    def _read_cgroup_limits(self) -> dict[str, Any] | None:
+        root = "/sys/fs/cgroup"
+        if not os.path.isdir(root):
+            return None
+        # cgroup v2 has cgroup.controllers at the root.
+        if os.path.exists(os.path.join(root, "cgroup.controllers")):
+            return self._read_cgroup_v2(root)
+        return self._read_cgroup_v1()
+
+    def _read_cgroup_v2(self, root: str) -> dict[str, Any] | None:
+        cpu_max = self._read_text(os.path.join(root, "cpu.max"))
+        cpu_stat = self._read_text(os.path.join(root, "cpu.stat"))
+        mem_current = self._read_text(os.path.join(root, "memory.current"))
+        mem_max = self._read_text(os.path.join(root, "memory.max"))
+
+        cpu_quota_cores: float | None = None
+        if cpu_max:
+            parts = cpu_max.split()
+            if len(parts) >= 2 and parts[0] != "max":
+                try:
+                    quota = float(parts[0])
+                    period = float(parts[1])
+                    if period > 0:
+                        cpu_quota_cores = quota / period
+                except Exception:
+                    cpu_quota_cores = None
+
+        cpu_usage: float | None = None
+        if cpu_stat:
+            for line in cpu_stat.splitlines():
+                if line.startswith("usage_usec"):
+                    try:
+                        cpu_usage = float(line.split()[1])
+                    except Exception:
+                        cpu_usage = None
+                    break
+
+        memory_mb: float | None = None
+        if mem_current:
+            try:
+                memory_mb = float(mem_current) / (1024 * 1024)
+            except Exception:
+                memory_mb = None
+
+        memory_limit_mb: float | None = None
+        if mem_max and mem_max != "max":
+            try:
+                memory_limit_mb = float(mem_max) / (1024 * 1024)
+            except Exception:
+                memory_limit_mb = None
+
+        if (
+            cpu_quota_cores is None
+            and cpu_usage is None
+            and memory_mb is None
+            and memory_limit_mb is None
+        ):
+            return None
+
+        return {
+            "cpu_quota_cores": cpu_quota_cores,
+            "cpu_usage": cpu_usage,
+            "cpu_usage_unit": "usec",
+            "memory_mb": memory_mb,
+            "memory_limit_mb": memory_limit_mb,
+        }
+
+    def _read_cgroup_v1(self) -> dict[str, Any] | None:
+        cpu_dir = "/sys/fs/cgroup/cpu"
+        cpuacct_dir = "/sys/fs/cgroup/cpuacct"
+        mem_dir = "/sys/fs/cgroup/memory"
+
+        cpu_quota_cores: float | None = None
+        quota_us = self._read_int(os.path.join(cpu_dir, "cpu.cfs_quota_us"))
+        period_us = self._read_int(os.path.join(cpu_dir, "cpu.cfs_period_us"))
+        if (
+            quota_us is not None
+            and period_us is not None
+            and quota_us > 0
+            and period_us > 0
+        ):
+            cpu_quota_cores = float(quota_us) / float(period_us)
+
+        cpu_usage: float | None = None
+        usage_ns = self._read_int(os.path.join(cpuacct_dir, "cpuacct.usage"))
+        if usage_ns is not None:
+            cpu_usage = float(usage_ns)
+
+        memory_mb: float | None = None
+        mem_usage = self._read_int(os.path.join(mem_dir, "memory.usage_in_bytes"))
+        if mem_usage is not None:
+            memory_mb = float(mem_usage) / (1024 * 1024)
+
+        memory_limit_mb: float | None = None
+        mem_limit = self._read_int(os.path.join(mem_dir, "memory.limit_in_bytes"))
+        if mem_limit is not None:
+            # Ignore "unlimited" sentinel values.
+            if mem_limit < (1 << 60):
+                memory_limit_mb = float(mem_limit) / (1024 * 1024)
+
+        if (
+            cpu_quota_cores is None
+            and cpu_usage is None
+            and memory_mb is None
+            and memory_limit_mb is None
+        ):
+            return None
+
+        return {
+            "cpu_quota_cores": cpu_quota_cores,
+            "cpu_usage": cpu_usage,
+            "cpu_usage_unit": "nsec",
+            "memory_mb": memory_mb,
+            "memory_limit_mb": memory_limit_mb,
+        }
+
+    def _sample_cgroup_cpu_percent(
+        self,
+        *,
+        usage: float | None,
+        usage_unit: str | None,
+        cpu_cores: float | None,
+    ) -> float | None:
+        if usage is None or cpu_cores is None or cpu_cores <= 0:
+            return None
+        now_mono = time.monotonic()
+        if self._cgroup_prev_usage is None or self._cgroup_prev_time_mono is None:
+            self._cgroup_prev_usage = usage
+            self._cgroup_prev_time_mono = now_mono
+            return None
+        delta_t = now_mono - self._cgroup_prev_time_mono
+        delta_usage = usage - self._cgroup_prev_usage
+        self._cgroup_prev_usage = usage
+        self._cgroup_prev_time_mono = now_mono
+        if delta_t <= 0 or delta_usage < 0:
+            return None
+        if usage_unit == "nsec":
+            used_seconds = delta_usage / 1e9
+        else:
+            used_seconds = delta_usage / 1e6
+        pct = (used_seconds / (delta_t * cpu_cores)) * 100.0
+        if math.isfinite(pct):
+            return pct
+        return None
 
     def set_metrics_callback(self, callback: Callable[[Metrics], None]):
         """

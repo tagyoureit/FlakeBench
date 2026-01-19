@@ -154,6 +154,13 @@
     </div>
 
     <div class="card">
+        <div class="card-title">Latency Distribution</div>
+        <div class="chart-container">
+            <canvas id="latencyChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
         <div class="card-title">Concurrent Queries</div>
         <div class="chart-container">
             <canvas id="concurrencyChart"></canvas>
@@ -201,11 +208,48 @@
             <canvas id="mcwLiveChart"></canvas>
         </div>
     </div>
-    
-    <div class="card">
-        <div class="card-title">Latency Distribution</div>
-        <div class="chart-container">
-            <canvas id="latencyChart"></canvas>
+
+    <div class="card" x-show="metrics.resources_available">
+        <div class="card-title">Resources (host + process)</div>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">
+                    <span>CPU (host)</span>
+                    <span class="info-icon" title="Host CPU usage (cgroup-aware when limits are present).">i</span>
+                </div>
+                <div class="metric-value" x-text="formatPctValue(metrics.host_cpu_percent != null ? metrics.host_cpu_percent : metrics.cpu_percent)"></div>
+                <div class="metric-change" style="display: flex; flex-direction: column; gap: 2px;">
+                    <template x-if="metrics.cgroup_cpu_percent != null && metrics.cgroup_cpu_quota_cores != null">
+                        <span x-text="'Cgroup: ' + formatPctValue(metrics.cgroup_cpu_percent) + ' of ' + formatCompact(metrics.cgroup_cpu_quota_cores) + ' cores'"></span>
+                    </template>
+                    <span x-text="'Process: ' + formatPctValue(metrics.cpu_percent)"></span>
+                </div>
+                <div style="height: 60px; margin-top: 0.5rem;">
+                    <canvas id="resourcesCpuSparkline"></canvas>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">
+                    <span>Memory (host)</span>
+                    <span class="info-icon" title="Host memory usage (cgroup-aware when limits are present).">i</span>
+                </div>
+                <div
+                    class="metric-value"
+                    x-text="metrics.host_memory_total_mb != null ? (formatCompact(metrics.host_memory_mb || 0) + ' / ' + formatCompact(metrics.host_memory_total_mb) + ' MB') : (formatCompact(metrics.memory_mb) + ' MB')"
+                ></div>
+                <div class="metric-change" style="display: flex; flex-direction: column; gap: 2px;">
+                    <template x-if="metrics.host_memory_percent != null">
+                        <span x-text="'Host: ' + formatPctValue(metrics.host_memory_percent)"></span>
+                    </template>
+                    <template x-if="metrics.cgroup_memory_mb != null && metrics.cgroup_memory_limit_mb != null">
+                        <span x-text="'Cgroup: ' + formatCompact(metrics.cgroup_memory_mb) + ' / ' + formatCompact(metrics.cgroup_memory_limit_mb) + ' MB (' + formatPctValue(metrics.cgroup_memory_percent) + ')'"></span>
+                    </template>
+                    <span x-text="'Process: ' + formatCompact(metrics.memory_mb) + ' MB'"></span>
+                </div>
+                <div style="height: 60px; margin-top: 0.5rem;">
+                    <canvas id="resourcesMemSparkline"></canvas>
+                </div>
+            </div>
         </div>
     </div>
 

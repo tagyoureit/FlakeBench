@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Host + cgroup-aware resource metrics (CPU/memory) in live + history dashboards,
+  including per-process context for capacity planning.
 - Separate `ENRICHMENT_STATUS` column to track post-processing (Snowflake QUERY_HISTORY
   enrichment) independently from test execution status. Values: PENDING, COMPLETED,
   FAILED, SKIPPED.

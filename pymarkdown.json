@@ -1,6 +1,12 @@
 {
   "plugins": {
-    "line-length": {
+    "first-line-heading": {
+      "enabled": false
+    },
+    "heading-style": {
+      "enabled": false
+    },
+    "blanks-around-headings": {
       "enabled": false
     }
   }

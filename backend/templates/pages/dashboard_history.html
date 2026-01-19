@@ -267,6 +267,7 @@
                             <th class="text-right">Workers</th>
                             <th class="text-right">QPS</th>
                             <th class="text-right">P95 (ms)</th>
+                            <th class="text-right">P95% (Δ)</th>
                             <th class="text-right">P99 (ms)</th>
                             <th class="text-right">P99% (Δ)</th>
                             <th class="text-right">Error %</th>
@@ -282,6 +283,7 @@
                                 <td class="text-right" x-text="formatInt(step.concurrency)"></td>
                                 <td class="text-right" x-text="formatMs(step.qps)"></td>
                                 <td class="text-right" x-text="formatMs(step.p95_latency_ms)"></td>
+                                <td class="text-right" x-text="formatSignedPct(stepP95DiffPct(step))"></td>
                                 <td class="text-right" x-text="formatMs(step.p99_latency_ms)"></td>
                                 <td class="text-right" x-text="formatSignedPct(stepP99DiffPct(step))"></td>
                                 <td class="text-right" x-text="formatMs(step.error_rate_pct) + '%'"></td>
@@ -305,10 +307,21 @@
 
     {% include "components/latency_sections.html" %}
 
+
     <div class="card">
         <div class="card-title">Real-Time Metrics (captured)</div>
         <div class="chart-container">
             <canvas id="throughputChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Latency Distribution (end-to-end)</div>
+        <div class="chart-container">
+            <canvas id="latencyChart"></canvas>
+        </div>
+        <div style="margin-top: 0.5rem; color: #6b7280;">
+            Note: charts are based on end-to-end app timings collected during execution.
         </div>
     </div>
 
@@ -382,16 +395,6 @@
         </div>
     </div>
     
-    <div class="card">
-        <div class="card-title">Latency Distribution (end-to-end)</div>
-        <div class="chart-container">
-            <canvas id="latencyChart"></canvas>
-        </div>
-        <div style="margin-top: 0.5rem; color: #6b7280;">
-            Note: charts are based on end-to-end app timings collected during execution.
-        </div>
-    </div>
-
     <div
         class="card"
         x-show="templateInfo && isFinalMetricsReady() && !['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())"
@@ -572,6 +575,64 @@
             style="margin-top: 1rem;"
         >
             <canvas id="warehouseQueueChart"></canvas>
+        </div>
+    </div>
+
+    <div class="card" x-show="metrics.resources_available">
+        <div
+            style="display:flex; align-items: center; justify-content: space-between; gap: 0.75rem; cursor: pointer;"
+            @click="toggleResourcesHistory()"
+        >
+            <div class="card-title" style="margin-bottom: 0;">Resources (captured)</div>
+            <span
+                style="display: inline-block; width: 1rem; text-align: center; transition: transform 0.15s;"
+                :style="resourcesHistoryExpanded ? 'transform: rotate(90deg);' : ''"
+            >▶</span>
+        </div>
+        <div class="metrics-grid" style="margin-top: 0.75rem;">
+            <div class="metric-card">
+                <div class="metric-label">
+                    <span>CPU (host)</span>
+                    <span class="info-icon" title="Host CPU usage captured during the run (cgroup-aware when limits are present).">i</span>
+                </div>
+                <div class="metric-value" x-text="formatPctValue(metrics.host_cpu_percent != null ? metrics.host_cpu_percent : metrics.cpu_percent)"></div>
+                <div class="metric-change" style="display: flex; flex-direction: column; gap: 2px;">
+                    <template x-if="metrics.cgroup_cpu_percent != null && metrics.cgroup_cpu_quota_cores != null">
+                        <span x-text="'Cgroup: ' + formatPctValue(metrics.cgroup_cpu_percent) + ' of ' + formatCompact(metrics.cgroup_cpu_quota_cores) + ' cores'"></span>
+                    </template>
+                    <span x-text="'Process: ' + formatPctValue(metrics.cpu_percent)"></span>
+                </div>
+                <div style="height: 60px; margin-top: 0.5rem;">
+                    <canvas id="resourcesCpuSparkline"></canvas>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">
+                    <span>Memory (host)</span>
+                    <span class="info-icon" title="Host memory usage captured during the run (cgroup-aware when limits are present).">i</span>
+                </div>
+                <div
+                    class="metric-value"
+                    x-text="metrics.host_memory_total_mb != null ? (formatCompact(metrics.host_memory_mb || 0) + ' / ' + formatCompact(metrics.host_memory_total_mb) + ' MB') : (formatCompact(metrics.memory_mb) + ' MB')"
+                ></div>
+                <div class="metric-change" style="display: flex; flex-direction: column; gap: 2px;">
+                    <template x-if="metrics.host_memory_percent != null">
+                        <span x-text="'Host: ' + formatPctValue(metrics.host_memory_percent)"></span>
+                    </template>
+                    <template x-if="metrics.cgroup_memory_mb != null && metrics.cgroup_memory_limit_mb != null">
+                        <span x-text="'Cgroup: ' + formatCompact(metrics.cgroup_memory_mb) + ' / ' + formatCompact(metrics.cgroup_memory_limit_mb) + ' MB (' + formatPctValue(metrics.cgroup_memory_percent) + ')'"></span>
+                    </template>
+                    <span x-text="'Process: ' + formatCompact(metrics.memory_mb) + ' MB'"></span>
+                </div>
+                <div style="height: 60px; margin-top: 0.5rem;">
+                    <canvas id="resourcesMemSparkline"></canvas>
+                </div>
+            </div>
+        </div>
+        <div x-show="resourcesHistoryExpanded" x-cloak style="margin-top: 1rem;">
+            <div class="chart-container">
+                <canvas id="resourcesHistoryChart"></canvas>
+            </div>
         </div>
     </div>
 

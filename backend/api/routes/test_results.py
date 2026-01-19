@@ -537,7 +537,8 @@ async def list_tests(
             STATUS,
             CONCURRENT_CONNECTIONS,
             DURATION_SECONDS,
-            FAILURE_REASON
+            FAILURE_REASON,
+            ENRICHMENT_STATUS
         FROM {_prefix()}.TEST_RESULTS
         {where_sql}
         ORDER BY START_TIME DESC
@@ -566,17 +567,26 @@ async def list_tests(
                 concurrency,
                 duration,
                 failure_reason,
+                enrichment_status,
             ) = row
 
-            # For running tests, get the current phase from the in-memory registry
+            # For in-memory tests, get the current phase from the registry
             phase = None
-            if status_db and str(status_db).upper() == "RUNNING":
-                try:
-                    running = await registry.get(test_id)
-                    if running is not None and isinstance(running.last_payload, dict):
-                        phase = running.last_payload.get("phase")
-                except Exception:
-                    pass
+            try:
+                running = await registry.get(test_id)
+                if running is not None and isinstance(running.last_payload, dict):
+                    phase = running.last_payload.get("phase")
+            except Exception:
+                pass
+            if (
+                not phase
+                and str(status_db or "").upper() == "COMPLETED"
+                and str(enrichment_status or "").upper() == "PENDING"
+            ):
+                phase = "PROCESSING"
+            status_out = status_db
+            if str(status_db or "").upper() == "COMPLETED" and phase == "PROCESSING":
+                status_out = "PROCESSING"
 
             results.append(
                 {
@@ -591,8 +601,9 @@ async def list_tests(
                     "p95_latency": float(p95 or 0),
                     "p99_latency": float(p99 or 0),
                     "error_rate": float(err_rate or 0) * 100.0,
-                    "status": status_db,
+                    "status": status_out,
                     "phase": phase,
+                    "enrichment_status": enrichment_status,
                     "concurrent_connections": int(concurrency or 0),
                     "duration": float(duration or 0),
                     "failure_reason": failure_reason,
@@ -1841,6 +1852,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
             sf_bench: dict[str, Any] = {}
             app_ops: dict[str, Any] = {}
             warehouse: dict[str, Any] = {}
+            resources: dict[str, Any] = {}
             if isinstance(cm, dict):
                 maybe_sf = cm.get("sf_bench")
                 if isinstance(maybe_sf, dict):
@@ -1851,12 +1863,21 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 maybe_wh = cm.get("warehouse")
                 if isinstance(maybe_wh, dict):
                     warehouse = maybe_wh
+                maybe_res = cm.get("resources")
+                if isinstance(maybe_res, dict):
+                    resources = maybe_res
 
             def _to_int(v: Any) -> int:
                 try:
                     return int(v or 0)
                 except Exception:
                     return 0
+
+            def _to_float(v: Any) -> float:
+                try:
+                    return float(v or 0)
+                except Exception:
+                    return 0.0
 
             snapshots.append(
                 {
@@ -1904,6 +1925,47 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     "app_update_ops_sec": float(app_ops.get("update_ops_sec") or 0),
                     "app_read_ops_sec": float(app_ops.get("read_ops_sec") or 0),
                     "app_write_ops_sec": float(app_ops.get("write_ops_sec") or 0),
+                    "resources_cpu_percent": _to_float(resources.get("cpu_percent")),
+                    "resources_memory_mb": _to_float(resources.get("memory_mb")),
+                    "resources_process_cpu_percent": _to_float(
+                        resources.get("process_cpu_percent")
+                    ),
+                    "resources_process_memory_mb": _to_float(
+                        resources.get("process_memory_mb")
+                    ),
+                    "resources_host_cpu_percent": _to_float(
+                        resources.get("host_cpu_percent")
+                    ),
+                    "resources_host_cpu_cores": _to_float(
+                        resources.get("host_cpu_cores")
+                    ),
+                    "resources_host_memory_mb": _to_float(
+                        resources.get("host_memory_mb")
+                    ),
+                    "resources_host_memory_total_mb": _to_float(
+                        resources.get("host_memory_total_mb")
+                    ),
+                    "resources_host_memory_available_mb": _to_float(
+                        resources.get("host_memory_available_mb")
+                    ),
+                    "resources_host_memory_percent": _to_float(
+                        resources.get("host_memory_percent")
+                    ),
+                    "resources_cgroup_cpu_percent": _to_float(
+                        resources.get("cgroup_cpu_percent")
+                    ),
+                    "resources_cgroup_cpu_quota_cores": _to_float(
+                        resources.get("cgroup_cpu_quota_cores")
+                    ),
+                    "resources_cgroup_memory_mb": _to_float(
+                        resources.get("cgroup_memory_mb")
+                    ),
+                    "resources_cgroup_memory_limit_mb": _to_float(
+                        resources.get("cgroup_memory_limit_mb")
+                    ),
+                    "resources_cgroup_memory_percent": _to_float(
+                        resources.get("cgroup_memory_percent")
+                    ),
                 }
             )
 

@@ -425,8 +425,11 @@ function testHistory() {
     dashboardUrl(test) {
       const id = test && test.test_id ? String(test.test_id) : "";
       const status = test && test.status ? String(test.status).toUpperCase() : "";
+      const phase = test && test.phase ? String(test.phase).toUpperCase() : "";
       if (!id) return "/dashboard";
-      if (status === "COMPLETED") return `/dashboard/history/${id}`;
+      if (status === "COMPLETED" || phase === "PROCESSING") {
+        return `/dashboard/history/${id}`;
+      }
       return `/dashboard/${id}`;
     },
 

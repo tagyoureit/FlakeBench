@@ -46,6 +46,20 @@ function dashboard(opts) {
       sf_execution_avg_ms: 0,
       network_overhead_avg_ms: 0,
       latency_sample_count: 0,
+      resources_available: false,
+      cpu_percent: 0,
+      memory_mb: 0,
+      host_cpu_percent: null,
+      host_cpu_cores: null,
+      host_memory_mb: null,
+      host_memory_total_mb: null,
+      host_memory_available_mb: null,
+      host_memory_percent: null,
+      cgroup_cpu_percent: null,
+      cgroup_cpu_quota_cores: null,
+      cgroup_memory_mb: null,
+      cgroup_memory_limit_mb: null,
+      cgroup_memory_percent: null,
       // App-level ops breakdown (always accurate, directly from app counters)
       app_ops_available: false,
       app_point_lookup_count: 0,
@@ -103,6 +117,7 @@ function dashboard(opts) {
     chatLoading: false,
     clusterBreakdownExpanded: false,
     stepHistoryExpanded: false,
+    resourcesHistoryExpanded: false,
     findMaxController: null,
     findMaxCountdownSeconds: null,
     _findMaxCountdownIntervalId: null,
@@ -1167,6 +1182,13 @@ function dashboard(opts) {
       return !!(this.templateInfo && this.templateInfo.sf_latency_available);
     },
 
+    isEnrichmentComplete() {
+      const status = (this.templateInfo?.enrichment_status || "")
+        .toString()
+        .toUpperCase();
+      return status === "COMPLETED";
+    },
+
     isFinalMetricsReady() {
       const status = (this.status || "").toString().toUpperCase();
       const phase = (this.phase || "").toString().toUpperCase();
@@ -1174,8 +1196,9 @@ function dashboard(opts) {
       // For historical rows (no in-memory phase), status alone is the best signal.
       if (!phase) return status === "COMPLETED";
 
-      // When phase is available, require post-processing completion as well.
-      return phase === "COMPLETED" && status === "COMPLETED";
+      // When phase is available, allow base metrics during PROCESSING.
+      if (status !== "COMPLETED") return false;
+      return phase === "COMPLETED" || phase === "PROCESSING";
     },
 
     sfLatencyDisabledReason() {
@@ -1333,7 +1356,11 @@ function dashboard(opts) {
           await this.loadHistoricalMetrics();
 
         // On history view, load per-second warehouse series once post-processing is complete.
-        if (this.mode === "history" && this.isFinalMetricsReady()) {
+        if (
+          this.mode === "history" &&
+          this.isFinalMetricsReady() &&
+          this.isEnrichmentComplete()
+        ) {
           this.resetWarehouseTimeseriesRetry();
           await this.loadWarehouseTimeseries();
         }
@@ -1697,14 +1724,20 @@ function dashboard(opts) {
         let latencyCanvas = document.getElementById("latencyChart");
         let sfRunningCanvas = document.getElementById("sfRunningChart");
         let opsSecCanvas = document.getElementById("opsSecChart");
+        let resourcesCpuCanvas = document.getElementById("resourcesCpuSparkline");
+        let resourcesMemCanvas = document.getElementById("resourcesMemSparkline");
+        let resourcesHistoryCanvas = document.getElementById("resourcesHistoryChart");
         let throughputChart = throughputCanvas && (throughputCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(throughputCanvas) : null));
         let concurrencyChart = concurrencyCanvas && (concurrencyCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(concurrencyCanvas) : null));
         let latencyChart = latencyCanvas && (latencyCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(latencyCanvas) : null));
         let sfRunningChart = sfRunningCanvas && (sfRunningCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(sfRunningCanvas) : null));
         let opsSecChart = opsSecCanvas && (opsSecCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(opsSecCanvas) : null));
+        let resourcesCpuChart = resourcesCpuCanvas && (resourcesCpuCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesCpuCanvas) : null));
+        let resourcesMemChart = resourcesMemCanvas && (resourcesMemCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesMemCanvas) : null));
+        let resourcesHistoryChart = resourcesHistoryCanvas && (resourcesHistoryCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesHistoryCanvas) : null));
         
         // If charts don't exist yet, initialize them
-        if (!throughputChart || !latencyChart || (concurrencyCanvas && !concurrencyChart) || (sfRunningCanvas && !sfRunningChart) || (opsSecCanvas && !opsSecChart)) {
+        if (!throughputChart || !latencyChart || (concurrencyCanvas && !concurrencyChart) || (sfRunningCanvas && !sfRunningChart) || (opsSecCanvas && !opsSecChart) || (resourcesCpuCanvas && !resourcesCpuChart) || (resourcesMemCanvas && !resourcesMemChart) || (resourcesHistoryCanvas && !resourcesHistoryChart)) {
           this.initCharts();
         }
         
@@ -1714,11 +1747,17 @@ function dashboard(opts) {
         latencyCanvas = document.getElementById("latencyChart");
         sfRunningCanvas = document.getElementById("sfRunningChart");
         opsSecCanvas = document.getElementById("opsSecChart");
+        resourcesCpuCanvas = document.getElementById("resourcesCpuSparkline");
+        resourcesMemCanvas = document.getElementById("resourcesMemSparkline");
+        resourcesHistoryCanvas = document.getElementById("resourcesHistoryChart");
         const throughputChart2 = throughputCanvas && (throughputCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(throughputCanvas) : null));
         const concurrencyChart2 = concurrencyCanvas && (concurrencyCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(concurrencyCanvas) : null));
         const latencyChart2 = latencyCanvas && (latencyCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(latencyCanvas) : null));
         const sfRunningChart2 = sfRunningCanvas && (sfRunningCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(sfRunningCanvas) : null));
         const opsSecChart2 = opsSecCanvas && (opsSecCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(opsSecCanvas) : null));
+        const resourcesCpuChart2 = resourcesCpuCanvas && (resourcesCpuCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesCpuCanvas) : null));
+        const resourcesMemChart2 = resourcesMemCanvas && (resourcesMemCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesMemCanvas) : null));
+        const resourcesHistoryChart2 = resourcesHistoryCanvas && (resourcesHistoryCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesHistoryCanvas) : null));
         
         // Clear existing data
         if (throughputChart2) {
@@ -1752,11 +1791,26 @@ function dashboard(opts) {
             ds.data = [];
           });
         }
+        if (resourcesCpuChart2) {
+          resourcesCpuChart2.data.labels = [];
+          resourcesCpuChart2.data.datasets[0].data = [];
+        }
+        if (resourcesMemChart2) {
+          resourcesMemChart2.data.labels = [];
+          resourcesMemChart2.data.datasets[0].data = [];
+        }
+        if (resourcesHistoryChart2) {
+          resourcesHistoryChart2.data.labels = [];
+          resourcesHistoryChart2.data.datasets.forEach((ds) => {
+            ds.data = [];
+          });
+        }
 
         const tableType = (this.templateInfo?.table_type || "").toLowerCase();
         const isPostgres = ["postgres", "snowflake_postgres"].includes(tableType);
         
         // Populate with historical data
+        let resourcesSeen = false;
         for (const snapshot of data.snapshots) {
           // Use elapsed_seconds for labels to avoid browser-specific parsing issues
           // with microsecond timestamps (e.g., "2026-01-08T18:24:28.734695").
@@ -1856,6 +1910,38 @@ function dashboard(opts) {
             opsSecChart2.data.datasets[5].data.push(insOps);
             opsSecChart2.data.datasets[6].data.push(updOps);
           }
+
+          const cpu = Number(
+            snapshot.resources_host_cpu_percent ?? snapshot.resources_cpu_percent,
+          );
+          const mem = Number(
+            snapshot.resources_host_memory_mb ?? snapshot.resources_memory_mb,
+          );
+          const hostTotal = Number(snapshot.resources_host_memory_total_mb);
+          if (Number.isFinite(cpu) || Number.isFinite(mem)) {
+            resourcesSeen = true;
+          }
+          if (resourcesCpuChart2) {
+            resourcesCpuChart2.data.labels.push(ts);
+            resourcesCpuChart2.data.datasets[0].data.push(
+              Number.isFinite(cpu) ? cpu : 0,
+            );
+          }
+          if (resourcesMemChart2) {
+            resourcesMemChart2.data.labels.push(ts);
+            resourcesMemChart2.data.datasets[0].data.push(
+              Number.isFinite(mem) ? mem : 0,
+            );
+          }
+          if (resourcesHistoryChart2) {
+            resourcesHistoryChart2.data.labels.push(ts);
+            resourcesHistoryChart2.data.datasets[0].data.push(
+              Number.isFinite(cpu) ? cpu : 0,
+            );
+            resourcesHistoryChart2.data.datasets[1].data.push(
+              Number.isFinite(mem) ? mem : 0,
+            );
+          }
         }
         
         // Update charts
@@ -1869,6 +1955,60 @@ function dashboard(opts) {
         if (opsSecChart2) {
           this.applyOpsSecBreakdownToChart({ skipUpdate: true });
           opsSecChart2.update();
+        }
+        if (resourcesCpuChart2) resourcesCpuChart2.update();
+        if (resourcesMemChart2) resourcesMemChart2.update();
+        if (resourcesHistoryChart2) resourcesHistoryChart2.update();
+
+        const lastSnapshot =
+          data.snapshots && data.snapshots.length
+            ? data.snapshots[data.snapshots.length - 1]
+            : null;
+        if (lastSnapshot) {
+          const hostCpu = Number(lastSnapshot.resources_host_cpu_percent);
+          const cpu = Number(
+            Number.isFinite(hostCpu)
+              ? hostCpu
+              : lastSnapshot.resources_cpu_percent,
+          );
+          const hostMem = Number(lastSnapshot.resources_host_memory_mb);
+          const mem = Number(
+            Number.isFinite(hostMem)
+              ? hostMem
+              : lastSnapshot.resources_memory_mb,
+          );
+          const hostTotal = Number(lastSnapshot.resources_host_memory_total_mb);
+          const hostAvail = Number(
+            lastSnapshot.resources_host_memory_available_mb,
+          );
+          const hostPct = Number(lastSnapshot.resources_host_memory_percent);
+          const hostCores = Number(lastSnapshot.resources_host_cpu_cores);
+          const cgroupCpu = Number(lastSnapshot.resources_cgroup_cpu_percent);
+          const cgroupCores = Number(lastSnapshot.resources_cgroup_cpu_quota_cores);
+          const cgroupMem = Number(lastSnapshot.resources_cgroup_memory_mb);
+          const cgroupMemLimit = Number(
+            lastSnapshot.resources_cgroup_memory_limit_mb,
+          );
+          const cgroupMemPct = Number(
+            lastSnapshot.resources_cgroup_memory_percent,
+          );
+          this.metrics.resources_available =
+            resourcesSeen || Number.isFinite(cpu) || Number.isFinite(mem);
+          if (Number.isFinite(cpu)) this.metrics.cpu_percent = cpu;
+          if (Number.isFinite(mem)) this.metrics.memory_mb = mem;
+          if (Number.isFinite(hostCpu)) this.metrics.host_cpu_percent = hostCpu;
+          if (Number.isFinite(hostMem)) this.metrics.host_memory_mb = hostMem;
+          if (Number.isFinite(hostTotal)) this.metrics.host_memory_total_mb = hostTotal;
+          if (Number.isFinite(hostAvail)) this.metrics.host_memory_available_mb = hostAvail;
+          if (Number.isFinite(hostPct)) this.metrics.host_memory_percent = hostPct;
+          if (Number.isFinite(hostCores)) this.metrics.host_cpu_cores = hostCores;
+          if (Number.isFinite(cgroupCpu)) this.metrics.cgroup_cpu_percent = cgroupCpu;
+          if (Number.isFinite(cgroupCores)) this.metrics.cgroup_cpu_quota_cores = cgroupCores;
+          if (Number.isFinite(cgroupMem)) this.metrics.cgroup_memory_mb = cgroupMem;
+          if (Number.isFinite(cgroupMemLimit)) this.metrics.cgroup_memory_limit_mb = cgroupMemLimit;
+          if (Number.isFinite(cgroupMemPct)) this.metrics.cgroup_memory_percent = cgroupMemPct;
+        } else {
+          this.metrics.resources_available = resourcesSeen;
         }
 
         if (this.debug) {
@@ -1909,6 +2049,7 @@ function dashboard(opts) {
       };
 
       const formatCompact = (v) => this.formatCompact(v);
+      const formatPctValue = (v) => this.formatPctValue(v);
 
       // Allow callers (e.g. after templateInfo loads) to rebuild ONLY the concurrency chart
       // so we can correct legends/datasets for Postgres without resetting other charts.
@@ -2156,6 +2297,175 @@ function dashboard(opts) {
                   callbacks: {
                     label: (ctx) =>
                       `${ctx.dataset.label}: ${formatCompact(ctx.parsed.y)}`,
+                  },
+                },
+              },
+            },
+          });
+        }
+      }
+
+      const resourcesCpuCanvas = document.getElementById("resourcesCpuSparkline");
+      const resourcesMemCanvas = document.getElementById("resourcesMemSparkline");
+      const resourcesHistoryCanvas = document.getElementById("resourcesHistoryChart");
+      if (!onlyWarehouse) {
+        if (resourcesCpuCanvas && window.Chart && Chart.getChart) {
+          safeDestroy(Chart.getChart(resourcesCpuCanvas));
+        }
+        if (resourcesMemCanvas && window.Chart && Chart.getChart) {
+          safeDestroy(Chart.getChart(resourcesMemCanvas));
+        }
+        if (resourcesHistoryCanvas && window.Chart && Chart.getChart) {
+          safeDestroy(Chart.getChart(resourcesHistoryCanvas));
+        }
+
+        const cpuCtx =
+          resourcesCpuCanvas && resourcesCpuCanvas.getContext
+            ? resourcesCpuCanvas.getContext("2d")
+            : null;
+        if (cpuCtx) {
+          resourcesCpuCanvas.__chart = new Chart(cpuCtx, {
+            type: "line",
+            data: {
+              labels: [],
+              datasets: [
+                {
+                  label: "CPU",
+                  data: [],
+                  borderColor: "rgb(59, 130, 246)",
+                  backgroundColor: "rgba(59, 130, 246, 0.1)",
+                  tension: 0.35,
+                  fill: true,
+                  pointRadius: 0,
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: { duration: 0 },
+              interaction: { mode: "index", intersect: false },
+              scales: {
+                x: { display: false },
+                y: { display: false, beginAtZero: true },
+              },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  callbacks: {
+                    label: (ctx) =>
+                      `${ctx.dataset.label}: ${formatPctValue(ctx.parsed.y, 1)}`,
+                  },
+                },
+              },
+            },
+          });
+        }
+
+        const memCtx =
+          resourcesMemCanvas && resourcesMemCanvas.getContext
+            ? resourcesMemCanvas.getContext("2d")
+            : null;
+        if (memCtx) {
+          resourcesMemCanvas.__chart = new Chart(memCtx, {
+            type: "line",
+            data: {
+              labels: [],
+              datasets: [
+                {
+                  label: "Memory (MB)",
+                  data: [],
+                  borderColor: "rgb(124, 58, 237)",
+                  backgroundColor: "rgba(124, 58, 237, 0.1)",
+                  tension: 0.35,
+                  fill: true,
+                  pointRadius: 0,
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: { duration: 0 },
+              interaction: { mode: "index", intersect: false },
+              scales: {
+                x: { display: false },
+                y: { display: false, beginAtZero: true },
+              },
+              plugins: {
+                legend: { display: false },
+                tooltip: {
+                  callbacks: {
+                    label: (ctx) =>
+                      `${ctx.dataset.label}: ${formatCompact(ctx.parsed.y)} MB`,
+                  },
+                },
+              },
+            },
+          });
+        }
+
+        const resourcesHistoryCtx =
+          resourcesHistoryCanvas && resourcesHistoryCanvas.getContext
+            ? resourcesHistoryCanvas.getContext("2d")
+            : null;
+        if (resourcesHistoryCtx) {
+          resourcesHistoryCanvas.__chart = new Chart(resourcesHistoryCtx, {
+            type: "line",
+            data: {
+              labels: [],
+              datasets: [
+                {
+                  label: "CPU (%)",
+                  data: [],
+                  yAxisID: "yCpu",
+                  borderColor: "rgb(59, 130, 246)",
+                  backgroundColor: "transparent",
+                  tension: 0.35,
+                },
+                {
+                  label: "Memory (MB)",
+                  data: [],
+                  yAxisID: "yMem",
+                  borderColor: "rgb(124, 58, 237)",
+                  backgroundColor: "transparent",
+                  tension: 0.35,
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: { duration: 0 },
+              interaction: { mode: "index", intersect: false },
+              scales: {
+                yCpu: {
+                  position: "left",
+                  beginAtZero: true,
+                  ticks: {
+                    callback: (value) => formatPctValue(value, 0),
+                  },
+                  title: { display: true, text: "CPU (%)" },
+                },
+                yMem: {
+                  position: "right",
+                  beginAtZero: true,
+                  grid: { drawOnChartArea: false },
+                  ticks: {
+                    callback: (value) => `${formatCompact(value)} MB`,
+                  },
+                  title: { display: true, text: "Memory (MB)" },
+                },
+              },
+              plugins: {
+                tooltip: {
+                  callbacks: {
+                    label: (ctx) => {
+                      if (ctx.dataset.yAxisID === "yCpu") {
+                        return `${ctx.dataset.label}: ${formatPctValue(ctx.parsed.y, 1)}`;
+                      }
+                      return `${ctx.dataset.label}: ${formatCompact(ctx.parsed.y)} MB`;
+                    },
                   },
                 },
               },
@@ -2900,13 +3210,21 @@ function dashboard(opts) {
           concurrencyCanvas && (concurrencyCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(concurrencyCanvas) : null));
         const sfRunningChart =
           sfRunningCanvas && (sfRunningCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(sfRunningCanvas) : null));
+        const resourcesCpuCanvas = document.getElementById("resourcesCpuSparkline");
+        const resourcesMemCanvas = document.getElementById("resourcesMemSparkline");
+        const resourcesCpuChart =
+          resourcesCpuCanvas && (resourcesCpuCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesCpuCanvas) : null));
+        const resourcesMemChart =
+          resourcesMemCanvas && (resourcesMemCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(resourcesMemCanvas) : null));
 
         // If charts weren't available at init time (HTMX swaps), re-init on first payload.
         if (
           !throughputChart ||
           !latencyChart ||
           (concurrencyCanvas && !concurrencyChart) ||
-          (sfRunningCanvas && !sfRunningChart)
+          (sfRunningCanvas && !sfRunningChart) ||
+          (resourcesCpuCanvas && !resourcesCpuChart) ||
+          (resourcesMemCanvas && !resourcesMemChart)
         ) {
           this.initCharts();
         }
@@ -3070,6 +3388,40 @@ function dashboard(opts) {
             this.metrics.app_read_ops_sec = appOps.read_ops_sec || 0;
             this.metrics.app_write_ops_sec = appOps.write_ops_sec || 0;
           }
+          const resources = custom.resources;
+          if (resources && typeof resources === "object") {
+            this.metrics.resources_available = true;
+            this.metrics.cpu_percent =
+              resources.process_cpu_percent ?? resources.cpu_percent ?? 0;
+            this.metrics.memory_mb =
+              resources.process_memory_mb ?? resources.memory_mb ?? 0;
+            this.metrics.host_cpu_percent =
+              resources.host_cpu_percent ?? this.metrics.host_cpu_percent;
+            this.metrics.host_cpu_cores =
+              resources.host_cpu_cores ?? this.metrics.host_cpu_cores;
+            this.metrics.host_memory_mb =
+              resources.host_memory_mb ?? this.metrics.host_memory_mb;
+            this.metrics.host_memory_total_mb =
+              resources.host_memory_total_mb ?? this.metrics.host_memory_total_mb;
+            this.metrics.host_memory_available_mb =
+              resources.host_memory_available_mb ??
+              this.metrics.host_memory_available_mb;
+            this.metrics.host_memory_percent =
+              resources.host_memory_percent ?? this.metrics.host_memory_percent;
+            this.metrics.cgroup_cpu_percent =
+              resources.cgroup_cpu_percent ?? this.metrics.cgroup_cpu_percent;
+            this.metrics.cgroup_cpu_quota_cores =
+              resources.cgroup_cpu_quota_cores ??
+              this.metrics.cgroup_cpu_quota_cores;
+            this.metrics.cgroup_memory_mb =
+              resources.cgroup_memory_mb ?? this.metrics.cgroup_memory_mb;
+            this.metrics.cgroup_memory_limit_mb =
+              resources.cgroup_memory_limit_mb ??
+              this.metrics.cgroup_memory_limit_mb;
+            this.metrics.cgroup_memory_percent =
+              resources.cgroup_memory_percent ??
+              this.metrics.cgroup_memory_percent;
+          }
         }
 
         // Keep the FIND_MAX countdown ticking smoothly and stop it on terminal states.
@@ -3136,6 +3488,45 @@ function dashboard(opts) {
               concurrencyChart2.data.datasets[2].data.push(sfQueued);
             }
             concurrencyChart2.update();
+          }
+        }
+
+        const cpuSparkCanvas = document.getElementById("resourcesCpuSparkline");
+        const memSparkCanvas = document.getElementById("resourcesMemSparkline");
+        const cpuSparkChart =
+          cpuSparkCanvas &&
+          (cpuSparkCanvas.__chart ||
+            (window.Chart && Chart.getChart ? Chart.getChart(cpuSparkCanvas) : null));
+        const memSparkChart =
+          memSparkCanvas &&
+          (memSparkCanvas.__chart ||
+            (window.Chart && Chart.getChart ? Chart.getChart(memSparkCanvas) : null));
+        const cpuValue = Number.isFinite(this.metrics.host_cpu_percent)
+          ? this.metrics.host_cpu_percent
+          : this.metrics.cpu_percent;
+        const memValue = Number.isFinite(this.metrics.host_memory_mb)
+          ? this.metrics.host_memory_mb
+          : this.metrics.memory_mb;
+        if (cpuSparkChart) {
+          if (cpuSparkChart.data.labels.length > 30) {
+            cpuSparkChart.data.labels.shift();
+            cpuSparkChart.data.datasets[0].data.shift();
+          }
+          if (allowCharts) {
+            cpuSparkChart.data.labels.push(ts);
+            cpuSparkChart.data.datasets[0].data.push(cpuValue);
+            cpuSparkChart.update();
+          }
+        }
+        if (memSparkChart) {
+          if (memSparkChart.data.labels.length > 30) {
+            memSparkChart.data.labels.shift();
+            memSparkChart.data.datasets[0].data.shift();
+          }
+          if (allowCharts) {
+            memSparkChart.data.labels.push(ts);
+            memSparkChart.data.datasets[0].data.push(memValue);
+            memSparkChart.update();
           }
         }
 
@@ -3450,6 +3841,10 @@ function dashboard(opts) {
       this.stepHistoryExpanded = !this.stepHistoryExpanded;
     },
 
+    toggleResourcesHistory() {
+      this.resourcesHistoryExpanded = !this.resourcesHistoryExpanded;
+    },
+
     hasStepHistory() {
       const fmr = this.templateInfo?.find_max_result;
       if (!fmr || typeof fmr !== "object") return false;
@@ -3479,6 +3874,15 @@ function dashboard(opts) {
     stepP99DiffPct(step) {
       const baseline = this.findMaxBaselineP99Ms();
       const current = Number(step?.p99_latency_ms);
+      if (!baseline || baseline <= 0 || !Number.isFinite(current) || current <= 0) {
+        return null;
+      }
+      return ((current - baseline) / baseline) * 100.0;
+    },
+
+    stepP95DiffPct(step) {
+      const baseline = this.findMaxBaselineP95Ms();
+      const current = Number(step?.p95_latency_ms);
       if (!baseline || baseline <= 0 || !Number.isFinite(current) || current <= 0) {
         return null;
       }

@@ -189,7 +189,7 @@ class TestScenario(BaseModel):
 
     # Concurrency settings
     concurrent_connections: int = Field(
-        10, ge=1, le=1000, description="Number of concurrent connections"
+        10, ge=1, description="Number of concurrent connections"
     )
     # Load mode
     load_mode: str = Field(
@@ -207,7 +207,19 @@ class TestScenario(BaseModel):
         ),
     )
     min_concurrency: int = Field(
-        1, ge=1, le=1000, description="Starting/min worker count when load_mode=QPS"
+        1, ge=1, description="Starting/min worker count when load_mode=QPS"
+    )
+
+    # Worker group sharding (multi-process / multi-node)
+    worker_group_id: int = Field(
+        0,
+        ge=0,
+        description="Worker group index for sharding value pools across processes/nodes",
+    )
+    worker_group_count: int = Field(
+        1,
+        ge=1,
+        description="Total worker groups for value pool sharding",
     )
 
     # FIND_MAX_CONCURRENCY mode settings

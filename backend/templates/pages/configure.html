@@ -456,8 +456,8 @@
 
             <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'CONCURRENCY'">
                 <label class="form-label">Workers</label>
-                <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" max="1000">
-                <small class="form-text">Fixed number of worker tasks (1-1000)</small>
+                <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1">
+                <small class="form-text">Fixed number of worker tasks (>= 1)</small>
             </div>
 
             <div class="mt-2" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
@@ -468,13 +468,13 @@
                     <div class="mt-2">
                         <div class="form-group">
                             <label class="form-label">Min Workers</label>
-                            <input type="number" class="form-input" x-model.number="config.min_concurrency" min="1" max="1000" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
+                            <input type="number" class="form-input" x-model.number="config.min_concurrency" min="1" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
                             <small class="form-text">Starting worker count for target-throughput mode (the controller will scale up/down)</small>
                         </div>
 
                         <div class="form-group">
                             <label class="form-label">Max Workers</label>
-                            <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="-1" max="1000" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
+                            <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="-1" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
                             <small class="form-text">
                                 Upper bound for dynamic worker scaling. Use <code>-1</code> for no user cap (still bounded by engine limits).
                             </small>
@@ -521,7 +521,7 @@
 
                 <div class="form-group">
                     <label class="form-label">Max Workers (ceiling)</label>
-                    <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" max="1000" step="1">
+                    <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" step="1">
                     <small class="form-text">Maximum concurrency to test (test stops when reached even if still stable)</small>
                 </div>
 

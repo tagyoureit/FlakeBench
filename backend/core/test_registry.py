@@ -552,12 +552,14 @@ class TestRegistry:
             concurrency = int(scenario.concurrent_connections)
             max_workers = max(1, concurrency)
             max_allowed = int(settings.SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS)
-            if max_workers > max_allowed:
-                raise ValueError(
-                    f"Requested concurrency ({concurrency}) exceeds this node's configured "
-                    f"SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS ({max_allowed}). "
-                    "For thousands of simulated users, run multiple benchmark workers (multi-process/multi-node) "
-                    "or increase SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS."
+            if max_allowed > 0 and max_workers > max_allowed:
+                logger.warning(
+                    "Requested concurrency (%d) exceeds configured "
+                    "SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS (%d). "
+                    "This is a safety default; proceeding may exhaust OS threads or memory. "
+                    "Consider multi-process/multi-node scaling or increasing the setting.",
+                    int(concurrency),
+                    int(max_allowed),
                 )
 
             # Determine initial pool size based on load mode

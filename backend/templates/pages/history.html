@@ -408,7 +408,7 @@
                                         :class="(() => {
                                             const phase = test.phase ? test.phase.toUpperCase() : null;
                                             const status = test.status ? test.status.toUpperCase() : '';
-                                            if (phase && status === 'RUNNING') {
+                                            if (phase && (status === 'RUNNING' || phase === 'PROCESSING')) {
                                                 return {
                                                     'status-preparing': phase === 'PREPARING',
                                                     'status-warmup': phase === 'WARMUP' || phase === 'WARM-UP',
@@ -424,7 +424,7 @@
                                                 'status-cancelled': status === 'CANCELLED'
                                             };
                                         })()"
-                                        x-text="test.phase && test.status === 'RUNNING' ? test.phase : test.status">
+                                        x-text="test.phase && (test.status === 'RUNNING' || test.phase === 'PROCESSING') ? test.phase : test.status">
                                     </span>
                                     <template x-if="test.status && test.status.toUpperCase() === 'FAILED' && test.failure_reason">
                                         <span 

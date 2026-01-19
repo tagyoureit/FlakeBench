@@ -379,8 +379,8 @@ open dist/Unistore\ Benchmark.app
 - Reduce concurrency level
 - Check for long-running queries
 - Verify adequate connection pool size / executor capacity:
-  - `SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS` must be >= requested concurrency
-    per node (to avoid app-side queueing)
+  - `SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS` is a default safety cap for
+    per-node benchmark threads (adjust as needed for your hardware)
 
 **Need to simulate thousands of users:**
 - See `docs/scaling.md` for the current concurrency model and the recommended
