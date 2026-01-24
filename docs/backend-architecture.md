@@ -1,6 +1,6 @@
 # Backend Architecture (Current)
 
-Last updated: 2026-01-18
+Last updated: 2026-01-21
 
 ## Entry Point
 
@@ -26,6 +26,13 @@ Last updated: 2026-01-18
     - `QPS` (auto-adjust workers to hit app-side QPS target)
     - `FIND_MAX_CONCURRENCY` (step-load to find max sustainable workers)
   - Captures per-query execution records for persistence.
+
+### Autoscale (Multi-Node)
+
+- `backend/core/autoscale.py`
+  - UI-driven scale-out orchestration for multi-node runs.
+  - Spawns headless workers using `uv run python scripts/run_worker.py ...`.
+  - Uses host-level CPU/memory guardrails (cgroup-aware when available).
 
 ### Table Managers
 

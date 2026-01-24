@@ -1,5 +1,7 @@
 # Scaling & Concurrency Model
 
+Last updated: 2026-01-21
+
 This document explains how Unistore Benchmark generates load, why
 connection/thread settings matter, and what to do when you want to simulate
 thousands of end users without client-side queueing.
@@ -10,25 +12,25 @@ thousands of end users without client-side queueing.
   synchronous/blocking.
 - The FastAPI app is async, so all Snowflake calls are run via asyncio thread
   executors (see backend/connectors/snowflake_pool.py).
-- Each "concurrent connection" in a scenario maps to a worker that executes
+- Each "concurrent connection" in a scenario maps to a connection slot that executes
   operations; to avoid client-side queueing, the benchmark must have enough
   capacity to run those blocking calls without waiting on a shared thread pool.
 
-## What changed (2026-01)
+## Implementation details that matter
 
-- The Snowflake pool now prevents a high-concurrency connection stampede
-  (many workers simultaneously creating new connections).
-- Each Snowflake pool can use its own thread executor:
-  - Results pool (persistence / UI reads) uses
-    SNOWFLAKE_RESULTS_EXECUTOR_MAX_WORKERS
-  - Benchmark per-test pool uses a dedicated executor sized to the scenario's
-    requested concurrency (with SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS acting
-    as a default safety cap)
-- The per-test Snowflake pool is sized so max connections == requested
-  concurrency (no application-side queueing due to an undersized pool).
-- Live + history dashboards now include resource telemetry for both:
+- High-concurrency startup must avoid a connection stampede (many connection
+  slots all calling `connect()` at once). The Snowflake pool caps parallel
+  connection creates so startup doesn’t overwhelm the client.
+- Results/persistence work is isolated from benchmark work via separate thread
+  executors:
+  - Results pool: `SNOWFLAKE_RESULTS_EXECUTOR_MAX_WORKERS`
+  - Per-test benchmark pool: executor sized to requested concurrency (bounded by
+    `SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS` as a safety cap)
+- The per-test Snowflake pool targets max connections == requested concurrency
+  to avoid application-side queueing caused by an undersized pool.
+- Live + history dashboards include resource telemetry:
   - Per-process CPU/memory (benchmark worker process)
-  - Host CPU/memory, with cgroup-aware limits when running in containers
+  - Host CPU/memory, cgroup-aware when running in containers
 
 ## Key settings
 
@@ -46,12 +48,12 @@ thousands of end users without client-side queueing.
 - SNOWFLAKE_POOL_MAX_PARALLEL_CREATES: caps concurrent connect() calls so
   startup doesn't overwhelm the client
 
-## Why a single node won’t reliably simulate thousands (with the current connector)
+## Why a single worker won’t reliably simulate thousands (with the current connector)
 
 Because the Snowflake Python connector is synchronous, high concurrency requires
 either:
 - a very large thread pool (eventually hits OS/thread/memory limits), or
-- multiple processes/nodes, each with a bounded thread pool, so the overall
+- multiple processes/workers, each with a bounded thread pool, so the overall
   system can scale horizontally.
 
 If you request a scenario concurrency higher than
@@ -63,24 +65,35 @@ proceed. You are responsible for ensuring OS/thread/memory headroom.
 ### Target model
 
 - Keep the UI / controller (FastAPI app) responsive and stable
-- Run one or more benchmark worker nodes that generate load against Snowflake
+- Run one or more benchmark workers that generate load against Snowflake
 - Aggregate metrics back to the results tables and/or stream summary metrics to
   the UI
 
+### QPS autoscale across workers
+
+- In QPS mode, `concurrent_connections` is treated as the per-worker max connections
+  (worker ceiling). Autoscale adds workers only after each worker reaches that ceiling
+  and total QPS is still below target.
+- Total target QPS is split evenly across workers:
+  `target_qps_per_worker = target_qps_total / worker_count`.
+- If you don’t know the worker ceiling, run a single-worker
+  `FIND_MAX_CONCURRENCY` test to measure it and then set that value as the QPS
+  max workers in the template.
+
 ### Practical sizing guideline
 
-- Pick a per-node concurrency that is reliable on your hardware (commonly a few
+- Pick a per-worker concurrency that is reliable on your hardware (commonly a few
   hundred).
-- Run N nodes to reach the desired total simulated concurrency.
+- Run N workers to reach the desired total simulated concurrency.
 
 Example:
 - Desired: 2,000 simulated users
-- Run: 8 worker nodes × 250 concurrency each
+- Run: 8 workers × 250 concurrency each
 
 This avoids client-side queueing while still allowing Snowflake/warehouse-side
 queueing (which is what you want to observe when the warehouse is undersized).
 
-## Real-time capacity testing (per node)
+## Real-time capacity testing (per worker)
 
 To find the true ceiling of a given machine:
 
@@ -90,20 +103,20 @@ To find the true ceiling of a given machine:
    - Process-level CPU/memory for the benchmark worker
    - Host-level CPU/memory (cgroup-aware when container limits apply)
 3. Record the best sustainable concurrency for that machine, and use it as your
-   per-node baseline.
+   per-worker baseline.
 
 This keeps the concurrency target resource-driven, not tied to arbitrary limits.
 
 ### Recommended staging order
 
-1. Find the single-node ceiling using FIND_MAX_CONCURRENCY and host/cgroup
+1. Find the single-worker ceiling using FIND_MAX_CONCURRENCY and host/cgroup
    metrics.
-2. Use that per-node ceiling to size a multi-node run.
+2. Use that per-worker ceiling to size a multi-worker run.
 3. Implement orchestration (local first, then SPCS/K8s).
 
 ## Value pool sharding across worker groups
 
-When scaling across multiple processes or nodes, workers must avoid overlapping
+When scaling across multiple processes or workers, workers must avoid overlapping
 value pools to prevent result-cache artifacts and unrealistic hot-spotting.
 
 We support deterministic sharding using two scenario fields:
@@ -139,70 +152,41 @@ The dashboard surfaces additional live controller metrics:
 - Conclusion reason: plain-text reason for why the controller stopped/completed
   (persisted to results)
 
-## Next steps (if you want the app to orchestrate multi-node runs)
+## Multi-worker orchestration (current)
 
-If you want the UI to start/stop multiple worker nodes and aggregate their
-metrics in one dashboard run, we should add:
-- a worker process mode (no web UI) that accepts a test payload and runs it
-- an orchestration layer (local multi-process or remote multi-node)
-- metrics aggregation (sum ops, merge latency distributions)
+Multi-worker runs are supported in two ways:
 
-## Multi-node orchestration plan (technical)
+### UI-driven autoscale (scale-out only)
 
-### Decisions
+- Orchestration loop: `backend/core/autoscale.py`
+- Behavior:
+  - Prepares a parent run first.
+  - Spawns worker processes using `uv run python scripts/run_worker.py ...`.
+  - Uses host-level guardrails (CPU/memory) based on telemetry stored in
+    `NODE_METRICS_SNAPSHOTS` (cgroup-aware when available).
+  - Writes autoscale state into `TEST_RESULTS.CUSTOM_METRICS.autoscale_state`.
 
-- Orchestrator: separate CLI tool (preferred for local)
-- Aggregated results: stored in existing TEST_RESULTS tables
-- Per-node metrics: stored in a new table
-- UI: include per-node drilldown (tab or accordion)
+### Headless local orchestration (CLI)
 
-### Phase 0: Baseline & constraints
+- Orchestrator: `scripts/run_multi_node.py` (spawns N local workers)
+- Worker: `scripts/run_worker.py` (runs one headless worker from a template id)
+- Parent aggregation:
+  - `backend/core/results_store.py:update_parent_run_aggregate`
+  - Manual trigger: `scripts/refresh_parent_aggregate.py`
 
-- Find per-node ceilings using FIND_MAX_CONCURRENCY with host + cgroup metrics.
-- Establish target total concurrency and per-node baseline.
+## SLO-safe aggregation guidance (multi-worker)
 
-### Phase 1: Worker process mode (headless)
+- Do not use weighted averages for SLO decisions; they can mask slow workers or tails.
+- For latency SLOs, prefer:
+  - merged distributions (global p95/p99 from combined samples or histograms), or
+  - worst-worker p95/p99 (guardrail for heterogeneous workers).
 
-- Add a worker entrypoint that runs a test scenario without UI.
-- Inputs: scenario payload (same as existing API) + worker_group_id +
-  worker_group_count + optional parent_run_id.
-- Outputs: per-second snapshots + final summary persisted to results store.
+## Remote orchestration (design considerations)
 
-### Phase 2: Orchestration (local first)
+If/when running workers remotely (K8s/SPCS/etc), keep the invariants:
 
-- CLI orchestrator launches N worker processes (worker_group_id = 0..N-1).
-- Distributes the same scenario payload (deterministic sharding already in place).
-- Tracks lifecycle and aggregates status/results.
-
-### Phase 3: Metrics aggregation
-
-- Aggregate across worker groups:
-  - Sum rates (ops/sec), counts, errors
-  - Merge latency distributions (prefer histograms or sample sets)
-  - Aggregate resource metrics as separate views (per-node + total)
-- Persist aggregates in existing TEST_RESULTS tables (parent run id).
-- Persist per-node snapshots in a new table keyed by parent_run_id + worker_group_id.
-
-### Phase 4: API + UI integration
-
-- API endpoints:
-  - Create multi-node run
-  - Fetch aggregate metrics (live + history)
-  - Fetch per-node metrics (drilldown)
-- UI:
-  - Show aggregated metrics by default
-  - Add per-node drilldown (tab/accordion)
-
-### Phase 5: K8s / SPCS readiness
-
-- Containerize worker mode if needed.
-- Define K8s / SPCS spec for N replicas with worker_group_id/count.
-- Use cgroup-aware resource metrics for capacity planning.
-
-### Phase 6: Validation & runbooks
-
-- Add smoke flow for multi-node mode.
-- Document runbooks:
-  - Single-node max
-  - Multi-node orchestration (local)
-  - SPCS deployment
+- Each worker must have a stable `worker_group_id` and `worker_group_count` for
+  deterministic sharding.
+- Prefer cgroup-aware host telemetry for capacity/guardrail decisions.
+- Preserve the “no client-side queueing” goal: per-worker benchmark executors
+  should be sized to the per-worker concurrency target.

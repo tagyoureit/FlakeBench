@@ -20,6 +20,9 @@ There are no migration scripts in this repository.
 - `METRICS_SNAPSHOTS`
   - Time-series metrics collected during tests.
 
+- `NODE_METRICS_SNAPSHOTS`
+  - Time-series metrics per worker group (multi-node parent runs).
+
 - `QUERY_EXECUTIONS`
   - Per-query execution records and optional enrichment fields.
 

@@ -82,24 +82,12 @@
         
         document.body.addEventListener('htmx:afterSwap', function(event) {
             updateActiveNavbarTab();
-            // Initialize Alpine components in swapped content (avoid double-init on initial load).
-            if (window.Alpine && event.detail && event.detail.target) {
-                setTimeout(() => {
-                    window.Alpine.initTree(event.detail.target);
-                }, 0);
-            }
+            // Alpine's MutationObserver automatically initializes new x-data elements
+            // No manual initTree needed - this was causing double-initialization bugs
         });
         document.body.addEventListener('htmx:historyRestore', function(event) {
             updateActiveNavbarTab();
-            // Re-initialize Alpine components after history restore (back/forward navigation).
-            if (window.Alpine) {
-                const target = event.detail && event.detail.elt ? event.detail.elt : document.getElementById('main-content');
-                if (target) {
-                    setTimeout(() => {
-                        window.Alpine.initTree(target);
-                    }, 0);
-                }
-            }
+            // Alpine's MutationObserver handles re-initialization automatically
         });
         window.addEventListener('popstate', updateActiveNavbarTab);
     </script>

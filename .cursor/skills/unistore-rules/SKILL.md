@@ -1,6 +1,9 @@
 ---
 name: unistore-rules
-description: This is a new rule
+description: >-
+  Documents current Unistore Benchmark architecture and workflows. Use when
+  updating or verifying app behavior, autoscale flow, or metrics persistence.
+version: 1.1.1
 ---
 
 # Overview
@@ -14,6 +17,7 @@ Use these files as the source of truth before making changes:
 - `phase2-completion-report.md`: current UI implementation status
 - `phase3-completion-report.md`: current template/load pattern status
 - `Refined Metrics.md`: what is captured now vs post-run enrichment
+- `data-flow-and-lifecycle.md`: request/metrics flow and autoscale lifecycle
 
 Key constraints that must be respected:
 
@@ -23,3 +27,5 @@ Key constraints that must be respected:
   There are no migration scripts; do not add migration-style DDL.
 - Templates are stored in Snowflake (`UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`);
   YAML in `config/test_scenarios/` is reference only.
+- In QPS autoscale, `concurrent_connections` is the per-node max workers, and
+  total `target_qps` is split across nodes.

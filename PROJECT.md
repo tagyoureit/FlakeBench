@@ -1,0 +1,1 @@
+This project has very specific documentation about architecture, design patterns, etc.  Start with docs/SKILL.md and read the index to understand the relevant topics.  Then dive into each one as necessary.

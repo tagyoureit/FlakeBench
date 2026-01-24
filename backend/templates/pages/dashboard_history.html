@@ -10,10 +10,21 @@
 <div x-data="dashboard({ mode: 'history' })" data-test-id="{{ test_id or '' }}">
     <div class="dashboard-top-grid">
         <div class="card" x-show="templateInfo">
-            <div
-                class="card-title"
-                x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"
-            ></div>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+                <div
+                    class="card-title"
+                    x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"
+                ></div>
+                <a
+                    class="btn btn-sm btn-secondary"
+                    x-show="templateInfo && templateInfo.template_id"
+                    :href="templateInfo ? `/configure?template_id=${encodeURIComponent(templateInfo.template_id)}&mode=view` : '#'"
+                    target="_blank"
+                    rel="noopener"
+                >
+                    Go to template
+                </a>
+            </div>
             <div class="text-sm text-gray-600">
                 <div>
                     <strong>Template:</strong>
@@ -61,7 +72,11 @@
                 </div>
                 <div class="mt-1">
                     <strong>Status:</strong>
-                    <span x-text="phaseLabel() || (templateInfo ? (templateInfo.status || '') : '')"></span>
+                    <span
+                        class="status-badge"
+                        :class="phaseBadgeClass()"
+                        x-text="phaseLabel() || (templateInfo ? (templateInfo.status || '') : '')"
+                    ></span>
                 </div>
                 <div class="mt-1" x-show="templateInfo && templateInfo.query_tag">
                     <strong>Query Tag:</strong>
@@ -79,14 +94,24 @@
                 Read-only analysis dashboard. For realtime execution and controls, use the live dashboard.
             </div>
             <div style="margin-top: 0.75rem;">
-                <a 
-                    class="btn btn-primary" 
-                    :href="testId ? `/dashboard/${testId}` : '/dashboard'"
-                    :class="{ 'btn-disabled': !templateInfo || templateInfo.status !== 'RUNNING' }"
-                    :style="(!templateInfo || templateInfo.status !== 'RUNNING') ? 'pointer-events: none; opacity: 0.5;' : ''"
-                >
-                    Open Live Dashboard
-                </a>
+                <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                    <a 
+                        class="btn btn-primary" 
+                        :href="testId ? `/dashboard/${testId}` : '/dashboard'"
+                        :class="{ 'btn-disabled': !templateInfo || templateInfo.status !== 'RUNNING' }"
+                        :style="(!templateInfo || templateInfo.status !== 'RUNNING') ? 'pointer-events: none; opacity: 0.5;' : ''"
+                    >
+                        Open Live Dashboard
+                    </a>
+                    <button
+                        type="button"
+                        class="btn btn-secondary"
+                        @click="rerunTest(testId)"
+                        :disabled="!testId"
+                    >
+                        Re-run
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -117,6 +142,33 @@
                 <span x-show="enrichmentRetrying" class="ai-btn-spinner"></span>
                 <span x-text="enrichmentRetrying ? 'Retrying...' : 'Retry Enrichment'"></span>
             </button>
+        </div>
+    </div>
+
+    <!-- Enrichment Progress Alert (shows if enrichment is pending/in-progress) -->
+    <div
+        class="alert alert-info"
+        style="margin-bottom: 1rem;"
+        x-show="templateInfo && templateInfo.enrichment_status === 'PENDING' && enrichmentProgress"
+        x-cloak
+        x-init="$watch('templateInfo', () => { if (templateInfo?.enrichment_status === 'PENDING') startEnrichmentPolling(); })"
+    >
+        <div style="display: flex; align-items: center; gap: 1rem;">
+            <div class="ai-btn-spinner" style="width: 20px; height: 20px;"></div>
+            <div style="flex: 1;">
+                <strong>Post-processing in progress...</strong>
+                <template x-if="enrichmentProgress && enrichmentProgress.total_queries > 0">
+                    <span>
+                        (<span x-text="enrichmentProgress.enriched_queries.toLocaleString()"></span> / 
+                        <span x-text="enrichmentProgress.total_queries.toLocaleString()"></span> queries enriched, 
+                        <span x-text="enrichmentProgress.enrichment_ratio_pct"></span>%)
+                    </span>
+                </template>
+                <br>
+                <small style="color: var(--text-muted);">
+                    Fetching Snowflake timing details from QUERY_HISTORY. This may take several minutes for high-QPS tests.
+                </small>
+            </div>
         </div>
     </div>
 
@@ -218,7 +270,20 @@
     </div>
 
     <div class="card" x-show="hasStepHistory()">
-        <div class="card-title">Find Max (step-load) - Step History</div>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+            <div class="card-title">Find Max (step-load) - Step History</div>
+            <div x-show="hasMultiNodeStepHistory()" style="display: flex; align-items: center; gap: 0.5rem;">
+                <label style="font-size: 0.875rem; color: #6b7280;">View node:</label>
+                <select 
+                    x-model="selectedStepHistoryNode"
+                    style="padding: 0.25rem 0.5rem; border: 1px solid #d1d5db; border-radius: 0.375rem; font-size: 0.875rem;"
+                >
+                    <template x-for="opt in stepHistoryNodeOptions()" :key="opt.value">
+                        <option :value="opt.value" x-text="opt.label"></option>
+                    </template>
+                </select>
+            </div>
+        </div>
         <div style="color: #6b7280; margin-top: -0.25rem;">
             Step-by-step progression showing how worker count was scaled until degradation was detected.
         </div>
@@ -226,15 +291,15 @@
         <div style="margin-top: 1rem;">
             <div class="metrics-grid" style="margin-bottom: 1rem;">
                 <div class="metric-card">
-                    <div class="metric-label">Best Concurrency</div>
+                    <div class="metric-label" x-text="stepHistorySummary()?.is_aggregate ? 'Best Concurrency (per node)' : 'Best Concurrency'"></div>
                     <div class="metric-value" x-text="formatInt(stepHistorySummary()?.best_concurrency)"></div>
                 </div>
                 <div class="metric-card">
-                    <div class="metric-label">Best QPS</div>
+                    <div class="metric-label" x-text="stepHistorySummary()?.is_aggregate ? 'Total QPS (all nodes)' : 'Best QPS'"></div>
                     <div class="metric-value" x-text="formatMs(stepHistorySummary()?.best_qps)"></div>
                 </div>
                 <div class="metric-card">
-                    <div class="metric-label">Baseline P95</div>
+                    <div class="metric-label" x-text="stepHistorySummary()?.is_aggregate ? 'Max Baseline P95' : 'Baseline P95'"></div>
                     <div class="metric-value" x-text="formatMs(stepHistorySummary()?.baseline_p95_ms) + ' ms'"></div>
                 </div>
                 <div class="metric-card">
@@ -265,6 +330,8 @@
                         <tr>
                             <th class="text-right">Step</th>
                             <th class="text-right">Workers</th>
+                            <th class="text-right" x-show="stepHistorySummary()?.is_aggregate">Total Workers</th>
+                            <th class="text-right" x-show="stepHistorySummary()?.is_aggregate">Active Nodes</th>
                             <th class="text-right">QPS</th>
                             <th class="text-right">P95 (ms)</th>
                             <th class="text-right">P95% (Δ)</th>
@@ -277,10 +344,14 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <template x-for="step in stepHistory()" :key="step.step">
-                            <tr :style="step.stable === false && !step.is_backoff ? 'background: #fef2f2;' : (step.is_backoff ? 'background: #fffbeb;' : '')">
-                                <td class="text-right" x-text="step.step"></td>
+                        <template x-for="step in stepHistory()" :key="step.step ?? step.concurrency">
+                            <tr :style="step.stable === false && !step.is_backoff ? 'background: #fef2f2;' : (step.is_backoff ? 'background: #fffbeb;' : (step.active_nodes != null && step.active_nodes < step.total_nodes ? 'background: #fef3c7;' : ''))">
+                                <td class="text-right" x-text="step.step ?? '-'"></td>
                                 <td class="text-right" x-text="formatInt(step.concurrency)"></td>
+                                <td class="text-right" x-show="stepHistorySummary()?.is_aggregate" x-text="formatInt(step.total_concurrency)"></td>
+                                <td class="text-right" x-show="stepHistorySummary()?.is_aggregate">
+                                    <span :style="step.active_nodes < step.total_nodes ? 'color: #d97706;' : ''" x-text="step.active_nodes + '/' + step.total_nodes"></span>
+                                </td>
                                 <td class="text-right" x-text="formatMs(step.qps)"></td>
                                 <td class="text-right" x-text="formatMs(step.p95_latency_ms)"></td>
                                 <td class="text-right" x-text="formatSignedPct(stepP95DiffPct(step))"></td>
@@ -292,11 +363,11 @@
                                 </td>
                                 <td>
                                     <span 
-                                        :style="step.stable ? 'color: #059669;' : 'color: #dc2626;'"
-                                        x-text="step.is_backoff ? 'Backoff' : (step.stable ? 'Yes' : 'No')"
+                                        :style="step.stable ? 'color: #059669;' : (step.degraded === true ? 'color: #dc2626;' : 'color: #dc2626;')"
+                                        x-text="step.is_backoff ? 'Backoff' : (step.degraded === true ? 'Degraded' : (step.stable ? 'Yes' : (step.stable === false ? 'No' : '-')))"
                                     ></span>
                                 </td>
-                                <td style="color: #6b7280; font-size: 0.875rem;" x-text="step.stop_reason || '-'"></td>
+                                <td style="color: #6b7280; font-size: 0.875rem;" x-text="(step.degrade_reasons && step.degrade_reasons.length ? step.degrade_reasons.join(', ') : null) || step.stop_reason || '-'"></td>
                             </tr>
                         </template>
                     </tbody>
@@ -322,6 +393,42 @@
         </div>
         <div style="margin-top: 0.5rem; color: #6b7280;">
             Note: charts are based on end-to-end app timings collected during execution.
+        </div>
+    </div>
+
+    <div
+        class="card"
+        x-show="!['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())"
+    >
+        <div class="card-title">App Overhead (per-second)</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Network/client overhead derived from enriched queries: <code>APP_ELAPSED_MS - SF_TOTAL_ELAPSED_MS</code>.
+            Dashed lines show average latencies; the shaded area shows P50 overhead.
+        </div>
+
+        <div x-show="overheadTsError" class="alert alert-error" style="margin-top: 1rem;">
+            <strong>Failed to load overhead data.</strong>
+            <span x-text="overheadTsError"></span>
+        </div>
+
+        <div x-show="!overheadTsError && overheadTsLoading" style="margin-top: 1rem;">
+            {% include "components/loading_spinner.html" %}
+        </div>
+
+        <div
+            x-show="overheadTsLoaded && !overheadTsError && !overheadTsLoading && !overheadTsAvailable"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            No per-second overhead data available (requires enrichment from QUERY_HISTORY).
+        </div>
+
+        <div
+            x-show="overheadTsAvailable"
+            class="chart-container"
+            style="margin-top: 1rem;"
+        >
+            <canvas id="overheadChart"></canvas>
         </div>
     </div>
 
@@ -501,12 +608,12 @@
                             <td class="text-right" x-text="formatMs(clusterBreakdownSummary()?.avg_queued_overload_ms)"></td>
                             <td class="text-right" x-text="formatMs(clusterBreakdownSummary()?.avg_queued_provisioning_ms)"></td>
                             <td style="color: #6b7280;">
-                                <span x-text="`PL ${formatInt(clusterBreakdownSummary()?.total_point_lookups)} • RS ${formatInt(clusterBreakdownSummary()?.total_range_scans)} • INS ${formatInt(clusterBreakdownSummary()?.total_inserts)} • UPD ${formatInt(clusterBreakdownSummary()?.total_updates)}`"></span>
+                                <span x-text="`PL ${formatInt(clusterBreakdownSummary()?.total_point_lookups)} • RS ${formatInt(clusterBreakdownSummary()?.total_range_scans)} • INS ${formatInt(clusterBreakdownSummary()?.total_inserts)} • UPD ${formatInt(clusterBreakdownSummary()?.total_updates)}${clusterBreakdownSummary()?.unattributed_queries ? ` • UNK ${formatInt(clusterBreakdownSummary()?.unattributed_queries)}` : ''}`"></span>
                             </td>
                         </tr>
                         <template x-for="c in (templateInfo?.cluster_breakdown || [])" :key="c.cluster_number">
                             <tr x-show="clusterBreakdownExpanded">
-                                <td class="text-right" x-text="c.cluster_number"></td>
+                                <td class="text-right" x-text="clusterLabel(c)"></td>
                                 <td class="text-right" x-text="formatInt(c.query_count)"></td>
                                 <td class="text-right" x-text="formatMs(c.p50_exec_ms)"></td>
                                 <td class="text-right" x-text="formatMs(c.p95_exec_ms)"></td>
@@ -519,6 +626,9 @@
                         </template>
                     </tbody>
                 </table>
+            </div>
+            <div style="color: #6b7280; font-size: 0.875rem; margin-top: 0.5rem;">
+                Unattributed = queries missing cluster number from query history enrichment.
             </div>
         </div>
     </div>
@@ -583,7 +693,11 @@
             style="display:flex; align-items: center; justify-content: space-between; gap: 0.75rem; cursor: pointer;"
             @click="toggleResourcesHistory()"
         >
-            <div class="card-title" style="margin-bottom: 0;">Resources (captured)</div>
+            <div class="card-title" style="margin-bottom: 0;">Resources (captured)
+                <template x-if="isMultiNode">
+                    <span style="font-size: 0.75rem; font-weight: normal; color: #6b7280;">(averaged across all nodes)</span>
+                </template>
+            </div>
             <span
                 style="display: inline-block; width: 1rem; text-align: center; transition: transform 0.15s;"
                 :style="resourcesHistoryExpanded ? 'transform: rotate(90deg);' : ''"
@@ -632,6 +746,81 @@
         <div x-show="resourcesHistoryExpanded" x-cloak style="margin-top: 1rem;">
             <div class="chart-container">
                 <canvas id="resourcesHistoryChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" x-show="mode === 'history' && isMultiNode">
+        <div class="card-title">Node Metrics (multi-node)</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Aggregated per-node snapshots from <code>NODE_METRICS_SNAPSHOTS</code>.
+        </div>
+
+        <div x-show="nodeMetricsError" class="alert alert-error" style="margin-top: 1rem;">
+            <strong>Failed to load node metrics.</strong>
+            <span x-text="nodeMetricsError"></span>
+        </div>
+
+        <div x-show="!nodeMetricsError && nodeMetricsLoading" style="margin-top: 1rem;">
+            {% include "components/loading_spinner.html" %}
+        </div>
+
+        <div
+            x-show="!nodeMetricsError && !nodeMetricsLoading && !nodeMetricsAvailable"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            No per-node metrics available for this run.
+        </div>
+
+        <div
+            x-show="!nodeMetricsError && !nodeMetricsLoading && nodeMetricsAvailable"
+            style="margin-top: 1rem;"
+        >
+            <div class="table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Node</th>
+                            <th>Group</th>
+                            <th>QPS</th>
+                            <th>P95</th>
+                            <th>CPU %</th>
+                            <th>Memory (MB)</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="node in nodeMetricsNodes" :key="node.key">
+                            <tr>
+                                <td x-text="node.node_id || ('group-' + node.worker_group_id)"></td>
+                                <td x-text="node.worker_group_id"></td>
+                                <td x-text="formatCompact(node.latest ? node.latest.qps : 0)"></td>
+                                <td x-text="formatMsWithUnit(node.latest ? node.latest.p95_latency : 0)"></td>
+                                <td x-text="formatPctValue(node.latest ? node.latest.resources_host_cpu_percent : 0)"></td>
+                                <td x-text="formatCompact(node.latest ? node.latest.resources_host_memory_mb : 0)"></td>
+                                <td>
+                                    <button
+                                        type="button"
+                                        class="btn btn-sm btn-secondary"
+                                        @click="toggleNodeMetrics(node)"
+                                    >
+                                        <span x-text="nodeMetricsExpanded[node.key] ? 'Hide' : 'Show'"></span>
+                                    </button>
+                                </td>
+                            </tr>
+                        </template>
+                        <template x-for="node in nodeMetricsNodes" :key="'expanded-' + node.key">
+                            <tr x-show="nodeMetricsExpanded[node.key]" x-cloak>
+                                <td colspan="7">
+                                    <div class="chart-container" style="height: 220px;">
+                                        <canvas :id="'nodeMetricsChart-' + node.key"></canvas>
+                                    </div>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>

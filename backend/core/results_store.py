@@ -85,6 +85,7 @@ async def fetch_warehouse_config_snapshot(
 async def insert_test_start(
     *,
     test_id: str,
+    run_id: str | None,
     test_name: str,
     scenario: TestScenario,
     table_name: str,
@@ -125,11 +126,12 @@ async def insert_test_start(
         QUERY_TAG
     )
     SELECT
-        ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?), ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?), ?
     """
 
     params = [
         test_id,
+        run_id,
         test_name,
         scenario.name,
         table_name,
@@ -145,6 +147,447 @@ async def insert_test_start(
     ]
 
     await pool.execute_query(query, params=params)
+
+
+async def insert_test_prepare(
+    *,
+    test_id: str,
+    run_id: str | None,
+    test_name: str,
+    scenario: TestScenario,
+    table_name: str,
+    table_type: str,
+    warehouse: Optional[str],
+    warehouse_size: Optional[str],
+    template_id: str,
+    template_name: str,
+    template_config: dict[str, Any],
+    warehouse_config_snapshot: Optional[dict[str, Any]] = None,
+    query_tag: Optional[str] = None,
+) -> None:
+    pool = snowflake_pool.get_default_pool()
+    now = datetime.now(UTC).isoformat()
+
+    payload = {
+        "template_id": template_id,
+        "template_name": template_name,
+        "template_config": template_config,
+        "scenario": scenario.model_dump(mode="json"),
+    }
+
+    query = f"""
+    INSERT INTO {_results_prefix()}.TEST_RESULTS (
+        TEST_ID,
+        RUN_ID,
+        TEST_NAME,
+        SCENARIO_NAME,
+        TABLE_NAME,
+        TABLE_TYPE,
+        WAREHOUSE,
+        WAREHOUSE_SIZE,
+        STATUS,
+        START_TIME,
+        CONCURRENT_CONNECTIONS,
+        TEST_CONFIG,
+        WAREHOUSE_CONFIG_SNAPSHOT,
+        QUERY_TAG
+    )
+    SELECT
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?), ?
+    """
+
+    params = [
+        test_id,
+        run_id,
+        test_name,
+        scenario.name,
+        table_name,
+        table_type,
+        warehouse,
+        warehouse_size,
+        "PREPARED",
+        now,
+        scenario.concurrent_connections,
+        json.dumps(payload),
+        json.dumps(warehouse_config_snapshot) if warehouse_config_snapshot else None,
+        query_tag,
+    ]
+
+    await pool.execute_query(query, params=params)
+
+
+async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
+    pool = snowflake_pool.get_default_pool()
+    prefix = _results_prefix()
+
+    summary_rows = await pool.execute_query(
+        f"""
+        SELECT
+            MIN(TEST_NAME),
+            MIN(SCENARIO_NAME),
+            MIN(TABLE_NAME),
+            MIN(TABLE_TYPE),
+            MIN(WAREHOUSE),
+            MIN(WAREHOUSE_SIZE),
+            MIN(START_TIME),
+            MAX(END_TIME),
+            SUM(COALESCE(CONCURRENT_CONNECTIONS, 0)) AS TOTAL_CONCURRENCY,
+            SUM(COALESCE(READ_OPERATIONS, 0)) AS READ_OPERATIONS,
+            SUM(COALESCE(WRITE_OPERATIONS, 0)) AS WRITE_OPERATIONS,
+            SUM(COALESCE(FAILED_OPERATIONS, 0)) AS FAILED_OPERATIONS,
+            SUM(COALESCE(TOTAL_OPERATIONS, 0)) AS TOTAL_OPERATIONS,
+            SUM(
+                CASE
+                    WHEN UPPER(STATUS) IN ('FAILED', 'ERROR', 'CANCELLED', 'STOPPED')
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS FAILED_NODES,
+            SUM(
+                CASE
+                    WHEN UPPER(STATUS) IN ('RUNNING', 'PROCESSING', 'PREPARING')
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS RUNNING_NODES,
+            COUNT(*) AS NODE_COUNT
+        FROM {prefix}.TEST_RESULTS
+        WHERE RUN_ID = ?
+          AND TEST_ID <> ?
+        """,
+        params=[parent_run_id, parent_run_id],
+    )
+    if not summary_rows:
+        return
+
+    (
+        test_name,
+        scenario_name,
+        table_name,
+        table_type,
+        warehouse,
+        warehouse_size,
+        start_time,
+        end_time,
+        total_concurrency,
+        read_operations,
+        write_operations,
+        failed_operations,
+        total_operations,
+        failed_nodes,
+        running_nodes,
+        node_count,
+    ) = summary_rows[0]
+    if not node_count:
+        return
+
+    status = "COMPLETED"
+    if failed_nodes and failed_nodes > 0:
+        status = "FAILED"
+    elif running_nodes and running_nodes > 0:
+        status = "RUNNING"
+
+    metrics_rows = await pool.execute_query(
+        f"""
+        WITH latest AS (
+            SELECT
+                *,
+                ROW_NUMBER() OVER (
+                    PARTITION BY TEST_ID
+                    ORDER BY TIMESTAMP DESC
+                ) AS RN
+            FROM {prefix}.NODE_METRICS_SNAPSHOTS
+            WHERE PARENT_RUN_ID = ?
+        )
+        SELECT
+            SUM(TOTAL_QUERIES) AS TOTAL_QUERIES,
+            SUM(READ_COUNT) AS READ_COUNT,
+            SUM(WRITE_COUNT) AS WRITE_COUNT,
+            SUM(ERROR_COUNT) AS ERROR_COUNT,
+            SUM(QPS) AS QPS,
+            MAX(ELAPSED_SECONDS) AS ELAPSED_SECONDS,
+            CASE
+                WHEN SUM(TOTAL_QUERIES) > 0
+                THEN SUM(P50_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
+                ELSE 0
+            END AS P50_LATENCY_MS,
+            CASE
+                WHEN SUM(TOTAL_QUERIES) > 0
+                THEN SUM(P95_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
+                ELSE 0
+            END AS P95_LATENCY_MS,
+            CASE
+                WHEN SUM(TOTAL_QUERIES) > 0
+                THEN SUM(P99_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
+                ELSE 0
+            END AS P99_LATENCY_MS,
+            CASE
+                WHEN SUM(TOTAL_QUERIES) > 0
+                THEN SUM(AVG_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
+                ELSE 0
+            END AS AVG_LATENCY_MS
+        FROM latest
+        WHERE RN = 1
+        """,
+        params=[parent_run_id],
+    )
+
+    (
+        node_total_queries,
+        node_read_count,
+        node_write_count,
+        node_error_count,
+        node_qps,
+        node_elapsed,
+        node_p50,
+        node_p95,
+        node_p99,
+        node_avg,
+    ) = metrics_rows[0] if metrics_rows else (None,) * 10
+
+    duration_seconds = float(node_elapsed or 0.0)
+    total_operations = (
+        int(node_total_queries) if node_total_queries is not None else total_operations
+    )
+    read_operations = (
+        int(node_read_count) if node_read_count is not None else read_operations
+    )
+    write_operations = (
+        int(node_write_count) if node_write_count is not None else write_operations
+    )
+    error_count = int(node_error_count or 0)
+    qps = float(node_qps or 0.0)
+    reads_per_second = (
+        float(read_operations) / duration_seconds if duration_seconds > 0 else 0.0
+    )
+    writes_per_second = (
+        float(write_operations) / duration_seconds if duration_seconds > 0 else 0.0
+    )
+    error_rate = (
+        float(error_count) / float(total_operations) if total_operations else 0.0
+    )
+
+    custom_metrics = {
+        "multi_node": {
+            "parent_run_id": parent_run_id,
+            "node_count": int(node_count or 0),
+        }
+    }
+
+    # Fetch FIND_MAX_RESULT from the first child test (all nodes run same step progression)
+    find_max_rows = await pool.execute_query(
+        f"""
+        SELECT FIND_MAX_RESULT
+        FROM {prefix}.TEST_RESULTS
+        WHERE RUN_ID = ?
+          AND TEST_ID <> ?
+          AND FIND_MAX_RESULT IS NOT NULL
+        ORDER BY START_TIME ASC
+        LIMIT 1
+        """,
+        params=[parent_run_id, parent_run_id],
+    )
+    find_max_result_json = (
+        find_max_rows[0][0] if find_max_rows and find_max_rows[0][0] else None
+    )
+
+    merge_query = f"""
+    MERGE INTO {prefix}.TEST_RESULTS AS t
+    USING (SELECT ? AS TEST_ID) AS s
+    ON t.TEST_ID = s.TEST_ID
+    WHEN MATCHED THEN UPDATE SET
+        RUN_ID = ?,
+        TEST_NAME = ?,
+        SCENARIO_NAME = ?,
+        TABLE_NAME = ?,
+        TABLE_TYPE = ?,
+        WAREHOUSE = ?,
+        WAREHOUSE_SIZE = ?,
+        STATUS = ?,
+        START_TIME = ?,
+        END_TIME = ?,
+        DURATION_SECONDS = ?,
+        CONCURRENT_CONNECTIONS = ?,
+        TOTAL_OPERATIONS = ?,
+        READ_OPERATIONS = ?,
+        WRITE_OPERATIONS = ?,
+        FAILED_OPERATIONS = ?,
+        QPS = ?,
+        READS_PER_SECOND = ?,
+        WRITES_PER_SECOND = ?,
+        AVG_LATENCY_MS = ?,
+        P50_LATENCY_MS = ?,
+        P95_LATENCY_MS = ?,
+        P99_LATENCY_MS = ?,
+        ERROR_COUNT = ?,
+        ERROR_RATE = ?,
+        CUSTOM_METRICS = PARSE_JSON(?),
+        FIND_MAX_RESULT = PARSE_JSON(?),
+        UPDATED_AT = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (
+        TEST_ID,
+        RUN_ID,
+        TEST_NAME,
+        SCENARIO_NAME,
+        TABLE_NAME,
+        TABLE_TYPE,
+        WAREHOUSE,
+        WAREHOUSE_SIZE,
+        STATUS,
+        START_TIME,
+        END_TIME,
+        DURATION_SECONDS,
+        CONCURRENT_CONNECTIONS,
+        TOTAL_OPERATIONS,
+        READ_OPERATIONS,
+        WRITE_OPERATIONS,
+        FAILED_OPERATIONS,
+        QPS,
+        READS_PER_SECOND,
+        WRITES_PER_SECOND,
+        AVG_LATENCY_MS,
+        P50_LATENCY_MS,
+        P95_LATENCY_MS,
+        P99_LATENCY_MS,
+        ERROR_COUNT,
+        ERROR_RATE,
+        CUSTOM_METRICS,
+        FIND_MAX_RESULT
+    )
+    VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?)
+    )
+    """
+
+    params = [
+        parent_run_id,
+        parent_run_id,
+        test_name,
+        scenario_name,
+        table_name,
+        table_type,
+        warehouse,
+        warehouse_size,
+        status,
+        start_time,
+        end_time,
+        duration_seconds,
+        int(total_concurrency or 0),
+        int(total_operations or 0),
+        int(read_operations or 0),
+        int(write_operations or 0),
+        int(failed_operations or 0),
+        float(qps or 0.0),
+        float(reads_per_second or 0.0),
+        float(writes_per_second or 0.0),
+        float(node_avg or 0.0),
+        float(node_p50 or 0.0),
+        float(node_p95 or 0.0),
+        float(node_p99 or 0.0),
+        int(error_count or 0),
+        float(error_rate or 0.0),
+        json.dumps(custom_metrics),
+        find_max_result_json,
+        parent_run_id,
+        parent_run_id,
+        test_name,
+        scenario_name,
+        table_name,
+        table_type,
+        warehouse,
+        warehouse_size,
+        status,
+        start_time,
+        end_time,
+        duration_seconds,
+        int(total_concurrency or 0),
+        int(total_operations or 0),
+        int(read_operations or 0),
+        int(write_operations or 0),
+        int(failed_operations or 0),
+        float(qps or 0.0),
+        float(reads_per_second or 0.0),
+        float(writes_per_second or 0.0),
+        float(node_avg or 0.0),
+        float(node_p50 or 0.0),
+        float(node_p95 or 0.0),
+        float(node_p99 or 0.0),
+        int(error_count or 0),
+        float(error_rate or 0.0),
+        json.dumps(custom_metrics),
+        find_max_result_json,
+    ]
+
+    await pool.execute_query(merge_query, params=params)
+
+
+async def insert_node_metrics_snapshot(
+    *,
+    parent_run_id: str,
+    test_id: str,
+    worker_group_id: int,
+    worker_group_count: int,
+    node_id: str | None,
+    metrics: Metrics,
+) -> None:
+    pool = snowflake_pool.get_default_pool()
+    snapshot_id = str(uuid4())
+
+    snapshot_query = f"""
+    INSERT INTO {_results_prefix()}.NODE_METRICS_SNAPSHOTS (
+        SNAPSHOT_ID,
+        PARENT_RUN_ID,
+        TEST_ID,
+        WORKER_GROUP_ID,
+        WORKER_GROUP_COUNT,
+        NODE_ID,
+        TIMESTAMP,
+        ELAPSED_SECONDS,
+        TOTAL_QUERIES,
+        QPS,
+        P50_LATENCY_MS,
+        P95_LATENCY_MS,
+        P99_LATENCY_MS,
+        AVG_LATENCY_MS,
+        READ_COUNT,
+        WRITE_COUNT,
+        ERROR_COUNT,
+        BYTES_PER_SECOND,
+        ROWS_PER_SECOND,
+        ACTIVE_CONNECTIONS,
+        TARGET_WORKERS,
+        CUSTOM_METRICS
+    )
+    SELECT
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?)
+    """
+
+    params = [
+        snapshot_id,
+        parent_run_id,
+        test_id,
+        worker_group_id,
+        worker_group_count,
+        node_id,
+        metrics.timestamp.isoformat(),
+        metrics.elapsed_seconds,
+        metrics.total_operations,
+        metrics.current_qps,
+        metrics.overall_latency.p50,
+        metrics.overall_latency.p95,
+        metrics.overall_latency.p99,
+        metrics.overall_latency.avg,
+        metrics.read_metrics.count,
+        metrics.write_metrics.count,
+        metrics.failed_operations,
+        metrics.bytes_per_second,
+        metrics.rows_per_second,
+        metrics.active_connections,
+        metrics.target_workers,
+        json.dumps(metrics.custom_metrics or {}),
+    ]
+
+    await pool.execute_query(snapshot_query, params=params)
 
 
 async def insert_metrics_snapshot(*, test_id: str, metrics: Metrics) -> None:
@@ -547,12 +990,18 @@ async def _get_test_time_range(
     return start_dt, end_dt
 
 
-async def enrich_query_executions_from_query_history(*, test_id: str) -> int:
+async def enrich_query_executions_from_query_history(
+    *, test_id: str, max_pages: int = 50
+) -> int:
     """
     Enrich QUERY_EXECUTIONS rows for a test using INFORMATION_SCHEMA.QUERY_HISTORY.
 
     Paginates through results since QUERY_HISTORY has a 10k row limit per call.
     Returns the total number of rows merged across all pages.
+
+    Args:
+        test_id: The test ID to enrich
+        max_pages: Maximum pagination pages (default 50 = 500k queries max)
     """
     pool = snowflake_pool.get_default_pool()
     prefix = _results_prefix()
@@ -562,10 +1011,25 @@ async def enrich_query_executions_from_query_history(*, test_id: str) -> int:
         return 0
     start_dt, end_dt = time_range
 
+    tag_rows = await pool.execute_query(
+        f"""
+        SELECT QUERY_TAG
+        FROM {prefix}.TEST_RESULTS
+        WHERE TEST_ID = ?
+        """,
+        params=[test_id],
+    )
+    query_tag = (
+        str(tag_rows[0][0]).strip()
+        if tag_rows and tag_rows[0] and tag_rows[0][0]
+        else None
+    )
+    query_tag_like = f"{query_tag}%" if query_tag else "unistore_benchmark%"
+
     start_buf = (start_dt - timedelta(minutes=5)).isoformat()
-    current_end = (end_dt + timedelta(minutes=5)).isoformat()
+    current_end_dt = end_dt + timedelta(minutes=5)
+    current_end = current_end_dt.isoformat()
     total_merged = 0
-    max_pages = 20
 
     for page in range(max_pages):
         result = await pool.execute_query(
@@ -576,9 +1040,9 @@ async def enrich_query_executions_from_query_history(*, test_id: str) -> int:
                 END_TIME_RANGE_END=>TO_TIMESTAMP_LTZ(?),
                 RESULT_LIMIT=>10000
             ))
-            WHERE QUERY_TAG LIKE 'unistore_benchmark%'
+            WHERE QUERY_TAG LIKE ?
             """,
-            params=[start_buf, current_end],
+            params=[start_buf, current_end, query_tag_like],
         )
 
         if not result or result[0][1] == 0:
@@ -606,7 +1070,7 @@ async def enrich_query_executions_from_query_history(*, test_id: str) -> int:
                 END_TIME_RANGE_END=>TO_TIMESTAMP_LTZ(?),
                 RESULT_LIMIT=>10000
             ))
-            WHERE QUERY_TAG LIKE 'unistore_benchmark%'
+            WHERE QUERY_TAG LIKE ?
         ) src
         ON tgt.QUERY_ID = src.QUERY_ID
         AND tgt.TEST_ID = ?
@@ -626,21 +1090,39 @@ async def enrich_query_executions_from_query_history(*, test_id: str) -> int:
                 tgt.APP_ELAPSED_MS - src.SF_TOTAL_ELAPSED_MS
             );
         """
-        await pool.execute_query(merge_query, params=[start_buf, current_end, test_id])
+        await pool.execute_query(
+            merge_query, params=[start_buf, current_end, query_tag_like, test_id]
+        )
         total_merged += row_count
 
-        if row_count < 10000:
+        if not oldest_end_time:
             break
 
-        if oldest_end_time:
-            current_end = (oldest_end_time - timedelta(microseconds=1)).isoformat()
+        if isinstance(oldest_end_time, str):
+            oldest_end_dt = datetime.fromisoformat(oldest_end_time)
         else:
+            oldest_end_dt = oldest_end_time
+
+        if oldest_end_dt.tzinfo is None:
+            oldest_end_dt = oldest_end_dt.replace(tzinfo=UTC)
+
+        # Stop if we've paged past the buffered start time.
+        if oldest_end_dt <= (start_dt - timedelta(minutes=5)):
             break
 
-        logger.debug(
-            "Enrichment page %d: %d rows, moving end to %s",
+        # Guard against non-progressing pagination.
+        if oldest_end_dt >= current_end_dt:
+            break
+
+        current_end_dt = oldest_end_dt - timedelta(microseconds=1)
+        current_end = current_end_dt.isoformat()
+
+        logger.info(
+            "Enrichment page %d/%d: %d rows merged (total: %d), window end: %s",
             page + 1,
+            max_pages,
             row_count,
+            total_merged,
             current_end,
         )
 
@@ -678,6 +1160,7 @@ async def enrich_query_executions_with_retry(
     target_ratio: float = 0.90,
     max_wait_seconds: int = 120,
     poll_interval_seconds: int = 10,
+    max_pages: int = 50,
 ) -> EnrichmentStats:
     """
     Enrich QUERY_EXECUTIONS with retries until target_ratio of queries are enriched.
@@ -685,49 +1168,83 @@ async def enrich_query_executions_with_retry(
     QUERY_HISTORY has ~45+ second latency before queries appear. This function polls
     periodically and re-runs the paginated enrichment merge until we achieve the
     target ratio or timeout.
+
+    Args:
+        test_id: The test ID to enrich
+        target_ratio: Stop when this ratio of queries are enriched (default 0.90)
+        max_wait_seconds: Maximum time to wait for enrichment (default 120)
+        poll_interval_seconds: Time between enrichment attempts (default 10)
+        max_pages: Maximum pagination pages per attempt (default 50 = 500k queries)
     """
     start = datetime.now(UTC)
     deadline = start + timedelta(seconds=max_wait_seconds)
     best_stats = EnrichmentStats(0, 0, 0.0)
+    attempt = 0
+    last_enriched = 0
+    stalled_attempts = 0
 
     while datetime.now(UTC) < deadline:
-        merged = await enrich_query_executions_from_query_history(test_id=test_id)
+        attempt += 1
+        elapsed = int((datetime.now(UTC) - start).total_seconds())
+
+        await enrich_query_executions_from_query_history(
+            test_id=test_id, max_pages=max_pages
+        )
         stats = await get_enrichment_stats(test_id=test_id)
         best_stats = stats
 
         if stats.total_queries == 0:
-            logger.debug("No queries to enrich for test %s", test_id)
+            logger.info("No queries to enrich for test %s", test_id)
             break
 
-        logger.debug(
-            "Enrichment stats for %s: %d/%d (%.1f%%) - merged %d rows this pass",
+        progress = stats.enriched_queries - last_enriched
+        last_enriched = stats.enriched_queries
+
+        logger.info(
+            "📊 Enrichment attempt %d for %s: %d/%d (%.1f%%) [+%d this pass, %ds elapsed]",
+            attempt,
             test_id,
             stats.enriched_queries,
             stats.total_queries,
             stats.enrichment_ratio * 100,
-            merged,
+            progress,
+            elapsed,
         )
 
         if stats.enrichment_ratio >= target_ratio:
             logger.info(
-                "Enrichment complete for %s: %.1f%% (%d/%d queries)",
+                "✅ Enrichment complete for %s: %.1f%% (%d/%d queries) in %ds",
                 test_id,
                 stats.enrichment_ratio * 100,
                 stats.enriched_queries,
                 stats.total_queries,
+                elapsed,
             )
             break
 
+        if progress == 0:
+            stalled_attempts += 1
+            if stalled_attempts >= 3 and stats.enrichment_ratio > 0.5:
+                logger.warning(
+                    "⚠️ Enrichment stalled for %s at %.1f%% - hybrid workload may not emit per-query QUERY_HISTORY rows",
+                    test_id,
+                    stats.enrichment_ratio * 100,
+                )
+                break
+        else:
+            stalled_attempts = 0
+
         await asyncio.sleep(poll_interval_seconds)
 
+    elapsed = int((datetime.now(UTC) - start).total_seconds())
     if best_stats.enrichment_ratio < target_ratio and best_stats.total_queries > 0:
         logger.warning(
-            "Enrichment timeout for %s: only %.1f%% (%d/%d queries) after %ds",
+            "⚠️ Enrichment ended for %s: %.1f%% (%d/%d queries) after %ds",
             test_id,
             best_stats.enrichment_ratio * 100,
             best_stats.enriched_queries,
             best_stats.total_queries,
-            max_wait_seconds,
+            elapsed,
         )
 
     return best_stats
@@ -802,9 +1319,9 @@ async def update_enrichment_status(
 
 async def get_enrichment_status(*, test_id: str) -> dict[str, Any] | None:
     """
-    Get the enrichment status for a test.
+    Get the enrichment status for a test, including query stats.
 
-    Returns dict with enrichment_status, enrichment_error, or None if test not found.
+    Returns dict with enrichment_status, enrichment_error, query counts, or None if test not found.
     """
     pool = snowflake_pool.get_default_pool()
     prefix = _results_prefix()
@@ -821,8 +1338,13 @@ async def get_enrichment_status(*, test_id: str) -> dict[str, Any] | None:
     if not rows:
         return None
 
+    stats = await get_enrichment_stats(test_id=test_id)
+
     return {
         "test_status": rows[0][0],
         "enrichment_status": rows[0][1],
         "enrichment_error": rows[0][2],
+        "total_queries": stats.total_queries,
+        "enriched_queries": stats.enriched_queries,
+        "enrichment_ratio": stats.enrichment_ratio,
     }

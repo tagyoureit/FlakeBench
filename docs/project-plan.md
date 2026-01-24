@@ -40,11 +40,11 @@ deployment in this codebase.
   - Supports load modes: `CONCURRENCY`, `QPS`, `FIND_MAX_CONCURRENCY`.
 - `backend/core/autoscale.py`
   - UI-driven, scale-out only multi-node orchestration.
-  - Prepares a parent run first, then launches worker nodes when the user
+  - Prepares a parent run first, then launches workers when the user
     starts the run from the live dashboard.
-  - Uses host-level guardrails (CPU/memory) to stop adding nodes.
-  - In QPS autoscale, `concurrent_connections` is the per-node ceiling and
-    `target_qps` is split across nodes (`target_qps / node_count`).
+  - Uses host-level guardrails (CPU/memory) to stop adding workers.
+  - In QPS autoscale, `concurrent_connections` is the per-worker ceiling and
+    `target_qps` is split across workers (`target_qps / worker_count`).
 
 ### Table Managers (No DDL)
 

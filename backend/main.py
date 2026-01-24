@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import asyncio
+import json
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +21,7 @@ import logging
 
 from backend.config import settings
 from backend.core.test_registry import registry
+from backend.connectors import snowflake_pool
 
 # Configure logging
 logging.basicConfig(
@@ -223,7 +225,40 @@ async def dashboard_test(request: Request, test_id: str):
     # since this route is used to start/monitor runs.
     history_url = f"/dashboard/history/{test_id}"
     running = await registry.get(test_id)
+
+    # If not in memory, check database for PREPARED status (autoscale tests are
+    # persisted to DB but not registered in memory until started).
     if running is None:
+        try:
+            pool = snowflake_pool.get_default_pool()
+            rows = await pool.execute_query(
+                f"""
+                SELECT STATUS
+                FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS
+                WHERE TEST_ID = ?
+                LIMIT 1
+                """,
+                params=[test_id],
+            )
+            if rows:
+                db_status = str(rows[0][0] or "").upper()
+                if db_status in {
+                    "PREPARED",
+                    "READY",
+                    "PENDING",
+                    "RUNNING",
+                    "CANCELLING",
+                }:
+                    # Test exists in DB with a live status - serve live dashboard
+                    is_htmx = request.headers.get("HX-Request") == "true"
+                    template = "pages/dashboard.html"
+                    return templates.TemplateResponse(
+                        template,
+                        {"request": request, "is_htmx": is_htmx, "test_id": test_id},
+                    )
+        except Exception:
+            # Fall through to redirect on any DB error
+            pass
         return RedirectResponse(url=history_url, status_code=302)
 
     status = str(getattr(running, "status", "") or "").upper()
@@ -479,6 +514,310 @@ app.include_router(test_results.router, prefix="/api/tests", tags=["test_results
 # ============================================================================
 
 
+async def _is_multi_node_parent(test_id: str) -> bool:
+    try:
+        pool = snowflake_pool.get_default_pool()
+        rows = await pool.execute_query(
+            f"""
+            SELECT RUN_ID, STATUS
+            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS
+            WHERE TEST_ID = ?
+            LIMIT 1
+            """,
+            params=[test_id],
+        )
+        if not rows:
+            return False
+        run_id = rows[0][0]
+        return bool(run_id) and str(run_id) == str(test_id)
+    except Exception:
+        return False
+
+
+async def _get_parent_test_status(test_id: str) -> str | None:
+    try:
+        pool = snowflake_pool.get_default_pool()
+        rows = await pool.execute_query(
+            f"""
+            SELECT STATUS
+            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS
+            WHERE TEST_ID = ?
+            LIMIT 1
+            """,
+            params=[test_id],
+        )
+        if rows:
+            return str(rows[0][0] or "").upper()
+        return None
+    except Exception:
+        return None
+
+
+async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
+    pool = snowflake_pool.get_default_pool()
+    rows = await pool.execute_query(
+        f"""
+        WITH latest_per_node AS (
+            SELECT
+                nms.*,
+                ROW_NUMBER() OVER (PARTITION BY NODE_ID ORDER BY TIMESTAMP DESC) AS rn
+            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.NODE_METRICS_SNAPSHOTS nms
+            WHERE PARENT_RUN_ID = ?
+        )
+        SELECT
+            ELAPSED_SECONDS,
+            TOTAL_QUERIES,
+            QPS,
+            P50_LATENCY_MS,
+            P95_LATENCY_MS,
+            P99_LATENCY_MS,
+            AVG_LATENCY_MS,
+            READ_COUNT,
+            WRITE_COUNT,
+            ERROR_COUNT,
+            ACTIVE_CONNECTIONS,
+            TARGET_WORKERS,
+            CUSTOM_METRICS
+        FROM latest_per_node
+        WHERE rn = 1
+        """,
+        params=[parent_run_id],
+    )
+
+    if not rows:
+        return {}
+
+    def _to_int(v: Any) -> int:
+        try:
+            return int(v or 0)
+        except Exception:
+            return 0
+
+    def _to_float(v: Any) -> float:
+        try:
+            return float(v or 0)
+        except Exception:
+            return 0.0
+
+    def _sum_dicts(dicts: list[dict[str, Any]]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for d in dicts:
+            for key, value in d.items():
+                try:
+                    out[key] = out.get(key, 0.0) + float(value or 0)
+                except Exception:
+                    continue
+        return out
+
+    def _avg_dicts(dicts: list[dict[str, Any]]) -> dict[str, float]:
+        if not dicts:
+            return {}
+        summed = _sum_dicts(dicts)
+        return {key: value / len(dicts) for key, value in summed.items()}
+
+    elapsed_seconds = 0.0
+    total_ops = 0
+    qps = 0.0
+    p50_vals: list[float] = []
+    p95_vals: list[float] = []
+    p99_vals: list[float] = []
+    avg_vals: list[float] = []
+    read_count = 0
+    write_count = 0
+    error_count = 0
+    active_connections = 0
+    target_workers = 0
+
+    app_ops_list: list[dict[str, Any]] = []
+    sf_bench_list: list[dict[str, Any]] = []
+    warehouse_list: list[dict[str, Any]] = []
+    resources_list: list[dict[str, Any]] = []
+    find_max_controller: dict[str, Any] | None = None
+    qps_controller: dict[str, Any] | None = None
+    phases: list[str] = []
+
+    for (
+        elapsed,
+        total_queries,
+        qps_row,
+        p50,
+        p95,
+        p99,
+        avg_latency,
+        read_row,
+        write_row,
+        error_row,
+        active_row,
+        target_row,
+        custom_metrics,
+    ) in rows:
+        elapsed_seconds = max(float(elapsed or 0), elapsed_seconds)
+        total_ops += _to_int(total_queries)
+        qps += _to_float(qps_row)
+        p50_vals.append(_to_float(p50))
+        p95_vals.append(_to_float(p95))
+        p99_vals.append(_to_float(p99))
+        avg_vals.append(_to_float(avg_latency))
+        read_count += _to_int(read_row)
+        write_count += _to_int(write_row)
+        error_count += _to_int(error_row)
+        active_connections += _to_int(active_row)
+        target_workers += _to_int(target_row)
+
+        cm: Any = custom_metrics
+        if isinstance(cm, str):
+            try:
+                cm = json.loads(cm)
+            except Exception:
+                cm = {}
+        if not isinstance(cm, dict):
+            cm = {}
+
+        phase_val = cm.get("phase")
+        if isinstance(phase_val, str) and phase_val.strip():
+            phases.append(phase_val.strip().upper())
+
+        app_ops = cm.get("app_ops_breakdown")
+        if isinstance(app_ops, dict):
+            app_ops_list.append(app_ops)
+        sf_bench = cm.get("sf_bench")
+        if isinstance(sf_bench, dict):
+            sf_bench_list.append(sf_bench)
+        warehouse = cm.get("warehouse")
+        if isinstance(warehouse, dict):
+            warehouse_list.append(warehouse)
+        resources = cm.get("resources")
+        if isinstance(resources, dict):
+            resources_list.append(resources)
+        if find_max_controller is None and isinstance(
+            cm.get("find_max_controller"), dict
+        ):
+            find_max_controller = cm.get("find_max_controller")
+        if qps_controller is None and isinstance(cm.get("qps_controller"), dict):
+            qps_controller = cm.get("qps_controller")
+
+    error_rate = (error_count / total_ops) if total_ops > 0 else 0.0
+    p50_latency = sum(p50_vals) / len(p50_vals) if p50_vals else 0.0
+    p95_latency = sum(p95_vals) / len(p95_vals) if p95_vals else 0.0
+    p99_latency = sum(p99_vals) / len(p99_vals) if p99_vals else 0.0
+    avg_latency = sum(avg_vals) / len(avg_vals) if avg_vals else 0.0
+
+    custom_metrics_out = {
+        "app_ops_breakdown": _sum_dicts(app_ops_list),
+        "sf_bench": _sum_dicts(sf_bench_list),
+        "warehouse": _sum_dicts(warehouse_list),
+        "resources": _avg_dicts(resources_list),
+    }
+    if find_max_controller is not None:
+        custom_metrics_out["find_max_controller"] = find_max_controller
+    if qps_controller is not None:
+        custom_metrics_out["qps_controller"] = qps_controller
+
+    phase_order = {
+        "PREPARING": 0,
+        "WARMUP": 1,
+        "RUNNING": 2,
+        "PROCESSING": 3,
+        "COMPLETED": 4,
+    }
+    phase_priority = {
+        "FAILED": -1,
+        "CANCELLED": -1,
+        "STOPPED": -1,
+    }
+    resolved_phase = None
+    for phase in phases:
+        if phase in phase_priority:
+            resolved_phase = phase
+            break
+    if resolved_phase is None and phases:
+        resolved_phase = min(phases, key=lambda p: phase_order.get(p, 99))
+
+    return {
+        "phase": resolved_phase,
+        "elapsed": float(elapsed_seconds),
+        "ops": {
+            "total": total_ops,
+            "current_per_sec": float(qps),
+        },
+        "operations": {
+            "reads": read_count,
+            "writes": write_count,
+        },
+        "latency": {
+            "p50": float(p50_latency),
+            "p95": float(p95_latency),
+            "p99": float(p99_latency),
+            "avg": float(avg_latency),
+        },
+        "errors": {
+            "count": error_count,
+            "rate": float(error_rate),
+        },
+        "connections": {
+            "active": active_connections,
+            "target": target_workers,
+        },
+        "custom_metrics": custom_metrics_out,
+    }
+
+
+async def _stream_multi_node_metrics(websocket: WebSocket, test_id: str) -> None:
+    await websocket.send_json(
+        {
+            "status": "connected",
+            "test_id": test_id,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+    )
+
+    poll_interval = 1.0
+    while True:
+        recv_task = asyncio.create_task(websocket.receive())
+        sleep_task = asyncio.create_task(asyncio.sleep(poll_interval))
+        done, pending = await asyncio.wait(
+            {recv_task, sleep_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+
+        if recv_task in done:
+            msg = recv_task.result()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            continue
+
+        if websocket.client_state != WebSocketState.CONNECTED:
+            break
+
+        status = await _get_parent_test_status(test_id)
+        if status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            await websocket.send_json(
+                {
+                    "test_id": test_id,
+                    "status": status,
+                    "phase": status,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                }
+            )
+            break
+
+        metrics = await _aggregate_multi_node_metrics(test_id)
+        if metrics:
+            metrics_phase = metrics.pop("phase", None)
+            phase = metrics_phase or "RUNNING"
+            if status in {"STOPPED", "FAILED", "CANCELLED", "COMPLETED"}:
+                phase = status
+            payload = {
+                "test_id": test_id,
+                "status": status or "RUNNING",
+                "phase": phase,
+                "timestamp": datetime.now(UTC).isoformat(),
+                **metrics,
+            }
+            await websocket.send_json(payload)
+
+
 @app.websocket("/ws/test/{test_id}")
 async def websocket_test_metrics(websocket: WebSocket, test_id: str):
     """
@@ -492,6 +831,13 @@ async def websocket_test_metrics(websocket: WebSocket, test_id: str):
     logger.info(f"📡 WebSocket connected for test: {test_id}")
 
     try:
+        if await _is_multi_node_parent(test_id):
+            logger.info(
+                f"📡 Multi-node parent test detected: {test_id}, using polling mode"
+            )
+            await _stream_multi_node_metrics(websocket, test_id)
+            return
+
         q = await registry.subscribe(test_id)
         try:
             await websocket.send_json(
@@ -502,11 +848,6 @@ async def websocket_test_metrics(websocket: WebSocket, test_id: str):
                 }
             )
             while True:
-                # Wait for either a metrics payload OR a websocket disconnect.
-                #
-                # Without this, on reload a websocket can disconnect while we're blocked
-                # on q.get(), and the handler never exits → uvicorn hangs on
-                # "Waiting for background tasks to complete."
                 get_payload = asyncio.create_task(q.get())
                 recv_ws = asyncio.create_task(websocket.receive())
                 done, pending = await asyncio.wait(
@@ -519,7 +860,6 @@ async def websocket_test_metrics(websocket: WebSocket, test_id: str):
                     msg = recv_ws.result()
                     if msg.get("type") == "websocket.disconnect":
                         break
-                    # Ignore any other control frames/messages.
                     continue
 
                 payload = get_payload.result()
@@ -528,6 +868,21 @@ async def websocket_test_metrics(websocket: WebSocket, test_id: str):
                 await websocket.send_json(payload)
         finally:
             await registry.unsubscribe(test_id, q)
+
+    except KeyError:
+        logger.warning(f"📡 Test not found in registry: {test_id}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+    except WebSocketDisconnect:
+        logger.info(f"📡 WebSocket disconnected for multi-node test: {test_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
     except WebSocketDisconnect:
         logger.info(f"📡 WebSocket disconnected for test: {test_id}")

@@ -9,8 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- UI-driven autoscale option to launch multi-node runs with a total concurrency target.
+- Autoscale controller for scale-out only with host CPU/memory guardrails.
+- History list grouping for multi-node runs with parent/child expand toggle.
+- `NODE_METRICS_SNAPSHOTS` table for per-node metrics in multi-node runs.
+- Headless worker CLI (`scripts/run_worker.py`) to run template-based workers.
+- Local multi-node orchestrator CLI (`scripts/run_multi_node.py`).
+- Worker CLI overrides for concurrency/QPS parameters.
+- Per-node metrics snapshots persisted during multi-node runs.
+- Aggregated parent-run metrics stored in `TEST_RESULTS` for multi-node runs.
+- API + history UI for per-node metrics drilldown in multi-node runs.
 - Host + cgroup-aware resource metrics (CPU/memory) in live + history dashboards,
   including per-process context for capacity planning.
+- Post-processing heartbeat logs every 30s in server logs and the browser console
+  on the history dashboard while phase=PROCESSING.
+- History dashboard status now uses colored badges and includes a Re-run button
+  next to Open Live Dashboard.
 - Separate `ENRICHMENT_STATUS` column to track post-processing (Snowflake QUERY_HISTORY
   enrichment) independently from test execution status. Values: PENDING, COMPLETED,
   FAILED, SKIPPED.
@@ -56,6 +70,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Live multi-node dashboard now streams parent metrics with correct payload shape,
+  so phases and real-time charts update during autoscale runs.
+- Parent multi-node timing now interprets TIMESTAMP_NTZ start times as UTC so
+  warmup progresses to RUNNING instead of resetting at 0s.
+- Parent multi-node dashboards now derive phase progression from per-node snapshots
+  so PREPARING/WARMUP display correctly.
+- Multi-node live dashboard run logs now support per-node selection via a dropdown
+  instead of showing an empty aggregate log view.
+- Autoscale runs now prepare without autostart, returning to the live dashboard
+  and starting only when the user clicks Start.
+- Autoscale worker launch now uses async subprocesses to avoid blocking the
+  FastAPI event loop under load.
+- Node metrics history now falls back to `METRICS_SNAPSHOTS` when per-node
+  snapshots are missing, and the multi-node section is hidden for single-node
+  runs.
+- Multi-node parent aggregation no longer counts the parent row as a child,
+  allowing parent status and metrics to finalize correctly.
+- Multi-node parent runs now refresh aggregation when a completed parent is
+  viewed or when the orchestrator finishes, preventing stale RUNNING status.
+- History metrics endpoint now aggregates parent time-series data from
+  `NODE_METRICS_SNAPSHOTS` when `METRICS_SNAPSHOTS` is empty.
 - Test status incorrectly set to CANCELLED when post-processing (enrichment) was
   interrupted. Now saves COMPLETED status immediately after test execution succeeds,
   before starting long-running enrichment. Enrichment failures no longer affect
@@ -81,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Autoscale total target now derives from the load mode's max worker settings
+  instead of a separate autoscale target field.
 - QPS auto-scale controller now ramps more gradually (lower gains, 5s control
   interval, tighter step caps, and a short under-target streak before scale-up)
   to reduce overshoot.

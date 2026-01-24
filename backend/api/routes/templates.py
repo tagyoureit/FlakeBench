@@ -386,6 +386,28 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
             out.get("min_concurrency") or 1, label="min_concurrency"
         )
 
+    # Autoscale config (UI-driven orchestration).
+    autoscale_enabled = bool(out.get("autoscale_enabled"))
+    out["autoscale_enabled"] = autoscale_enabled
+    autoscale_max_cpu = _coerce_int(
+        out.get("autoscale_max_cpu_percent") or 85, label="autoscale_max_cpu_percent"
+    )
+    autoscale_max_mem = _coerce_int(
+        out.get("autoscale_max_memory_percent") or 85,
+        label="autoscale_max_memory_percent",
+    )
+    if autoscale_enabled:
+        if autoscale_max_cpu <= 0 or autoscale_max_cpu > 100:
+            raise ValueError("autoscale_max_cpu_percent must be within (0, 100]")
+        if autoscale_max_mem <= 0 or autoscale_max_mem > 100:
+            raise ValueError("autoscale_max_memory_percent must be within (0, 100]")
+        if load_mode == "QPS" and int(out.get("concurrent_connections") or 0) == -1:
+            raise ValueError(
+                "Autoscale requires concurrent_connections >= 1 (per-node cap) when load_mode=QPS"
+            )
+    out["autoscale_max_cpu_percent"] = int(autoscale_max_cpu)
+    out["autoscale_max_memory_percent"] = int(autoscale_max_mem)
+
     return out
 
 

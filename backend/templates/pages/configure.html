@@ -551,6 +551,30 @@
                 </details>
             </div>
 
+            <div class="form-group mt-4">
+                <label class="form-label">
+                    <input type="checkbox" x-model="config.autoscale_enabled">
+                    Enable multi-node autoscale (scale-out only)
+                </label>
+                <small class="form-text">
+                    Launches additional worker nodes until the total target is reached or host guardrails trip.
+                </small>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="config.autoscale_enabled">
+                <div class="form-group">
+                    <label class="form-label">Max Host CPU (%)</label>
+                    <input type="number" class="form-input" x-model.number="config.autoscale_max_cpu_percent" min="1" max="100" step="1">
+                    <small class="form-text">Stops adding nodes if host CPU exceeds this %.</small>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Max Host Memory (%)</label>
+                    <input type="number" class="form-input" x-model.number="config.autoscale_max_memory_percent" min="1" max="100" step="1">
+                    <small class="form-text">Stops adding nodes if host memory exceeds this %.</small>
+                </div>
+            </div>
+
             <div class="form-group">
                 <label class="form-label">Think Time (ms)</label>
                 <input type="number" class="form-input" x-model.number="config.think_time" min="0" max="10000">
@@ -782,6 +806,9 @@ function testConfiguration() {
             target_qps: 100,
             min_concurrency: 5,
             concurrent_connections: 10,
+            autoscale_enabled: false,
+            autoscale_max_cpu_percent: 85,
+            autoscale_max_memory_percent: 85,
             // FIND_MAX_CONCURRENCY mode defaults
             start_concurrency: 5,
             concurrency_increment: 10,
@@ -1343,6 +1370,16 @@ function testConfiguration() {
                 this._prevLoadMode = next;
             });
 
+            this.$watch('config.autoscale_enabled', (v) => {
+                if (!v) return;
+                if (!Number.isFinite(Number(this.config.autoscale_max_cpu_percent || 0))) {
+                    this.config.autoscale_max_cpu_percent = 85;
+                }
+                if (!Number.isFinite(Number(this.config.autoscale_max_memory_percent || 0))) {
+                    this.config.autoscale_max_memory_percent = 85;
+                }
+            });
+
             // Check URL params for mode
             const urlParams = new URLSearchParams(window.location.search);
             const urlMode = urlParams.get('mode');
@@ -1678,6 +1715,29 @@ function testConfiguration() {
                 }
             }
 
+            if (this.config.autoscale_enabled) {
+                const maxCpu = Number(this.config.autoscale_max_cpu_percent || 0);
+                const maxMem = Number(this.config.autoscale_max_memory_percent || 0);
+                if (!Number.isFinite(maxCpu) || maxCpu <= 0 || maxCpu > 100) {
+                    window.toast.warning('Autoscale max CPU must be within (0, 100].');
+                    return;
+                }
+                if (!Number.isFinite(maxMem) || maxMem <= 0 || maxMem > 100) {
+                    window.toast.warning('Autoscale max memory must be within (0, 100].');
+                    return;
+                }
+                if (
+                    loadMode === 'QPS' &&
+                    Number(this.config.concurrent_connections || 0) === -1
+                ) {
+                    this.qpsAdvancedOpen = true;
+                    window.toast.warning(
+                        'Autoscale requires Max Workers >= 1 (per-node cap) in QPS mode.',
+                    );
+                    return;
+                }
+            }
+
             // Validate targets (SLOs). Use -1 to disable a target.
             const weights = {
                 POINT_LOOKUP: Number(this.config.custom_point_lookup_pct || 0),
@@ -1989,9 +2049,11 @@ function testConfiguration() {
                     }
                 }
 
-                const resp = await fetch(`/api/tests/from-template/${encodeURIComponent(this.loadedTemplate.template_id)}`, {
-                    method: 'POST',
-                });
+            const autoscaleEnabled = Boolean(this.config.autoscale_enabled);
+            const endpoint = autoscaleEnabled
+                ? `/api/tests/from-template/${encodeURIComponent(this.loadedTemplate.template_id)}/autoscale`
+                : `/api/tests/from-template/${encodeURIComponent(this.loadedTemplate.template_id)}`;
+            const resp = await fetch(endpoint, { method: 'POST' });
                 if (!resp.ok) {
                     const err = await resp.json().catch(() => ({}));
                     throw new Error(err.detail || 'Failed to prepare test');
@@ -2170,6 +2232,9 @@ function testConfiguration() {
                     target_qps: 100,
                     min_concurrency: 5,
                     concurrent_connections: 10,
+                    autoscale_enabled: false,
+                    autoscale_max_cpu_percent: 85,
+                    autoscale_max_memory_percent: 85,
                     start_concurrency: 5,
                     concurrency_increment: 10,
                     step_duration_seconds: 30,

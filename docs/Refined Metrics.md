@@ -37,7 +37,7 @@ Key live metrics include:
 - One row per snapshot interval with QPS, latency, counts, throughput,
   active connections, and custom metrics.
 
-### Per-Node Snapshots (Multi-Node Runs)
+### Per-Worker Snapshots (Multi-Node Runs)
 
 - Table: `UNISTORE_BENCHMARK.TEST_RESULTS.NODE_METRICS_SNAPSHOTS`
 - One row per snapshot interval per worker group, keyed by parent_run_id +
@@ -113,12 +113,12 @@ From `INFORMATION_SCHEMA.QUERY_HISTORY`:
 
 ## Aggregation and SLO Notes (Multi-Node)
 
-- Aggregated parent metrics are derived from per-node snapshots.
-- Avoid weighted averages for SLO decisions; they can hide slow nodes or tails.
-- For SLO latency, prefer merged distributions or worst-node p95/p99.
+- Aggregated parent metrics are derived from per-worker snapshots.
+- Avoid weighted averages for SLO decisions; they can hide slow workers or tails.
+- For SLO latency, prefer merged distributions or worst-worker p95/p99.
 - Parent runs are identified by `TEST_ID == RUN_ID`; children have `TEST_ID != RUN_ID`.
-- The dashboard displays "(averaged across all nodes)" for Resources in parent runs
-  to clarify the data is aggregated from `NODE_METRICS_SNAPSHOTS`.
+- The dashboard displays "(averaged across all workers)" for Resources in parent
+  runs to clarify the data is aggregated from `NODE_METRICS_SNAPSHOTS`.
 
 ## Constraints
 

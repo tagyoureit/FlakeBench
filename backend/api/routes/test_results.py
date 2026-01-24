@@ -15,13 +15,16 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 
 from backend.config import settings
 from backend.connectors import postgres_pool, snowflake_pool
+from backend.core import autoscale
+from backend.core.results_store import update_parent_run_aggregate
 from backend.core.test_registry import registry
 from backend.api.error_handling import http_exception
 
@@ -100,6 +103,115 @@ def _prefix() -> str:
     return f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
 
 
+def _compute_aggregated_find_max(node_results: list[dict]) -> dict:
+    """
+    Compute true aggregate metrics across all nodes' find_max_result.
+
+    For each concurrency level (step), aggregates:
+    - Total QPS (sum across nodes)
+    - Max P95/P99 latencies (worst case)
+    - Number of active nodes at each step
+    """
+    if not node_results:
+        return {}
+
+    steps_by_concurrency: dict[int, dict[int, dict]] = {}
+    all_baselines_p95 = []
+    all_baselines_p99 = []
+
+    for node in node_results:
+        fmr = node.get("find_max_result", {})
+        if not fmr:
+            continue
+
+        node_idx = node.get("node_index", 0)
+        if fmr.get("baseline_p95_latency_ms"):
+            all_baselines_p95.append(fmr["baseline_p95_latency_ms"])
+        if fmr.get("baseline_p99_latency_ms"):
+            all_baselines_p99.append(fmr["baseline_p99_latency_ms"])
+
+        step_history = fmr.get("step_history", [])
+        for step in step_history:
+            cc = step.get("concurrency")
+            if cc is not None:
+                if cc not in steps_by_concurrency:
+                    steps_by_concurrency[cc] = {}
+                if node_idx not in steps_by_concurrency[cc]:
+                    steps_by_concurrency[cc][node_idx] = {
+                        "node_index": node_idx,
+                        **step,
+                    }
+
+    aggregated_steps = []
+    total_nodes = len(node_results)
+
+    for cc in sorted(steps_by_concurrency.keys()):
+        node_steps = list(steps_by_concurrency[cc].values())
+        active_nodes = len(node_steps)
+
+        total_qps = sum(s.get("qps", 0) or 0 for s in node_steps)
+        max_p95 = max((s.get("p95_latency_ms") or 0 for s in node_steps), default=0)
+        max_p99 = max((s.get("p99_latency_ms") or 0 for s in node_steps), default=0)
+        avg_p95 = (
+            sum(s.get("p95_latency_ms") or 0 for s in node_steps) / active_nodes
+            if active_nodes > 0
+            else 0
+        )
+        avg_p99 = (
+            sum(s.get("p99_latency_ms") or 0 for s in node_steps) / active_nodes
+            if active_nodes > 0
+            else 0
+        )
+
+        any_degraded = any(s.get("degraded") for s in node_steps)
+        reasons = [
+            s.get("degrade_reason") for s in node_steps if s.get("degrade_reason")
+        ]
+
+        aggregated_steps.append(
+            {
+                "concurrency": cc,
+                "total_concurrency": cc * active_nodes,
+                "qps": round(total_qps, 2),
+                "p95_latency_ms": round(max_p95, 2),
+                "p99_latency_ms": round(max_p99, 2),
+                "avg_p95_latency_ms": round(avg_p95, 2),
+                "avg_p99_latency_ms": round(avg_p99, 2),
+                "active_nodes": active_nodes,
+                "total_nodes": total_nodes,
+                "degraded": any_degraded,
+                "degrade_reasons": reasons if reasons else None,
+            }
+        )
+
+    best_step = None
+    for step in aggregated_steps:
+        if step["active_nodes"] == total_nodes and not step["degraded"]:
+            if best_step is None or step["qps"] > best_step["qps"]:
+                best_step = step
+
+    if best_step is None and aggregated_steps:
+        non_degraded = [s for s in aggregated_steps if not s["degraded"]]
+        if non_degraded:
+            best_step = max(non_degraded, key=lambda s: s["qps"])
+        else:
+            best_step = aggregated_steps[0]
+
+    return {
+        "step_history": aggregated_steps,
+        "baseline_p95_latency_ms": max(all_baselines_p95)
+        if all_baselines_p95
+        else None,
+        "baseline_p99_latency_ms": max(all_baselines_p99)
+        if all_baselines_p99
+        else None,
+        "final_best_concurrency": best_step["concurrency"] if best_step else None,
+        "final_best_qps": best_step["qps"] if best_step else None,
+        "total_nodes": total_nodes,
+        "is_aggregate": True,
+    }
+
+
 def _to_float_or_none(v: Any) -> float | None:
     if v is None:
         return None
@@ -113,21 +225,49 @@ async def _fetch_warehouse_metrics(*, pool: Any, test_id: str) -> dict[str, Any]
     """
     Fetch test-level warehouse queueing + MCW metrics.
 
+    For parent runs (multi-node), aggregates from all child runs.
     Backward compatible: callers should catch exceptions (e.g. missing view/columns).
     """
     prefix = _prefix()
-    query = f"""
-    SELECT
-        CLUSTERS_USED,
-        TOTAL_QUEUED_OVERLOAD_MS,
-        TOTAL_QUEUED_PROVISIONING_MS,
-        QUERIES_WITH_OVERLOAD_QUEUE,
-        READ_CACHE_HIT_PCT
-    FROM {prefix}.V_WAREHOUSE_METRICS
-    WHERE TEST_ID = ?
-    """
-    rows = await pool.execute_query(query, params=[test_id])
-    if not rows:
+
+    run_id_rows = await pool.execute_query(
+        f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+        params=[test_id],
+    )
+    run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+    is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+    if is_parent:
+        query = f"""
+        SELECT
+            MAX(CLUSTERS_USED) AS CLUSTERS_USED,
+            SUM(TOTAL_QUEUED_OVERLOAD_MS) AS TOTAL_QUEUED_OVERLOAD_MS,
+            SUM(TOTAL_QUEUED_PROVISIONING_MS) AS TOTAL_QUEUED_PROVISIONING_MS,
+            SUM(QUERIES_WITH_OVERLOAD_QUEUE) AS QUERIES_WITH_OVERLOAD_QUEUE,
+            AVG(READ_CACHE_HIT_PCT) AS READ_CACHE_HIT_PCT
+        FROM {prefix}.V_WAREHOUSE_METRICS vm
+        WHERE vm.TEST_ID IN (
+            SELECT TEST_ID
+            FROM {prefix}.TEST_RESULTS
+            WHERE RUN_ID = ?
+              AND TEST_ID <> ?
+        )
+        """
+        rows = await pool.execute_query(query, params=[test_id, test_id])
+    else:
+        query = f"""
+        SELECT
+            CLUSTERS_USED,
+            TOTAL_QUEUED_OVERLOAD_MS,
+            TOTAL_QUEUED_PROVISIONING_MS,
+            QUERIES_WITH_OVERLOAD_QUEUE,
+            READ_CACHE_HIT_PCT
+        FROM {prefix}.V_WAREHOUSE_METRICS
+        WHERE TEST_ID = ?
+        """
+        rows = await pool.execute_query(query, params=[test_id])
+
+    if not rows or rows[0][0] is None:
         return {"warehouse_metrics_available": False}
 
     (
@@ -199,27 +339,63 @@ async def _fetch_cluster_breakdown(*, pool: Any, test_id: str) -> dict[str, Any]
     """
     Fetch per-cluster breakdown for MCW tests.
 
+    For parent runs (multi-node), aggregates from all child runs.
     Backward compatible: callers should catch exceptions (e.g. missing view/columns).
     """
     prefix = _prefix()
-    query = f"""
-    SELECT
-        CLUSTER_NUMBER,
-        QUERY_COUNT,
-        P50_EXEC_MS,
-        P95_EXEC_MS,
-        MAX_EXEC_MS,
-        AVG_QUEUED_OVERLOAD_MS,
-        AVG_QUEUED_PROVISIONING_MS,
-        POINT_LOOKUPS,
-        RANGE_SCANS,
-        INSERTS,
-        UPDATES
-    FROM {prefix}.V_CLUSTER_BREAKDOWN
-    WHERE TEST_ID = ?
-    ORDER BY CLUSTER_NUMBER ASC
-    """
-    rows = await pool.execute_query(query, params=[test_id])
+
+    run_id_rows = await pool.execute_query(
+        f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+        params=[test_id],
+    )
+    run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+    is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+    if is_parent:
+        query = f"""
+        SELECT
+            cb.CLUSTER_NUMBER,
+            SUM(cb.QUERY_COUNT) AS QUERY_COUNT,
+            AVG(cb.P50_EXEC_MS) AS P50_EXEC_MS,
+            AVG(cb.P95_EXEC_MS) AS P95_EXEC_MS,
+            MAX(cb.MAX_EXEC_MS) AS MAX_EXEC_MS,
+            AVG(cb.AVG_QUEUED_OVERLOAD_MS) AS AVG_QUEUED_OVERLOAD_MS,
+            AVG(cb.AVG_QUEUED_PROVISIONING_MS) AS AVG_QUEUED_PROVISIONING_MS,
+            SUM(cb.POINT_LOOKUPS) AS POINT_LOOKUPS,
+            SUM(cb.RANGE_SCANS) AS RANGE_SCANS,
+            SUM(cb.INSERTS) AS INSERTS,
+            SUM(cb.UPDATES) AS UPDATES
+        FROM {prefix}.V_CLUSTER_BREAKDOWN cb
+        WHERE cb.TEST_ID IN (
+            SELECT TEST_ID
+            FROM {prefix}.TEST_RESULTS
+            WHERE RUN_ID = ?
+              AND TEST_ID <> ?
+        )
+        GROUP BY cb.CLUSTER_NUMBER
+        ORDER BY cb.CLUSTER_NUMBER ASC
+        """
+        rows = await pool.execute_query(query, params=[test_id, test_id])
+    else:
+        query = f"""
+        SELECT
+            CLUSTER_NUMBER,
+            QUERY_COUNT,
+            P50_EXEC_MS,
+            P95_EXEC_MS,
+            MAX_EXEC_MS,
+            AVG_QUEUED_OVERLOAD_MS,
+            AVG_QUEUED_PROVISIONING_MS,
+            POINT_LOOKUPS,
+            RANGE_SCANS,
+            INSERTS,
+            UPDATES
+        FROM {prefix}.V_CLUSTER_BREAKDOWN
+        WHERE TEST_ID = ?
+        ORDER BY CLUSTER_NUMBER ASC
+        """
+        rows = await pool.execute_query(query, params=[test_id])
+
     if not rows:
         return {"cluster_breakdown_available": False, "cluster_breakdown": []}
 
@@ -268,10 +444,31 @@ async def _fetch_sf_execution_latency_summary(
     This uses SF_EXECUTION_MS (INFORMATION_SCHEMA.QUERY_HISTORY.EXECUTION_TIME)
     which excludes client/network overhead.
 
+    When enrichment ratio is low (< 50%), also computes ESTIMATED SF execution
+    times by subtracting the median network overhead from APP_ELAPSED_MS.
+
     NOTE: This will raise if the underlying columns don't exist (e.g. older schema).
     Callers should catch and treat as "not available".
     """
     prefix = _prefix()
+
+    enrichment_query = f"""
+    SELECT
+        COUNT(*) AS total_queries,
+        COUNT(SF_EXECUTION_MS) AS enriched_queries,
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_ELAPSED_MS - SF_TOTAL_ELAPSED_MS) AS p50_overhead_ms
+    FROM {prefix}.QUERY_EXECUTIONS
+    WHERE TEST_ID = ?
+      AND COALESCE(WARMUP, FALSE) = FALSE
+      AND SUCCESS = TRUE
+    """
+    enrichment_rows = await pool.execute_query(enrichment_query, params=[test_id])
+    total_queries = int(enrichment_rows[0][0] or 0) if enrichment_rows else 0
+    enriched_queries = int(enrichment_rows[0][1] or 0) if enrichment_rows else 0
+    p50_overhead_ms = (
+        _to_float_or_none(enrichment_rows[0][2]) if enrichment_rows else None
+    )
+    enrichment_ratio = enriched_queries / total_queries if total_queries > 0 else 0.0
 
     # NOTE: Snowflake does not support FILTER(...) for ordered-set aggregates like
     # PERCENTILE_CONT the way we'd like. Use NULLing expressions (IFF) instead.
@@ -378,13 +575,26 @@ async def _fetch_sf_execution_latency_summary(
         return {
             "sf_latency_available": False,
             "sf_latency_sample_count": 0,
+            "sf_enrichment_total_queries": total_queries,
+            "sf_enrichment_enriched_queries": enriched_queries,
+            "sf_enrichment_ratio_pct": round(enrichment_ratio * 100, 1),
+            "sf_enrichment_low_warning": enrichment_ratio < 0.5 and total_queries > 100,
         }
 
     r = rows[0]
     sample_count = int(r[0] or 0)
+    low_enrichment = enrichment_ratio < 0.5 and total_queries > 100
+
     payload = {
         "sf_latency_available": sample_count > 0,
         "sf_latency_sample_count": sample_count,
+        "sf_enrichment_total_queries": total_queries,
+        "sf_enrichment_enriched_queries": enriched_queries,
+        "sf_enrichment_ratio_pct": round(enrichment_ratio * 100, 1),
+        "sf_enrichment_low_warning": low_enrichment,
+        "sf_enrichment_p50_overhead_ms": round(p50_overhead_ms, 2)
+        if p50_overhead_ms is not None
+        else None,
         "sf_p50_latency_ms": _to_float_or_none(r[1]),
         "sf_p95_latency_ms": _to_float_or_none(r[2]),
         "sf_p99_latency_ms": _to_float_or_none(r[3]),
@@ -421,6 +631,435 @@ async def _fetch_sf_execution_latency_summary(
         "sf_update_min_latency_ms": _to_float_or_none(r[34]),
         "sf_update_max_latency_ms": _to_float_or_none(r[35]),
     }
+
+    if low_enrichment and p50_overhead_ms is not None and p50_overhead_ms > 0:
+        est_query = f"""
+        SELECT
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY GREATEST(0, APP_ELAPSED_MS - ?)) AS EST_P50_MS,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY GREATEST(0, APP_ELAPSED_MS - ?)) AS EST_P95_MS,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY GREATEST(0, APP_ELAPSED_MS - ?)) AS EST_P99_MS,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (
+                ORDER BY IFF(QUERY_KIND = 'POINT_LOOKUP', GREATEST(0, APP_ELAPSED_MS - ?), NULL)
+            ) AS EST_POINT_LOOKUP_P50_MS,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (
+                ORDER BY IFF(QUERY_KIND = 'RANGE_SCAN', GREATEST(0, APP_ELAPSED_MS - ?), NULL)
+            ) AS EST_RANGE_SCAN_P50_MS
+        FROM {prefix}.QUERY_EXECUTIONS
+        WHERE TEST_ID = ?
+          AND COALESCE(WARMUP, FALSE) = FALSE
+          AND SUCCESS = TRUE
+        """
+        overhead = p50_overhead_ms
+        est_rows = await pool.execute_query(
+            est_query,
+            params=[overhead, overhead, overhead, overhead, overhead, test_id],
+        )
+        if est_rows and est_rows[0]:
+            er = est_rows[0]
+            payload["sf_estimated_available"] = True
+            payload["sf_estimated_p50_latency_ms"] = _to_float_or_none(er[0])
+            payload["sf_estimated_p95_latency_ms"] = _to_float_or_none(er[1])
+            payload["sf_estimated_p99_latency_ms"] = _to_float_or_none(er[2])
+            payload["sf_estimated_point_lookup_p50_latency_ms"] = _to_float_or_none(
+                er[3]
+            )
+            payload["sf_estimated_range_scan_p50_latency_ms"] = _to_float_or_none(er[4])
+
+    return payload
+
+
+async def _fetch_app_latency_summary_for_run(
+    *,
+    pool: Any,
+    parent_run_id: str,
+    parent_test_id: str,
+) -> dict[str, Any]:
+    """
+    Compute end-to-end (app) latency percentiles across all child tests for a parent run.
+    """
+    prefix = _prefix()
+    query = f"""
+    SELECT
+        COUNT(*) AS SAMPLE_COUNT,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P99_LATENCY_MS,
+        MIN(APP_ELAPSED_MS) AS MIN_LATENCY_MS,
+        MAX(APP_ELAPSED_MS) AS MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), APP_ELAPSED_MS, NULL)
+        ) AS READ_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), APP_ELAPSED_MS, NULL)
+        ) AS READ_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), APP_ELAPSED_MS, NULL)
+        ) AS READ_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), APP_ELAPSED_MS, NULL))
+            AS READ_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), APP_ELAPSED_MS, NULL))
+            AS READ_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), APP_ELAPSED_MS, NULL)
+        ) AS WRITE_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), APP_ELAPSED_MS, NULL)
+        ) AS WRITE_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), APP_ELAPSED_MS, NULL)
+        ) AS WRITE_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), APP_ELAPSED_MS, NULL))
+            AS WRITE_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), APP_ELAPSED_MS, NULL))
+            AS WRITE_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'POINT_LOOKUP', APP_ELAPSED_MS, NULL)
+        ) AS POINT_LOOKUP_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'POINT_LOOKUP', APP_ELAPSED_MS, NULL)
+        ) AS POINT_LOOKUP_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'POINT_LOOKUP', APP_ELAPSED_MS, NULL)
+        ) AS POINT_LOOKUP_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'POINT_LOOKUP', APP_ELAPSED_MS, NULL))
+            AS POINT_LOOKUP_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'POINT_LOOKUP', APP_ELAPSED_MS, NULL))
+            AS POINT_LOOKUP_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'RANGE_SCAN', APP_ELAPSED_MS, NULL)
+        ) AS RANGE_SCAN_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'RANGE_SCAN', APP_ELAPSED_MS, NULL)
+        ) AS RANGE_SCAN_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'RANGE_SCAN', APP_ELAPSED_MS, NULL)
+        ) AS RANGE_SCAN_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'RANGE_SCAN', APP_ELAPSED_MS, NULL))
+            AS RANGE_SCAN_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'RANGE_SCAN', APP_ELAPSED_MS, NULL))
+            AS RANGE_SCAN_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'INSERT', APP_ELAPSED_MS, NULL)
+        ) AS INSERT_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'INSERT', APP_ELAPSED_MS, NULL)
+        ) AS INSERT_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'INSERT', APP_ELAPSED_MS, NULL)
+        ) AS INSERT_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'INSERT', APP_ELAPSED_MS, NULL)) AS INSERT_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'INSERT', APP_ELAPSED_MS, NULL)) AS INSERT_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)
+        ) AS UPDATE_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)
+        ) AS UPDATE_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)
+        ) AS UPDATE_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)) AS UPDATE_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)) AS UPDATE_MAX_LATENCY_MS
+    FROM {prefix}.QUERY_EXECUTIONS qe
+    JOIN {prefix}.TEST_RESULTS tr
+      ON tr.TEST_ID = qe.TEST_ID
+    WHERE tr.RUN_ID = ?
+      AND tr.TEST_ID <> ?
+      AND COALESCE(qe.WARMUP, FALSE) = FALSE
+      AND qe.SUCCESS = TRUE
+      AND qe.APP_ELAPSED_MS IS NOT NULL
+    """
+    rows = await pool.execute_query(query, params=[parent_run_id, parent_test_id])
+    if not rows:
+        return {}
+
+    r = rows[0]
+    sample_count = int(r[0] or 0)
+    if sample_count <= 0:
+        return {}
+    return {
+        "p50_latency_ms": _to_float_or_none(r[1]),
+        "p95_latency_ms": _to_float_or_none(r[2]),
+        "p99_latency_ms": _to_float_or_none(r[3]),
+        "min_latency_ms": _to_float_or_none(r[4]),
+        "max_latency_ms": _to_float_or_none(r[5]),
+        "read_p50_latency_ms": _to_float_or_none(r[6]),
+        "read_p95_latency_ms": _to_float_or_none(r[7]),
+        "read_p99_latency_ms": _to_float_or_none(r[8]),
+        "read_min_latency_ms": _to_float_or_none(r[9]),
+        "read_max_latency_ms": _to_float_or_none(r[10]),
+        "write_p50_latency_ms": _to_float_or_none(r[11]),
+        "write_p95_latency_ms": _to_float_or_none(r[12]),
+        "write_p99_latency_ms": _to_float_or_none(r[13]),
+        "write_min_latency_ms": _to_float_or_none(r[14]),
+        "write_max_latency_ms": _to_float_or_none(r[15]),
+        "point_lookup_p50_latency_ms": _to_float_or_none(r[16]),
+        "point_lookup_p95_latency_ms": _to_float_or_none(r[17]),
+        "point_lookup_p99_latency_ms": _to_float_or_none(r[18]),
+        "point_lookup_min_latency_ms": _to_float_or_none(r[19]),
+        "point_lookup_max_latency_ms": _to_float_or_none(r[20]),
+        "range_scan_p50_latency_ms": _to_float_or_none(r[21]),
+        "range_scan_p95_latency_ms": _to_float_or_none(r[22]),
+        "range_scan_p99_latency_ms": _to_float_or_none(r[23]),
+        "range_scan_min_latency_ms": _to_float_or_none(r[24]),
+        "range_scan_max_latency_ms": _to_float_or_none(r[25]),
+        "insert_p50_latency_ms": _to_float_or_none(r[26]),
+        "insert_p95_latency_ms": _to_float_or_none(r[27]),
+        "insert_p99_latency_ms": _to_float_or_none(r[28]),
+        "insert_min_latency_ms": _to_float_or_none(r[29]),
+        "insert_max_latency_ms": _to_float_or_none(r[30]),
+        "update_p50_latency_ms": _to_float_or_none(r[31]),
+        "update_p95_latency_ms": _to_float_or_none(r[32]),
+        "update_p99_latency_ms": _to_float_or_none(r[33]),
+        "update_min_latency_ms": _to_float_or_none(r[34]),
+        "update_max_latency_ms": _to_float_or_none(r[35]),
+    }
+
+
+async def _fetch_sf_execution_latency_summary_for_run(
+    *,
+    pool: Any,
+    parent_run_id: str,
+    parent_test_id: str,
+) -> dict[str, Any]:
+    """
+    Compute SQL execution percentiles across all child tests for a parent run.
+    Also includes enrichment ratio stats and estimates when enrichment is low.
+    """
+    prefix = _prefix()
+
+    enrichment_query = f"""
+    SELECT
+        COUNT(*) AS total_queries,
+        COUNT(qe.SF_EXECUTION_MS) AS enriched_queries,
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY qe.APP_ELAPSED_MS - qe.SF_TOTAL_ELAPSED_MS) AS p50_overhead_ms
+    FROM {prefix}.QUERY_EXECUTIONS qe
+    JOIN {prefix}.TEST_RESULTS tr ON tr.TEST_ID = qe.TEST_ID
+    WHERE tr.RUN_ID = ?
+      AND tr.TEST_ID <> ?
+      AND COALESCE(qe.WARMUP, FALSE) = FALSE
+      AND qe.SUCCESS = TRUE
+    """
+    enrichment_rows = await pool.execute_query(
+        enrichment_query, params=[parent_run_id, parent_test_id]
+    )
+    total_queries = int(enrichment_rows[0][0] or 0) if enrichment_rows else 0
+    enriched_queries = int(enrichment_rows[0][1] or 0) if enrichment_rows else 0
+    p50_overhead_ms = (
+        _to_float_or_none(enrichment_rows[0][2]) if enrichment_rows else None
+    )
+    enrichment_ratio = enriched_queries / total_queries if total_queries > 0 else 0.0
+
+    query = f"""
+    SELECT
+        COUNT(*) AS SF_LATENCY_SAMPLE_COUNT,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY SF_EXECUTION_MS) AS SF_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY SF_EXECUTION_MS) AS SF_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY SF_EXECUTION_MS) AS SF_P99_LATENCY_MS,
+        MIN(SF_EXECUTION_MS) AS SF_MIN_LATENCY_MS,
+        MAX(SF_EXECUTION_MS) AS SF_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), SF_EXECUTION_MS, NULL)
+        ) AS SF_READ_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), SF_EXECUTION_MS, NULL)
+        ) AS SF_READ_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), SF_EXECUTION_MS, NULL)
+        ) AS SF_READ_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), SF_EXECUTION_MS, NULL))
+            AS SF_READ_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND IN ('POINT_LOOKUP', 'RANGE_SCAN'), SF_EXECUTION_MS, NULL))
+            AS SF_READ_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), SF_EXECUTION_MS, NULL)
+        ) AS SF_WRITE_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), SF_EXECUTION_MS, NULL)
+        ) AS SF_WRITE_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), SF_EXECUTION_MS, NULL)
+        ) AS SF_WRITE_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), SF_EXECUTION_MS, NULL))
+            AS SF_WRITE_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND IN ('INSERT', 'UPDATE'), SF_EXECUTION_MS, NULL))
+            AS SF_WRITE_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'POINT_LOOKUP', SF_EXECUTION_MS, NULL)
+        ) AS SF_POINT_LOOKUP_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'POINT_LOOKUP', SF_EXECUTION_MS, NULL)
+        ) AS SF_POINT_LOOKUP_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'POINT_LOOKUP', SF_EXECUTION_MS, NULL)
+        ) AS SF_POINT_LOOKUP_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'POINT_LOOKUP', SF_EXECUTION_MS, NULL))
+            AS SF_POINT_LOOKUP_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'POINT_LOOKUP', SF_EXECUTION_MS, NULL))
+            AS SF_POINT_LOOKUP_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'RANGE_SCAN', SF_EXECUTION_MS, NULL)
+        ) AS SF_RANGE_SCAN_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'RANGE_SCAN', SF_EXECUTION_MS, NULL)
+        ) AS SF_RANGE_SCAN_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'RANGE_SCAN', SF_EXECUTION_MS, NULL)
+        ) AS SF_RANGE_SCAN_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'RANGE_SCAN', SF_EXECUTION_MS, NULL))
+            AS SF_RANGE_SCAN_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'RANGE_SCAN', SF_EXECUTION_MS, NULL))
+            AS SF_RANGE_SCAN_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'INSERT', SF_EXECUTION_MS, NULL)
+        ) AS SF_INSERT_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'INSERT', SF_EXECUTION_MS, NULL)
+        ) AS SF_INSERT_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'INSERT', SF_EXECUTION_MS, NULL)
+        ) AS SF_INSERT_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'INSERT', SF_EXECUTION_MS, NULL)) AS SF_INSERT_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'INSERT', SF_EXECUTION_MS, NULL)) AS SF_INSERT_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)
+        ) AS SF_UPDATE_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)
+        ) AS SF_UPDATE_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)
+        ) AS SF_UPDATE_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MAX_LATENCY_MS
+    FROM {prefix}.QUERY_EXECUTIONS qe
+    JOIN {prefix}.TEST_RESULTS tr
+      ON tr.TEST_ID = qe.TEST_ID
+    WHERE tr.RUN_ID = ?
+      AND tr.TEST_ID <> ?
+      AND COALESCE(qe.WARMUP, FALSE) = FALSE
+      AND qe.SUCCESS = TRUE
+      AND qe.SF_EXECUTION_MS IS NOT NULL
+    """
+    rows = await pool.execute_query(query, params=[parent_run_id, parent_test_id])
+    if not rows:
+        return {
+            "sf_latency_available": False,
+            "sf_latency_sample_count": 0,
+            "sf_enrichment_total_queries": total_queries,
+            "sf_enrichment_enriched_queries": enriched_queries,
+            "sf_enrichment_ratio_pct": round(enrichment_ratio * 100, 1),
+            "sf_enrichment_low_warning": enrichment_ratio < 0.5 and total_queries > 100,
+        }
+
+    r = rows[0]
+    sample_count = int(r[0] or 0)
+    low_enrichment = enrichment_ratio < 0.5 and total_queries > 100
+
+    payload = {
+        "sf_latency_available": sample_count > 0,
+        "sf_latency_sample_count": sample_count,
+        "sf_enrichment_total_queries": total_queries,
+        "sf_enrichment_enriched_queries": enriched_queries,
+        "sf_enrichment_ratio_pct": round(enrichment_ratio * 100, 1),
+        "sf_enrichment_low_warning": low_enrichment,
+        "sf_enrichment_p50_overhead_ms": round(p50_overhead_ms, 2)
+        if p50_overhead_ms is not None
+        else None,
+        "sf_p50_latency_ms": _to_float_or_none(r[1]),
+        "sf_p95_latency_ms": _to_float_or_none(r[2]),
+        "sf_p99_latency_ms": _to_float_or_none(r[3]),
+        "sf_min_latency_ms": _to_float_or_none(r[4]),
+        "sf_max_latency_ms": _to_float_or_none(r[5]),
+        "sf_read_p50_latency_ms": _to_float_or_none(r[6]),
+        "sf_read_p95_latency_ms": _to_float_or_none(r[7]),
+        "sf_read_p99_latency_ms": _to_float_or_none(r[8]),
+        "sf_read_min_latency_ms": _to_float_or_none(r[9]),
+        "sf_read_max_latency_ms": _to_float_or_none(r[10]),
+        "sf_write_p50_latency_ms": _to_float_or_none(r[11]),
+        "sf_write_p95_latency_ms": _to_float_or_none(r[12]),
+        "sf_write_p99_latency_ms": _to_float_or_none(r[13]),
+        "sf_write_min_latency_ms": _to_float_or_none(r[14]),
+        "sf_write_max_latency_ms": _to_float_or_none(r[15]),
+        "sf_point_lookup_p50_latency_ms": _to_float_or_none(r[16]),
+        "sf_point_lookup_p95_latency_ms": _to_float_or_none(r[17]),
+        "sf_point_lookup_p99_latency_ms": _to_float_or_none(r[18]),
+        "sf_point_lookup_min_latency_ms": _to_float_or_none(r[19]),
+        "sf_point_lookup_max_latency_ms": _to_float_or_none(r[20]),
+        "sf_range_scan_p50_latency_ms": _to_float_or_none(r[21]),
+        "sf_range_scan_p95_latency_ms": _to_float_or_none(r[22]),
+        "sf_range_scan_p99_latency_ms": _to_float_or_none(r[23]),
+        "sf_range_scan_min_latency_ms": _to_float_or_none(r[24]),
+        "sf_range_scan_max_latency_ms": _to_float_or_none(r[25]),
+        "sf_insert_p50_latency_ms": _to_float_or_none(r[26]),
+        "sf_insert_p95_latency_ms": _to_float_or_none(r[27]),
+        "sf_insert_p99_latency_ms": _to_float_or_none(r[28]),
+        "sf_insert_min_latency_ms": _to_float_or_none(r[29]),
+        "sf_insert_max_latency_ms": _to_float_or_none(r[30]),
+        "sf_update_p50_latency_ms": _to_float_or_none(r[31]),
+        "sf_update_p95_latency_ms": _to_float_or_none(r[32]),
+        "sf_update_p99_latency_ms": _to_float_or_none(r[33]),
+        "sf_update_min_latency_ms": _to_float_or_none(r[34]),
+        "sf_update_max_latency_ms": _to_float_or_none(r[35]),
+    }
+
+    if low_enrichment and p50_overhead_ms is not None and p50_overhead_ms > 0:
+        est_query = f"""
+        SELECT
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY GREATEST(0, qe.APP_ELAPSED_MS - ?)) AS EST_P50_MS,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY GREATEST(0, qe.APP_ELAPSED_MS - ?)) AS EST_P95_MS,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY GREATEST(0, qe.APP_ELAPSED_MS - ?)) AS EST_P99_MS,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (
+                ORDER BY IFF(qe.QUERY_KIND = 'POINT_LOOKUP', GREATEST(0, qe.APP_ELAPSED_MS - ?), NULL)
+            ) AS EST_POINT_LOOKUP_P50_MS,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (
+                ORDER BY IFF(qe.QUERY_KIND = 'RANGE_SCAN', GREATEST(0, qe.APP_ELAPSED_MS - ?), NULL)
+            ) AS EST_RANGE_SCAN_P50_MS
+        FROM {prefix}.QUERY_EXECUTIONS qe
+        JOIN {prefix}.TEST_RESULTS tr ON tr.TEST_ID = qe.TEST_ID
+        WHERE tr.RUN_ID = ?
+          AND tr.TEST_ID <> ?
+          AND COALESCE(qe.WARMUP, FALSE) = FALSE
+          AND qe.SUCCESS = TRUE
+        """
+        overhead = p50_overhead_ms
+        est_rows = await pool.execute_query(
+            est_query,
+            params=[
+                overhead,
+                overhead,
+                overhead,
+                overhead,
+                overhead,
+                parent_run_id,
+                parent_test_id,
+            ],
+        )
+        if est_rows and est_rows[0]:
+            er = est_rows[0]
+            payload["sf_estimated_available"] = True
+            payload["sf_estimated_p50_latency_ms"] = _to_float_or_none(er[0])
+            payload["sf_estimated_p95_latency_ms"] = _to_float_or_none(er[1])
+            payload["sf_estimated_p99_latency_ms"] = _to_float_or_none(er[2])
+            payload["sf_estimated_point_lookup_p50_latency_ms"] = _to_float_or_none(
+                er[3]
+            )
+            payload["sf_estimated_range_scan_p50_latency_ms"] = _to_float_or_none(er[4])
+
     return payload
 
 
@@ -449,6 +1088,86 @@ async def run_from_template(template_id: str) -> RunTemplateResponse:
         raise http_exception("start test", e)
 
 
+@router.post(
+    "/from-template/{template_id}/autoscale",
+    response_model=RunTemplateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def run_from_template_autoscale(template_id: str) -> RunTemplateResponse:
+    try:
+        template = await registry._load_template(template_id)
+        template_config = dict(template.get("config") or {})
+        if not bool(template_config.get("autoscale_enabled")):
+            raise HTTPException(
+                status_code=400, detail="Autoscale is not enabled for this template."
+            )
+
+        spec = autoscale.AutoscaleSpec(
+            template_id=template_id,
+            max_cpu_percent=float(
+                template_config.get("autoscale_max_cpu_percent") or 85
+            ),
+            max_memory_percent=float(
+                template_config.get("autoscale_max_memory_percent") or 85
+            ),
+        )
+        run = await autoscale.prepare_autoscale_from_template(
+            template_id=template_id,
+            spec=spec,
+        )
+        return RunTemplateResponse(
+            test_id=run.parent_run_id,
+            dashboard_url=f"/dashboard/{run.parent_run_id}",
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Template not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise http_exception("start autoscale test", e)
+
+
+@router.post("/{test_id}/start-autoscale", status_code=status.HTTP_202_ACCEPTED)
+async def start_autoscale_test(test_id: str) -> dict[str, Any]:
+    try:
+        rows = await snowflake_pool.get_default_pool().execute_query(
+            f"""
+            SELECT TEST_CONFIG
+            FROM {_prefix()}.TEST_RESULTS
+            WHERE TEST_ID = ?
+            """,
+            params=[test_id],
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Test not found")
+        cfg = rows[0][0]
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        template_cfg = cfg.get("template_config") if isinstance(cfg, dict) else None
+        if not isinstance(template_cfg, dict) or not bool(
+            template_cfg.get("autoscale_enabled")
+        ):
+            raise HTTPException(
+                status_code=400, detail="Autoscale is not enabled for this test."
+            )
+
+        spec = autoscale.AutoscaleSpec(
+            template_id=str(cfg.get("template_id") or ""),
+            max_cpu_percent=float(template_cfg.get("autoscale_max_cpu_percent") or 85),
+            max_memory_percent=float(
+                template_cfg.get("autoscale_max_memory_percent") or 85
+            ),
+        )
+        run = await autoscale.start_autoscale_from_test(test_id=test_id, spec=spec)
+        return {"test_id": run.parent_run_id, "status": "RUNNING"}
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise http_exception("start autoscale test", e)
+
+
 @router.post("/{test_id}/start", status_code=status.HTTP_202_ACCEPTED)
 async def start_prepared_test(test_id: str) -> dict[str, Any]:
     try:
@@ -468,11 +1187,81 @@ async def stop_test(test_id: str) -> dict[str, Any]:
         running = await registry.stop(test_id)
         return {"test_id": running.test_id, "status": running.status}
     except KeyError:
-        raise HTTPException(status_code=404, detail="Test not found")
+        pass
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise http_exception("stop test", e)
+
+    pool = snowflake_pool.get_default_pool()
+    db = settings.RESULTS_DATABASE
+    schema = settings.RESULTS_SCHEMA
+
+    check_sql = f"""
+        SELECT RUN_ID FROM {db}.{schema}.TEST_RESULTS
+        WHERE TEST_ID = ? LIMIT 1
+    """
+    rows = await pool.execute_query(check_sql, params=[test_id])
+    if not rows:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    run_id = rows[0][0]
+    is_parent = run_id == test_id
+
+    if is_parent:
+        children_sql = f"""
+            SELECT TEST_ID FROM {db}.{schema}.TEST_RESULTS
+            WHERE RUN_ID = ? AND TEST_ID <> ?
+        """
+        child_rows = await pool.execute_query(children_sql, params=[test_id, test_id])
+        children = [r[0] for r in child_rows]
+
+        stopped = []
+        for child_id in children:
+            try:
+                running = await registry.stop(child_id)
+                stopped.append({"test_id": running.test_id, "status": running.status})
+            except KeyError:
+                pass
+            except Exception:
+                pass
+
+        killed_pids = []
+        try:
+            import subprocess
+
+            result = subprocess.run(
+                ["pgrep", "-f", f"parent-run-id {test_id}"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                pids = [
+                    int(p.strip())
+                    for p in result.stdout.strip().split("\n")
+                    if p.strip()
+                ]
+                for pid in pids:
+                    try:
+                        import os
+                        import signal
+
+                        os.kill(pid, signal.SIGTERM)
+                        killed_pids.append(pid)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+        except Exception:
+            pass
+
+        return {
+            "test_id": test_id,
+            "status": "stopping",
+            "children_stopped": stopped,
+            "processes_killed": killed_pids,
+            "is_parent": True,
+        }
+    else:
+        raise HTTPException(status_code=404, detail="Test not found in registry")
 
 
 @router.get("")
@@ -526,6 +1315,7 @@ async def list_tests(
         query = f"""
         SELECT
             TEST_ID,
+            RUN_ID,
             TEST_NAME,
             TABLE_TYPE,
             WAREHOUSE_SIZE,
@@ -555,6 +1345,7 @@ async def list_tests(
         for row in rows:
             (
                 test_id,
+                run_id,
                 test_name,
                 table_type_db,
                 wh_size,
@@ -591,6 +1382,7 @@ async def list_tests(
             results.append(
                 {
                     "test_id": test_id,
+                    "run_id": run_id,
                     "test_name": test_name,
                     "table_type": table_type_db,
                     "warehouse_size": wh_size,
@@ -734,6 +1526,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
         query = f"""
         SELECT
             TEST_ID,
+            RUN_ID,
             TEST_NAME,
             SCENARIO_NAME,
             TABLE_NAME,
@@ -801,6 +1594,19 @@ async def get_test(test_id: str) -> dict[str, Any]:
         WHERE TEST_ID = ?
         """
         rows = await pool.execute_query(query, params=[test_id])
+        if rows:
+            row = rows[0]
+            status_db = row[8]
+            end_time = row[10]
+            run_id = row[1]
+            if (
+                run_id
+                and str(run_id) == str(test_id)
+                and end_time is not None
+                and str(status_db or "").upper() == "RUNNING"
+            ):
+                await update_parent_run_aggregate(parent_run_id=str(test_id))
+                rows = await pool.execute_query(query, params=[test_id])
         if not rows:
             # Fallback to in-memory registry for freshly prepared tests that
             # haven't been persisted to results tables yet.
@@ -879,6 +1685,13 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     else None,
                     "qps_target_mode": "QPS" if load_mode == "QPS" else None,
                     "workload_type": str(running.scenario.workload_type),
+                    "autoscale_enabled": bool(cfg.get("autoscale_enabled")),
+                    "autoscale_max_cpu_percent": _num_from_dict(
+                        cfg, "autoscale_max_cpu_percent"
+                    ),
+                    "autoscale_max_memory_percent": _num_from_dict(
+                        cfg, "autoscale_max_memory_percent"
+                    ),
                     "custom_point_lookup_pct": _pct_from_dict(
                         cfg, "custom_point_lookup_pct"
                     )
@@ -929,6 +1742,26 @@ async def get_test(test_id: str) -> dict[str, Any]:
                         cfg.get("target_update_error_rate_pct", -1)
                     ),
                 }
+                # Add timing info for in-memory tests
+                warmup_secs = int(running.scenario.warmup_seconds or 0)
+                run_secs = int(running.scenario.duration_seconds or 0)
+                total_expected = warmup_secs + run_secs
+                from datetime import datetime, timezone
+
+                now = datetime.now(timezone.utc)
+                created_at = running.created_at
+                if created_at and not hasattr(created_at, "tzinfo"):
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                elif created_at and created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                elapsed_secs = (now - created_at).total_seconds() if created_at else 0.0
+                elapsed_secs = max(0.0, elapsed_secs)
+                payload["timing"] = {
+                    "warmup_seconds": warmup_secs,
+                    "run_seconds": run_secs,
+                    "total_expected_seconds": total_expected,
+                    "elapsed_display_seconds": round(elapsed_secs, 1),
+                }
                 if is_postgres:
                     try:
                         payload.update(
@@ -944,6 +1777,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
 
         (
             _,
+            run_id,
             test_name,
             scenario_name,
             table_name,
@@ -1009,6 +1843,8 @@ async def get_test(test_id: str) -> dict[str, Any]:
             enrichment_error,
         ) = rows[0]
 
+        is_parent_run = bool(run_id) and str(run_id) == str(test_id)
+
         cfg = test_config
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
@@ -1052,6 +1888,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
 
         payload: dict[str, Any] = {
             "test_id": test_id,
+            "run_id": run_id,
             "query_tag": query_tag,
             "test_name": test_name,
             "template_id": template_id,
@@ -1080,6 +1917,17 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "min_concurrency": min_concurrency if load_mode == "QPS" else None,
             "qps_target_mode": "QPS" if load_mode == "QPS" else None,
             "workload_type": workload_type,
+            "autoscale_enabled": bool(
+                template_cfg.get("autoscale_enabled")
+                if isinstance(template_cfg, dict)
+                else False
+            ),
+            "autoscale_max_cpu_percent": _num_from_dict(
+                template_cfg, "autoscale_max_cpu_percent"
+            ),
+            "autoscale_max_memory_percent": _num_from_dict(
+                template_cfg, "autoscale_max_memory_percent"
+            ),
             "custom_point_lookup_pct": _pct_from_dict(
                 template_cfg, "custom_point_lookup_pct"
             ),
@@ -1182,6 +2030,50 @@ async def get_test(test_id: str) -> dict[str, Any]:
             ),
         }
 
+        if is_parent_run:
+            try:
+                node_fmr_rows = await pool.execute_query(
+                    f"""
+                    SELECT
+                        TEST_ID,
+                        FIND_MAX_RESULT
+                    FROM {_prefix()}.TEST_RESULTS
+                    WHERE RUN_ID = ?
+                      AND TEST_ID <> ?
+                      AND FIND_MAX_RESULT IS NOT NULL
+                    ORDER BY START_TIME ASC
+                    """,
+                    params=[run_id, test_id],
+                )
+                node_find_max_results = []
+                for idx, (child_test_id, child_fmr_raw) in enumerate(node_fmr_rows):
+                    if child_fmr_raw:
+                        child_fmr = (
+                            json.loads(child_fmr_raw)
+                            if isinstance(child_fmr_raw, str)
+                            else child_fmr_raw
+                        )
+                        node_find_max_results.append(
+                            {
+                                "node_index": idx + 1,
+                                "test_id": child_test_id,
+                                "find_max_result": child_fmr,
+                            }
+                        )
+                payload["node_find_max_results"] = node_find_max_results
+
+                if len(node_find_max_results) > 1:
+                    payload["aggregated_find_max_result"] = (
+                        _compute_aggregated_find_max(node_find_max_results)
+                    )
+            except Exception as e:
+                logger.debug(
+                    "Failed to fetch per-node find_max_results for %s: %s",
+                    test_id,
+                    e,
+                )
+                payload["node_find_max_results"] = []
+
         # Per-query-type error rates and counts (best-effort; derived from QUERY_EXECUTIONS).
         payload.update(
             {
@@ -1198,16 +2090,34 @@ async def get_test(test_id: str) -> dict[str, Any]:
         try:
             status_upper = str(status_db or "").upper()
             if status_upper in {"COMPLETED", "FAILED", "STOPPED", "CANCELLED"}:
-                err_rows = await pool.execute_query(
-                    f"""
-                    SELECT QUERY_KIND, COUNT(*) AS N, SUM(IFF(SUCCESS, 0, 1)) AS ERR
-                    FROM {_prefix()}.QUERY_EXECUTIONS
-                    WHERE TEST_ID = ?
-                      AND COALESCE(WARMUP, FALSE) = FALSE
-                    GROUP BY QUERY_KIND
-                    """,
-                    params=[test_id],
-                )
+                if is_parent_run:
+                    err_rows = await pool.execute_query(
+                        f"""
+                        SELECT
+                            qe.QUERY_KIND,
+                            COUNT(*) AS N,
+                            SUM(IFF(qe.SUCCESS, 0, 1)) AS ERR
+                        FROM {_prefix()}.QUERY_EXECUTIONS qe
+                        JOIN {_prefix()}.TEST_RESULTS tr
+                          ON tr.TEST_ID = qe.TEST_ID
+                        WHERE tr.RUN_ID = ?
+                          AND tr.TEST_ID <> ?
+                          AND COALESCE(qe.WARMUP, FALSE) = FALSE
+                        GROUP BY qe.QUERY_KIND
+                        """,
+                        params=[run_id, test_id],
+                    )
+                else:
+                    err_rows = await pool.execute_query(
+                        f"""
+                        SELECT QUERY_KIND, COUNT(*) AS N, SUM(IFF(SUCCESS, 0, 1)) AS ERR
+                        FROM {_prefix()}.QUERY_EXECUTIONS
+                        WHERE TEST_ID = ?
+                          AND COALESCE(WARMUP, FALSE) = FALSE
+                        GROUP BY QUERY_KIND
+                        """,
+                        params=[test_id],
+                    )
                 err_key_map = {
                     "POINT_LOOKUP": "point_lookup_error_rate_pct",
                     "RANGE_SCAN": "range_scan_error_rate_pct",
@@ -1239,9 +2149,20 @@ async def get_test(test_id: str) -> dict[str, Any]:
         # Best-effort SQL-execution latency summaries (may be missing for running tests,
         # cancelled runs, or older schemas without SF_* columns).
         try:
-            payload.update(
-                await _fetch_sf_execution_latency_summary(pool=pool, test_id=test_id)
-            )
+            if is_parent_run:
+                payload.update(
+                    await _fetch_sf_execution_latency_summary_for_run(
+                        pool=pool,
+                        parent_run_id=str(run_id),
+                        parent_test_id=str(test_id),
+                    )
+                )
+            else:
+                payload.update(
+                    await _fetch_sf_execution_latency_summary(
+                        pool=pool, test_id=test_id
+                    )
+                )
         except Exception as e:
             logger.debug(
                 "Failed to compute SF execution latency summary for test %s: %s",
@@ -1251,6 +2172,23 @@ async def get_test(test_id: str) -> dict[str, Any]:
             payload.update(
                 {"sf_latency_available": False, "sf_latency_sample_count": 0}
             )
+
+        # For parent runs, backfill detailed end-to-end latency from child query logs.
+        if is_parent_run:
+            try:
+                payload.update(
+                    await _fetch_app_latency_summary_for_run(
+                        pool=pool,
+                        parent_run_id=str(run_id),
+                        parent_test_id=str(test_id),
+                    )
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to compute parent app latency summary for %s: %s",
+                    test_id,
+                    e,
+                )
 
         # Best-effort: warehouse queueing + MCW breakdown (requires query-history enrichment).
         try:
@@ -1303,6 +2241,65 @@ async def get_test(test_id: str) -> dict[str, Any]:
         except Exception:
             # Best-effort only; never fail the API response due to registry issues.
             pass
+
+        # For multi-node tests, derive phase and timing from elapsed time and config
+        if is_parent_run and str(status_db or "").upper() == "RUNNING":
+            try:
+                # Extract warmup and run seconds from the scenario config
+                scenario_cfg = cfg.get("scenario", {}) if isinstance(cfg, dict) else {}
+                if not isinstance(scenario_cfg, dict):
+                    scenario_cfg = {}
+                warmup_secs = int(float(scenario_cfg.get("warmup_seconds") or 0))
+                run_secs = int(float(scenario_cfg.get("duration_seconds") or 0))
+                load_mode_upper = str(load_mode or "").strip().upper()
+                if load_mode_upper == "FIND_MAX_CONCURRENCY":
+                    run_secs = 0
+                    total_expected_secs = 0
+                else:
+                    total_expected_secs = warmup_secs + run_secs
+
+                # Calculate elapsed time
+                from datetime import datetime, timezone
+
+                elapsed_secs = 0.0
+                if start_time:
+                    st = start_time
+                    now = datetime.now(timezone.utc)
+                    if not hasattr(st, "tzinfo") or st.tzinfo is None:
+                        st = st.replace(tzinfo=timezone.utc)
+                    else:
+                        st = st.astimezone(timezone.utc)
+                    elapsed_secs = (now - st).total_seconds()
+                    elapsed_secs = max(0.0, elapsed_secs)
+
+                # Derive phase from elapsed time
+                derived_phase = "PREPARING"
+                if elapsed_secs >= 0:
+                    derived_phase = "WARMUP"
+                if warmup_secs > 0 and elapsed_secs >= warmup_secs:
+                    derived_phase = "RUNNING"
+                if (
+                    load_mode_upper != "FIND_MAX_CONCURRENCY"
+                    and total_expected_secs > 0
+                    and elapsed_secs >= total_expected_secs
+                ):
+                    derived_phase = "PROCESSING"
+
+                # Only set phase if not already set by registry
+                if not payload.get("phase"):
+                    payload["phase"] = derived_phase
+
+                # Add timing info
+                payload["timing"] = {
+                    "warmup_seconds": warmup_secs,
+                    "run_seconds": run_secs,
+                    "total_expected_seconds": total_expected_secs,
+                    "elapsed_display_seconds": round(elapsed_secs, 1),
+                }
+            except Exception as e:
+                logger.debug(
+                    "Failed to derive timing for multi-node test %s: %s", test_id, e
+                )
 
         return payload
     except HTTPException:
@@ -1730,19 +2727,95 @@ async def get_test_logs(
     test_id: str,
     limit: int = Query(500, ge=1, le=2000),
     offset: int = Query(0, ge=0),
+    child_test_id: str | None = Query(None),
 ) -> dict[str, Any]:
     """
     Fetch persisted per-test logs (and in-memory logs for running tests).
     """
     try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+        run_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_rows[0][0] if run_rows else None
+        is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+        nodes: list[dict[str, Any]] = []
+        selected_test_id = test_id
+        if is_parent:
+            child_rows = await pool.execute_query(
+                f"""
+                SELECT TEST_ID, TEST_CONFIG
+                FROM {prefix}.TEST_RESULTS
+                WHERE RUN_ID = ?
+                  AND TEST_ID <> ?
+                ORDER BY TEST_ID ASC
+                """,
+                params=[test_id, test_id],
+            )
+
+            def _parse_test_config(raw: Any) -> dict[str, Any]:
+                cfg: Any = raw
+                if isinstance(cfg, str):
+                    try:
+                        cfg = json.loads(cfg)
+                    except Exception:
+                        cfg = {}
+                return cfg if isinstance(cfg, dict) else {}
+
+            def _extract_node_context(cfg: dict[str, Any]) -> dict[str, Any]:
+                template_cfg = cfg.get("template_config", {})
+                if not isinstance(template_cfg, dict):
+                    template_cfg = {}
+                scenario_cfg = cfg.get("scenario", {})
+                if not isinstance(scenario_cfg, dict):
+                    scenario_cfg = {}
+                return {
+                    "node_id": template_cfg.get("node_id"),
+                    "worker_group_id": int(scenario_cfg.get("worker_group_id") or 0),
+                    "worker_group_count": int(
+                        scenario_cfg.get("worker_group_count") or 1
+                    ),
+                }
+
+            for child_id, child_cfg in child_rows:
+                ctx = _extract_node_context(_parse_test_config(child_cfg))
+                node_id = ctx.get("node_id")
+                group_id = int(ctx.get("worker_group_id") or 0)
+                group_count = int(ctx.get("worker_group_count") or 1)
+                label = node_id or str(child_id)
+                if group_count > 1:
+                    label = f"{label} (group {group_id + 1}/{group_count})"
+                nodes.append(
+                    {
+                        "test_id": str(child_id),
+                        "node_id": node_id,
+                        "worker_group_id": group_id,
+                        "worker_group_count": group_count,
+                        "label": label,
+                    }
+                )
+
+            if child_test_id and any(n["test_id"] == child_test_id for n in nodes):
+                selected_test_id = child_test_id
+            elif nodes:
+                selected_test_id = nodes[0]["test_id"]
+            else:
+                selected_test_id = test_id
+
         # Prefer in-memory logs for running/prepared tests so refreshes don't lose context.
-        running = await registry.get(test_id)
+        running = await registry.get(selected_test_id)
         if running is not None and running.log_buffer:
             logs = list(running.log_buffer)
             logs.sort(key=lambda r: int(r.get("seq") or 0))
-            return {"test_id": test_id, "logs": logs[offset : offset + limit]}
-
-        pool = snowflake_pool.get_default_pool()
+            return {
+                "test_id": test_id,
+                "selected_test_id": selected_test_id,
+                "nodes": nodes,
+                "logs": logs[offset : offset + limit],
+            }
         query = f"""
         SELECT
             LOG_ID,
@@ -1753,12 +2826,12 @@ async def get_test_logs(
             LOGGER,
             MESSAGE,
             EXCEPTION
-        FROM {_prefix()}.TEST_LOGS
+        FROM {prefix}.TEST_LOGS
         WHERE TEST_ID = ?
         ORDER BY SEQ ASC
         LIMIT ? OFFSET ?
         """
-        rows = await pool.execute_query(query, params=[test_id, limit, offset])
+        rows = await pool.execute_query(query, params=[selected_test_id, limit, offset])
 
         logs: list[dict[str, Any]] = []
         for row in rows:
@@ -1788,7 +2861,12 @@ async def get_test_logs(
                 }
             )
 
-        return {"test_id": test_id, "logs": logs}
+        return {
+            "test_id": test_id,
+            "selected_test_id": selected_test_id,
+            "nodes": nodes,
+            "logs": logs,
+        }
     except Exception as e:
         # If logs table isn't present yet, or any query fails, degrade gracefully
         # for the dashboard rather than hard-erroring.
@@ -1822,6 +2900,177 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
         ORDER BY TIMESTAMP ASC
         """
         rows = await pool.execute_query(query, params=[test_id])
+        if not rows:
+            run_rows = await pool.execute_query(
+                f"SELECT RUN_ID FROM {_prefix()}.TEST_RESULTS WHERE TEST_ID = ?",
+                params=[test_id],
+            )
+            run_id = run_rows[0][0] if run_rows else None
+            if run_id and str(run_id) == str(test_id):
+                node_query = f"""
+                SELECT
+                    TIMESTAMP,
+                    ELAPSED_SECONDS,
+                    QPS,
+                    P50_LATENCY_MS,
+                    P95_LATENCY_MS,
+                    P99_LATENCY_MS,
+                    ACTIVE_CONNECTIONS,
+                    TARGET_WORKERS,
+                    CUSTOM_METRICS
+                FROM {_prefix()}.NODE_METRICS_SNAPSHOTS
+                WHERE PARENT_RUN_ID = ?
+                ORDER BY TIMESTAMP ASC
+                """
+                node_rows = await pool.execute_query(node_query, params=[str(run_id)])
+                if node_rows:
+
+                    @dataclass
+                    class _Bucket:
+                        timestamp: Any
+                        elapsed_seconds: float
+                        ops_per_sec: float
+                        p50_latency_ms: list[tuple[float, float]]
+                        p95_latency_ms: list[tuple[float, float]]
+                        p99_latency_ms: list[tuple[float, float]]
+                        active_connections: int
+                        target_workers: int
+                        custom_metrics: list[Any]
+
+                    buckets: dict[float, _Bucket] = {}
+                    for (
+                        timestamp,
+                        elapsed,
+                        ops_per_sec,
+                        p50,
+                        p95,
+                        p99,
+                        active_connections,
+                        target_workers,
+                        custom_metrics,
+                    ) in node_rows:
+                        try:
+                            # Aggregate to whole-second buckets for history charts.
+                            bucket = round(float(elapsed or 0), 0)
+                        except Exception:
+                            bucket = 0.0
+                        agg = buckets.get(bucket)
+                        if not agg:
+                            agg = _Bucket(
+                                timestamp=timestamp,
+                                elapsed_seconds=float(elapsed or 0),
+                                ops_per_sec=0.0,
+                                p50_latency_ms=[],
+                                p95_latency_ms=[],
+                                p99_latency_ms=[],
+                                active_connections=0,
+                                target_workers=0,
+                                custom_metrics=[],
+                            )
+                            buckets[bucket] = agg
+                        if timestamp and agg.timestamp and timestamp < agg.timestamp:
+                            agg.timestamp = timestamp
+                        agg.elapsed_seconds = max(
+                            float(elapsed or 0), agg.elapsed_seconds
+                        )
+                        agg.ops_per_sec += float(ops_per_sec or 0)
+                        agg.p50_latency_ms.append(
+                            (float(p50 or 0), float(ops_per_sec or 0))
+                        )
+                        agg.p95_latency_ms.append(
+                            (float(p95 or 0), float(ops_per_sec or 0))
+                        )
+                        agg.p99_latency_ms.append(
+                            (float(p99 or 0), float(ops_per_sec or 0))
+                        )
+                        agg.active_connections += int(active_connections or 0)
+                        agg.target_workers += int(target_workers or 0)
+                        if custom_metrics:
+                            agg.custom_metrics.append(custom_metrics)
+
+                    def _weighted_avg(values: list[tuple[float, float]]) -> float:
+                        total_w = sum(w for _, w in values)
+                        if total_w <= 0:
+                            if not values:
+                                return 0.0
+                            return float(sum(v for v, _ in values) / len(values))
+                        return float(sum(v * w for v, w in values) / total_w)
+
+                    def _sum_dicts(
+                        dicts: list[dict[str, Any]],
+                    ) -> dict[str, float]:
+                        out: dict[str, float] = {}
+                        for d in dicts:
+                            for key, value in d.items():
+                                try:
+                                    out[key] = out.get(key, 0.0) + float(value or 0)
+                                except Exception:
+                                    continue
+                        return out
+
+                    def _avg_dicts(
+                        dicts: list[dict[str, Any]],
+                    ) -> dict[str, float]:
+                        if not dicts:
+                            return {}
+                        summed = _sum_dicts(dicts)
+                        return {
+                            key: value / len(dicts) for key, value in summed.items()
+                        }
+
+                    def _normalize_metrics(raw: Any) -> dict[str, Any]:
+                        if isinstance(raw, str):
+                            try:
+                                raw = json.loads(raw)
+                            except Exception:
+                                return {}
+                        return raw if isinstance(raw, dict) else {}
+
+                    aggregated_rows: list[tuple[Any, ...]] = []
+                    for agg in buckets.values():
+                        custom_list = [
+                            _normalize_metrics(cm) for cm in agg.custom_metrics
+                        ]
+                        app_ops_list = [
+                            cm.get("app_ops_breakdown", {})
+                            for cm in custom_list
+                            if isinstance(cm.get("app_ops_breakdown"), dict)
+                        ]
+                        sf_bench_list = [
+                            cm.get("sf_bench", {})
+                            for cm in custom_list
+                            if isinstance(cm.get("sf_bench"), dict)
+                        ]
+                        warehouse_list = [
+                            cm.get("warehouse", {})
+                            for cm in custom_list
+                            if isinstance(cm.get("warehouse"), dict)
+                        ]
+                        resources_list = [
+                            cm.get("resources", {})
+                            for cm in custom_list
+                            if isinstance(cm.get("resources"), dict)
+                        ]
+                        custom_agg = {
+                            "app_ops_breakdown": _sum_dicts(app_ops_list),
+                            "sf_bench": _sum_dicts(sf_bench_list),
+                            "warehouse": _sum_dicts(warehouse_list),
+                            "resources": _avg_dicts(resources_list),
+                        }
+                        aggregated_rows.append(
+                            (
+                                agg.timestamp,
+                                agg.elapsed_seconds,
+                                agg.ops_per_sec,
+                                _weighted_avg(agg.p50_latency_ms),
+                                _weighted_avg(agg.p95_latency_ms),
+                                _weighted_avg(agg.p99_latency_ms),
+                                agg.active_connections,
+                                agg.target_workers,
+                                custom_agg,
+                            )
+                        )
+                    rows = sorted(aggregated_rows, key=lambda item: item[0] or "")
 
         snapshots = []
         for row in rows:
@@ -1974,6 +3223,235 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
         raise http_exception("get test metrics", e)
 
 
+@router.get("/{test_id}/node-metrics")
+async def get_node_metrics(test_id: str) -> dict[str, Any]:
+    """
+    Fetch per-node time-series metrics snapshots for multi-node runs.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        run_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_rows[0][0] if run_rows else None
+        parent_run_id = run_id or test_id
+
+        query = f"""
+        SELECT
+            NODE_ID,
+            WORKER_GROUP_ID,
+            WORKER_GROUP_COUNT,
+            TIMESTAMP,
+            ELAPSED_SECONDS,
+            QPS,
+            P50_LATENCY_MS,
+            P95_LATENCY_MS,
+            P99_LATENCY_MS,
+            ACTIVE_CONNECTIONS,
+            TARGET_WORKERS,
+            CUSTOM_METRICS
+        FROM {prefix}.NODE_METRICS_SNAPSHOTS
+        WHERE PARENT_RUN_ID = ?
+        ORDER BY WORKER_GROUP_ID ASC, TIMESTAMP ASC
+        """
+        rows = await pool.execute_query(query, params=[parent_run_id])
+        using_fallback = False
+        if not rows:
+            if not run_id:
+                return {
+                    "test_id": test_id,
+                    "parent_run_id": parent_run_id,
+                    "available": False,
+                    "nodes": [],
+                }
+
+            fallback_rows = await pool.execute_query(
+                f"""
+                SELECT
+                    tr.TEST_ID,
+                    tr.TEST_CONFIG,
+                    ms.TIMESTAMP,
+                    ms.ELAPSED_SECONDS,
+                    ms.QPS,
+                    ms.P50_LATENCY_MS,
+                    ms.P95_LATENCY_MS,
+                    ms.P99_LATENCY_MS,
+                    ms.ACTIVE_CONNECTIONS,
+                    ms.TARGET_WORKERS,
+                    ms.CUSTOM_METRICS
+                FROM {prefix}.TEST_RESULTS tr
+                JOIN {prefix}.METRICS_SNAPSHOTS ms
+                  ON ms.TEST_ID = tr.TEST_ID
+                WHERE tr.RUN_ID = ?
+                  AND tr.TEST_ID <> ?
+                ORDER BY tr.TEST_ID ASC, ms.TIMESTAMP ASC
+                """,
+                params=[parent_run_id, parent_run_id],
+            )
+            if not fallback_rows:
+                return {
+                    "test_id": test_id,
+                    "parent_run_id": parent_run_id,
+                    "available": False,
+                    "nodes": [],
+                }
+            rows = fallback_rows
+            using_fallback = True
+
+            def _parse_test_config(raw: Any) -> dict[str, Any]:
+                cfg: Any = raw
+                if isinstance(cfg, str):
+                    try:
+                        cfg = json.loads(cfg)
+                    except Exception:
+                        cfg = {}
+                if not isinstance(cfg, dict):
+                    return {}
+                return cfg
+
+            def _extract_node_context(cfg: dict[str, Any]) -> dict[str, Any]:
+                template_cfg = (
+                    cfg.get("template_config") if isinstance(cfg, dict) else {}
+                )
+                if not isinstance(template_cfg, dict):
+                    template_cfg = {}
+                scenario_cfg = cfg.get("scenario") if isinstance(cfg, dict) else {}
+                if not isinstance(scenario_cfg, dict):
+                    scenario_cfg = {}
+                return {
+                    "node_id": template_cfg.get("node_id"),
+                    "worker_group_id": int(scenario_cfg.get("worker_group_id") or 0),
+                    "worker_group_count": int(
+                        scenario_cfg.get("worker_group_count") or 1
+                    ),
+                }
+
+        def _to_int(v: Any) -> int:
+            try:
+                return int(v or 0)
+            except Exception:
+                return 0
+
+        def _to_float(v: Any) -> float:
+            try:
+                return float(v or 0)
+            except Exception:
+                return 0.0
+
+        nodes: dict[str, dict[str, Any]] = {}
+        node_context_cache: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if using_fallback:
+                (
+                    test_id_row,
+                    test_config,
+                    timestamp,
+                    elapsed_seconds,
+                    qps,
+                    p50,
+                    p95,
+                    p99,
+                    active_connections,
+                    target_workers,
+                    custom_metrics,
+                ) = row
+                ctx = node_context_cache.get(str(test_id_row))
+                if ctx is None:
+                    cfg = _parse_test_config(test_config)
+                    ctx = _extract_node_context(cfg)
+                    node_context_cache[str(test_id_row)] = ctx
+                node_id = ctx.get("node_id")
+                worker_group_id = int(ctx.get("worker_group_id") or 0)
+                worker_group_count = int(ctx.get("worker_group_count") or 1)
+            else:
+                (
+                    node_id,
+                    worker_group_id,
+                    worker_group_count,
+                    timestamp,
+                    elapsed_seconds,
+                    qps,
+                    p50,
+                    p95,
+                    p99,
+                    active_connections,
+                    target_workers,
+                    custom_metrics,
+                ) = row
+
+            cm: Any = custom_metrics
+            if isinstance(cm, str):
+                try:
+                    cm = json.loads(cm)
+                except Exception:
+                    cm = {}
+            if cm is None:
+                cm = {}
+            resources: dict[str, Any] = {}
+            if isinstance(cm, dict):
+                maybe_res = cm.get("resources")
+                if isinstance(maybe_res, dict):
+                    resources = maybe_res
+
+            key = f"{node_id or 'node'}:{int(worker_group_id or 0)}"
+            node = nodes.get(key)
+            if node is None:
+                node = {
+                    "key": key,
+                    "node_id": node_id,
+                    "worker_group_id": int(worker_group_id or 0),
+                    "worker_group_count": int(worker_group_count or 0),
+                    "snapshots": [],
+                }
+                nodes[key] = node
+
+            snapshots = node.get("snapshots")
+            if not isinstance(snapshots, list):
+                snapshots = []
+                node["snapshots"] = snapshots
+            snapshots_list = cast(list[dict[str, Any]], snapshots)
+            snapshots_list.append(
+                {
+                    "timestamp": timestamp.isoformat()
+                    if hasattr(timestamp, "isoformat")
+                    else str(timestamp),
+                    "elapsed_seconds": float(elapsed_seconds or 0),
+                    "qps": float(qps or 0),
+                    "p50_latency": float(p50 or 0),
+                    "p95_latency": float(p95 or 0),
+                    "p99_latency": float(p99 or 0),
+                    "active_connections": _to_int(active_connections),
+                    "target_workers": _to_int(target_workers),
+                    "resources_cpu_percent": _to_float(resources.get("cpu_percent")),
+                    "resources_memory_mb": _to_float(resources.get("memory_mb")),
+                    "resources_host_cpu_percent": _to_float(
+                        resources.get("host_cpu_percent")
+                    ),
+                    "resources_host_memory_mb": _to_float(
+                        resources.get("host_memory_mb")
+                    ),
+                    "resources_cgroup_cpu_percent": _to_float(
+                        resources.get("cgroup_cpu_percent")
+                    ),
+                    "resources_cgroup_memory_mb": _to_float(
+                        resources.get("cgroup_memory_mb")
+                    ),
+                }
+            )
+
+        return {
+            "test_id": test_id,
+            "parent_run_id": parent_run_id,
+            "available": True,
+            "nodes": list(nodes.values()),
+        }
+    except Exception as e:
+        raise http_exception("get node metrics", e)
+
+
 @router.get("/{test_id}/warehouse-timeseries")
 async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
     """
@@ -1982,6 +3460,8 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
     This is derived from QUERY_EXECUTIONS (post-processed) and expanded to a
     per-second timeline based on TEST_RESULTS.START_TIME + TEST_RESULTS.DURATION_SECONDS.
 
+    For parent runs (multi-node), aggregates data from all child runs.
+
     Falls back to real-time METRICS_SNAPSHOTS cluster data when QUERY_HISTORY
     enrichment is incomplete (which happens due to ~45s latency in QUERY_HISTORY).
     """
@@ -1989,59 +3469,137 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
         pool = snowflake_pool.get_default_pool()
         prefix = _prefix()
 
-        query = f"""
-        WITH tr AS (
-            SELECT
-                TEST_ID,
-                DATE_TRUNC('second', START_TIME) AS START_SECOND,
-                COALESCE(DURATION_SECONDS, DATEDIFF('second', START_TIME, END_TIME)) AS DURATION_SECONDS
-            FROM {prefix}.TEST_RESULTS
-            WHERE TEST_ID = ?
-        ),
-        seconds AS (
-            SELECT
-                DATEADD('second', g.SEQ, tr.START_SECOND) AS SECOND,
-                g.SEQ AS ELAPSED_SECONDS
-            FROM tr
-            JOIN (
-                SELECT SEQ4() AS SEQ
-                FROM TABLE(GENERATOR(ROWCOUNT => 86400))
-            ) g
-              ON g.SEQ <= COALESCE(tr.DURATION_SECONDS, 0)
-        ),
-        realtime_clusters AS (
-            SELECT
-                DATE_TRUNC('second', TIMESTAMP) AS SECOND,
-                MAX(COALESCE(CUSTOM_METRICS:warehouse:started_clusters::INTEGER, 0)) AS STARTED_CLUSTERS
-            FROM {prefix}.METRICS_SNAPSHOTS
-            WHERE TEST_ID = ?
-            GROUP BY DATE_TRUNC('second', TIMESTAMP)
+        run_id_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
         )
-        SELECT
-            s.SECOND AS TS,
-            s.ELAPSED_SECONDS,
-            COALESCE(wt.ACTIVE_CLUSTERS, 0) AS ACTIVE_CLUSTERS,
-            COALESCE(rt.STARTED_CLUSTERS, 0) AS REALTIME_CLUSTERS,
-            COALESCE(wt.QUERIES_STARTED, 0) AS QUERIES_STARTED,
-            COALESCE(wt.TOTAL_QUEUE_OVERLOAD_MS, 0) AS TOTAL_QUEUE_OVERLOAD_MS,
-            COALESCE(wt.TOTAL_QUEUE_PROVISIONING_MS, 0) AS TOTAL_QUEUE_PROVISIONING_MS,
-            COALESCE(
-                COALESCE(wt.TOTAL_QUEUE_OVERLOAD_MS, 0) / NULLIF(wt.QUERIES_STARTED, 0),
-                0
-            ) AS AVG_QUEUE_OVERLOAD_MS,
-            COALESCE(
-                COALESCE(wt.TOTAL_QUEUE_PROVISIONING_MS, 0) / NULLIF(wt.QUERIES_STARTED, 0),
-                0
-            ) AS AVG_QUEUE_PROVISIONING_MS
-        FROM seconds s
-        LEFT JOIN {prefix}.V_WAREHOUSE_TIMESERIES wt
-          ON wt.TEST_ID = ?
-         AND wt.SECOND = s.SECOND
-        LEFT JOIN realtime_clusters rt
-          ON rt.SECOND = s.SECOND
-        ORDER BY s.SECOND ASC
-        """
-        rows = await pool.execute_query(query, params=[test_id, test_id, test_id])
+        run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+        is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+        if is_parent:
+            query = f"""
+            WITH tr AS (
+                SELECT
+                    MIN(START_TIME) AS MIN_START,
+                    MAX(DATEADD('second', COALESCE(DURATION_SECONDS, 0), START_TIME)) AS MAX_END
+                FROM {prefix}.TEST_RESULTS
+                WHERE RUN_ID = ?
+                  AND TEST_ID <> ?
+            ),
+            seconds AS (
+                SELECT
+                    DATEADD('second', g.SEQ, DATE_TRUNC('second', tr.MIN_START)) AS SECOND,
+                    g.SEQ AS ELAPSED_SECONDS
+                FROM tr
+                JOIN (
+                    SELECT SEQ4() AS SEQ
+                    FROM TABLE(GENERATOR(ROWCOUNT => 86400))
+                ) g
+                  ON g.SEQ <= DATEDIFF('second', tr.MIN_START, tr.MAX_END)
+            ),
+            child_ids AS (
+                SELECT TEST_ID
+                FROM {prefix}.TEST_RESULTS
+                WHERE RUN_ID = ?
+                  AND TEST_ID <> ?
+            ),
+            wh_data AS (
+                SELECT
+                    wt.SECOND,
+                    MAX(wt.ACTIVE_CLUSTERS) AS ACTIVE_CLUSTERS,
+                    SUM(wt.QUERIES_STARTED) AS QUERIES_STARTED,
+                    SUM(wt.TOTAL_QUEUE_OVERLOAD_MS) AS TOTAL_QUEUE_OVERLOAD_MS,
+                    SUM(wt.TOTAL_QUEUE_PROVISIONING_MS) AS TOTAL_QUEUE_PROVISIONING_MS
+                FROM {prefix}.V_WAREHOUSE_TIMESERIES wt
+                JOIN child_ids ci ON ci.TEST_ID = wt.TEST_ID
+                GROUP BY wt.SECOND
+            ),
+            realtime_clusters AS (
+                SELECT
+                    DATE_TRUNC('second', ms.TIMESTAMP) AS SECOND,
+                    MAX(COALESCE(ms.CUSTOM_METRICS:warehouse:started_clusters::INTEGER, 0)) AS STARTED_CLUSTERS
+                FROM {prefix}.METRICS_SNAPSHOTS ms
+                JOIN child_ids ci ON ci.TEST_ID = ms.TEST_ID
+                GROUP BY DATE_TRUNC('second', ms.TIMESTAMP)
+            )
+            SELECT
+                s.SECOND AS TS,
+                s.ELAPSED_SECONDS,
+                COALESCE(wh.ACTIVE_CLUSTERS, 0) AS ACTIVE_CLUSTERS,
+                COALESCE(rt.STARTED_CLUSTERS, 0) AS REALTIME_CLUSTERS,
+                COALESCE(wh.QUERIES_STARTED, 0) AS QUERIES_STARTED,
+                COALESCE(wh.TOTAL_QUEUE_OVERLOAD_MS, 0) AS TOTAL_QUEUE_OVERLOAD_MS,
+                COALESCE(wh.TOTAL_QUEUE_PROVISIONING_MS, 0) AS TOTAL_QUEUE_PROVISIONING_MS,
+                COALESCE(
+                    COALESCE(wh.TOTAL_QUEUE_OVERLOAD_MS, 0) / NULLIF(wh.QUERIES_STARTED, 0),
+                    0
+                ) AS AVG_QUEUE_OVERLOAD_MS,
+                COALESCE(
+                    COALESCE(wh.TOTAL_QUEUE_PROVISIONING_MS, 0) / NULLIF(wh.QUERIES_STARTED, 0),
+                    0
+                ) AS AVG_QUEUE_PROVISIONING_MS
+            FROM seconds s
+            LEFT JOIN wh_data wh ON wh.SECOND = s.SECOND
+            LEFT JOIN realtime_clusters rt ON rt.SECOND = s.SECOND
+            ORDER BY s.SECOND ASC
+            """
+            rows = await pool.execute_query(
+                query, params=[test_id, test_id, test_id, test_id]
+            )
+        else:
+            query = f"""
+            WITH tr AS (
+                SELECT
+                    TEST_ID,
+                    DATE_TRUNC('second', START_TIME) AS START_SECOND,
+                    COALESCE(DURATION_SECONDS, DATEDIFF('second', START_TIME, END_TIME)) AS DURATION_SECONDS
+                FROM {prefix}.TEST_RESULTS
+                WHERE TEST_ID = ?
+            ),
+            seconds AS (
+                SELECT
+                    DATEADD('second', g.SEQ, tr.START_SECOND) AS SECOND,
+                    g.SEQ AS ELAPSED_SECONDS
+                FROM tr
+                JOIN (
+                    SELECT SEQ4() AS SEQ
+                    FROM TABLE(GENERATOR(ROWCOUNT => 86400))
+                ) g
+                  ON g.SEQ <= COALESCE(tr.DURATION_SECONDS, 0)
+            ),
+            realtime_clusters AS (
+                SELECT
+                    DATE_TRUNC('second', TIMESTAMP) AS SECOND,
+                    MAX(COALESCE(CUSTOM_METRICS:warehouse:started_clusters::INTEGER, 0)) AS STARTED_CLUSTERS
+                FROM {prefix}.METRICS_SNAPSHOTS
+                WHERE TEST_ID = ?
+                GROUP BY DATE_TRUNC('second', TIMESTAMP)
+            )
+            SELECT
+                s.SECOND AS TS,
+                s.ELAPSED_SECONDS,
+                COALESCE(wt.ACTIVE_CLUSTERS, 0) AS ACTIVE_CLUSTERS,
+                COALESCE(rt.STARTED_CLUSTERS, 0) AS REALTIME_CLUSTERS,
+                COALESCE(wt.QUERIES_STARTED, 0) AS QUERIES_STARTED,
+                COALESCE(wt.TOTAL_QUEUE_OVERLOAD_MS, 0) AS TOTAL_QUEUE_OVERLOAD_MS,
+                COALESCE(wt.TOTAL_QUEUE_PROVISIONING_MS, 0) AS TOTAL_QUEUE_PROVISIONING_MS,
+                COALESCE(
+                    COALESCE(wt.TOTAL_QUEUE_OVERLOAD_MS, 0) / NULLIF(wt.QUERIES_STARTED, 0),
+                    0
+                ) AS AVG_QUEUE_OVERLOAD_MS,
+                COALESCE(
+                    COALESCE(wt.TOTAL_QUEUE_PROVISIONING_MS, 0) / NULLIF(wt.QUERIES_STARTED, 0),
+                    0
+                ) AS AVG_QUEUE_PROVISIONING_MS
+            FROM seconds s
+            LEFT JOIN {prefix}.V_WAREHOUSE_TIMESERIES wt
+              ON wt.TEST_ID = ?
+             AND wt.SECOND = s.SECOND
+            LEFT JOIN realtime_clusters rt
+              ON rt.SECOND = s.SECOND
+            ORDER BY s.SECOND ASC
+            """
+            rows = await pool.execute_query(query, params=[test_id, test_id, test_id])
 
         points: list[dict[str, Any]] = []
         has_data = False
@@ -2098,6 +3656,243 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
     except Exception as e:
         logger.debug("Failed to load warehouse timeseries for %s: %s", test_id, e)
         return {"test_id": test_id, "available": False, "points": [], "error": str(e)}
+
+
+@router.get("/{test_id}/overhead-timeseries")
+async def get_overhead_timeseries(test_id: str) -> dict[str, Any]:
+    """
+    Fetch per-second app overhead timeseries for a test.
+
+    This calculates the overhead (APP_ELAPSED_MS - SF_TOTAL_ELAPSED_MS) per second
+    using enriched queries from QUERY_EXECUTIONS. For seconds without enriched data,
+    we use interpolation from neighboring seconds.
+
+    This data is useful for:
+    1. Understanding network/client overhead variations over time
+    2. Estimating SF execution time for non-enriched queries
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        run_id_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+        is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+        if is_parent:
+            query = f"""
+            WITH tr AS (
+                SELECT
+                    MIN(START_TIME) AS MIN_START,
+                    MAX(DATEADD('second', COALESCE(DURATION_SECONDS, 0), START_TIME)) AS MAX_END
+                FROM {prefix}.TEST_RESULTS
+                WHERE RUN_ID = ?
+                  AND TEST_ID <> ?
+            ),
+            seconds AS (
+                SELECT
+                    DATEADD('second', g.SEQ, DATE_TRUNC('second', tr.MIN_START)) AS SECOND,
+                    g.SEQ AS ELAPSED_SECONDS
+                FROM tr
+                JOIN (
+                    SELECT SEQ4() AS SEQ
+                    FROM TABLE(GENERATOR(ROWCOUNT => 86400))
+                ) g
+                  ON g.SEQ <= DATEDIFF('second', tr.MIN_START, tr.MAX_END)
+            ),
+            per_second AS (
+                SELECT
+                    DATE_TRUNC('second', qe.START_TIME) AS SECOND,
+                    COUNT(*) AS TOTAL_QUERIES,
+                    SUM(IFF(qe.SF_TOTAL_ELAPSED_MS IS NOT NULL, 1, 0)) AS ENRICHED_QUERIES,
+                    AVG(IFF(qe.SF_TOTAL_ELAPSED_MS IS NOT NULL, qe.APP_ELAPSED_MS - qe.SF_TOTAL_ELAPSED_MS, NULL)) AS AVG_OVERHEAD_MS,
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (
+                        ORDER BY IFF(qe.SF_TOTAL_ELAPSED_MS IS NOT NULL, qe.APP_ELAPSED_MS - qe.SF_TOTAL_ELAPSED_MS, NULL)
+                    ) AS P50_OVERHEAD_MS,
+                    AVG(qe.APP_ELAPSED_MS) AS AVG_APP_MS,
+                    AVG(qe.SF_TOTAL_ELAPSED_MS) AS AVG_SF_TOTAL_MS,
+                    AVG(qe.SF_EXECUTION_MS) AS AVG_SF_EXEC_MS
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                JOIN {prefix}.TEST_RESULTS tr ON tr.TEST_ID = qe.TEST_ID
+                WHERE tr.RUN_ID = ?
+                  AND tr.TEST_ID <> ?
+                  AND COALESCE(qe.WARMUP, FALSE) = FALSE
+                  AND qe.SUCCESS = TRUE
+                GROUP BY DATE_TRUNC('second', qe.START_TIME)
+            ),
+            with_lag AS (
+                SELECT
+                    s.SECOND,
+                    s.ELAPSED_SECONDS,
+                    COALESCE(ps.TOTAL_QUERIES, 0) AS TOTAL_QUERIES,
+                    COALESCE(ps.ENRICHED_QUERIES, 0) AS ENRICHED_QUERIES,
+                    ps.AVG_OVERHEAD_MS,
+                    ps.P50_OVERHEAD_MS,
+                    ps.AVG_APP_MS,
+                    ps.AVG_SF_TOTAL_MS,
+                    ps.AVG_SF_EXEC_MS,
+                    LAG(ps.P50_OVERHEAD_MS) IGNORE NULLS OVER (ORDER BY s.SECOND) AS PREV_P50_OVERHEAD,
+                    LEAD(ps.P50_OVERHEAD_MS) IGNORE NULLS OVER (ORDER BY s.SECOND) AS NEXT_P50_OVERHEAD
+                FROM seconds s
+                LEFT JOIN per_second ps ON ps.SECOND = s.SECOND
+            )
+            SELECT
+                SECOND,
+                ELAPSED_SECONDS,
+                TOTAL_QUERIES,
+                ENRICHED_QUERIES,
+                AVG_OVERHEAD_MS,
+                COALESCE(P50_OVERHEAD_MS, (PREV_P50_OVERHEAD + NEXT_P50_OVERHEAD) / 2, PREV_P50_OVERHEAD, NEXT_P50_OVERHEAD) AS P50_OVERHEAD_MS,
+                P50_OVERHEAD_MS IS NULL AND (PREV_P50_OVERHEAD IS NOT NULL OR NEXT_P50_OVERHEAD IS NOT NULL) AS INTERPOLATED,
+                AVG_APP_MS,
+                AVG_SF_TOTAL_MS,
+                AVG_SF_EXEC_MS
+            FROM with_lag
+            ORDER BY SECOND ASC
+            """
+            params = [test_id, test_id, test_id, test_id]
+        else:
+            query = f"""
+            WITH tr AS (
+                SELECT
+                    TEST_ID,
+                    DATE_TRUNC('second', START_TIME) AS START_SECOND,
+                    COALESCE(DURATION_SECONDS, DATEDIFF('second', START_TIME, END_TIME)) AS DURATION_SECONDS
+                FROM {prefix}.TEST_RESULTS
+                WHERE TEST_ID = ?
+            ),
+            seconds AS (
+                SELECT
+                    DATEADD('second', g.SEQ, tr.START_SECOND) AS SECOND,
+                    g.SEQ AS ELAPSED_SECONDS
+                FROM tr
+                JOIN (
+                    SELECT SEQ4() AS SEQ
+                    FROM TABLE(GENERATOR(ROWCOUNT => 86400))
+                ) g
+                  ON g.SEQ <= COALESCE(tr.DURATION_SECONDS, 0)
+            ),
+            per_second AS (
+                SELECT
+                    DATE_TRUNC('second', qe.START_TIME) AS SECOND,
+                    COUNT(*) AS TOTAL_QUERIES,
+                    SUM(IFF(qe.SF_TOTAL_ELAPSED_MS IS NOT NULL, 1, 0)) AS ENRICHED_QUERIES,
+                    AVG(IFF(qe.SF_TOTAL_ELAPSED_MS IS NOT NULL, qe.APP_ELAPSED_MS - qe.SF_TOTAL_ELAPSED_MS, NULL)) AS AVG_OVERHEAD_MS,
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (
+                        ORDER BY IFF(qe.SF_TOTAL_ELAPSED_MS IS NOT NULL, qe.APP_ELAPSED_MS - qe.SF_TOTAL_ELAPSED_MS, NULL)
+                    ) AS P50_OVERHEAD_MS,
+                    AVG(qe.APP_ELAPSED_MS) AS AVG_APP_MS,
+                    AVG(qe.SF_TOTAL_ELAPSED_MS) AS AVG_SF_TOTAL_MS,
+                    AVG(qe.SF_EXECUTION_MS) AS AVG_SF_EXEC_MS
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                WHERE qe.TEST_ID = ?
+                  AND COALESCE(qe.WARMUP, FALSE) = FALSE
+                  AND qe.SUCCESS = TRUE
+                GROUP BY DATE_TRUNC('second', qe.START_TIME)
+            ),
+            with_lag AS (
+                SELECT
+                    s.SECOND,
+                    s.ELAPSED_SECONDS,
+                    COALESCE(ps.TOTAL_QUERIES, 0) AS TOTAL_QUERIES,
+                    COALESCE(ps.ENRICHED_QUERIES, 0) AS ENRICHED_QUERIES,
+                    ps.AVG_OVERHEAD_MS,
+                    ps.P50_OVERHEAD_MS,
+                    ps.AVG_APP_MS,
+                    ps.AVG_SF_TOTAL_MS,
+                    ps.AVG_SF_EXEC_MS,
+                    LAG(ps.P50_OVERHEAD_MS) IGNORE NULLS OVER (ORDER BY s.SECOND) AS PREV_P50_OVERHEAD,
+                    LEAD(ps.P50_OVERHEAD_MS) IGNORE NULLS OVER (ORDER BY s.SECOND) AS NEXT_P50_OVERHEAD
+                FROM seconds s
+                LEFT JOIN per_second ps ON ps.SECOND = s.SECOND
+            )
+            SELECT
+                SECOND,
+                ELAPSED_SECONDS,
+                TOTAL_QUERIES,
+                ENRICHED_QUERIES,
+                AVG_OVERHEAD_MS,
+                COALESCE(P50_OVERHEAD_MS, (PREV_P50_OVERHEAD + NEXT_P50_OVERHEAD) / 2, PREV_P50_OVERHEAD, NEXT_P50_OVERHEAD) AS P50_OVERHEAD_MS,
+                P50_OVERHEAD_MS IS NULL AND (PREV_P50_OVERHEAD IS NOT NULL OR NEXT_P50_OVERHEAD IS NOT NULL) AS INTERPOLATED,
+                AVG_APP_MS,
+                AVG_SF_TOTAL_MS,
+                AVG_SF_EXEC_MS
+            FROM with_lag
+            ORDER BY SECOND ASC
+            """
+            params = [test_id, test_id]
+
+        rows = await pool.execute_query(query, params=params)
+
+        points: list[dict[str, Any]] = []
+        has_data = False
+        total_enriched = 0
+        total_queries = 0
+
+        for row in rows:
+            (
+                ts,
+                elapsed,
+                total_q,
+                enriched_q,
+                avg_overhead,
+                p50_overhead,
+                interpolated,
+                avg_app,
+                avg_sf_total,
+                avg_sf_exec,
+            ) = row
+
+            total_q_i = int(total_q or 0)
+            enriched_q_i = int(enriched_q or 0)
+            total_queries += total_q_i
+            total_enriched += enriched_q_i
+
+            if enriched_q_i > 0 or interpolated:
+                has_data = True
+
+            points.append(
+                {
+                    "timestamp": ts.isoformat()
+                    if hasattr(ts, "isoformat")
+                    else str(ts),
+                    "elapsed_seconds": float(elapsed or 0),
+                    "total_queries": total_q_i,
+                    "enriched_queries": enriched_q_i,
+                    "avg_overhead_ms": _to_float_or_none(avg_overhead),
+                    "p50_overhead_ms": _to_float_or_none(p50_overhead),
+                    "interpolated": bool(interpolated),
+                    "avg_app_ms": _to_float_or_none(avg_app),
+                    "avg_sf_total_ms": _to_float_or_none(avg_sf_total),
+                    "avg_sf_exec_ms": _to_float_or_none(avg_sf_exec),
+                }
+            )
+
+        enrichment_ratio_pct = (
+            round(100.0 * total_enriched / total_queries, 1)
+            if total_queries > 0
+            else 0.0
+        )
+
+        return {
+            "test_id": test_id,
+            "available": has_data,
+            "total_queries": total_queries,
+            "total_enriched": total_enriched,
+            "enrichment_ratio_pct": enrichment_ratio_pct,
+            "points": points if has_data else [],
+        }
+    except Exception as e:
+        logger.debug("Failed to load overhead timeseries for %s: %s", test_id, e)
+        return {
+            "test_id": test_id,
+            "available": False,
+            "points": [],
+            "error": str(e),
+        }
 
 
 @router.delete("/{test_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -2264,7 +4059,7 @@ async def retry_enrichment(test_id: str) -> dict[str, Any]:
 
 @router.get("/{test_id}/enrichment-status")
 async def get_test_enrichment_status(test_id: str) -> dict[str, Any]:
-    """Get the enrichment status for a test."""
+    """Get the enrichment status for a test, including progress stats."""
     from backend.core.results_store import get_enrichment_status
 
     try:
@@ -2272,15 +4067,26 @@ async def get_test_enrichment_status(test_id: str) -> dict[str, Any]:
         if status_info is None:
             raise HTTPException(status_code=404, detail="Test not found")
 
+        enrichment_status = str(status_info.get("enrichment_status") or "").upper()
+        test_status = str(status_info["test_status"]).upper()
+        total_queries = status_info.get("total_queries", 0)
+        enriched_queries = status_info.get("enriched_queries", 0)
+        enrichment_ratio = status_info.get("enrichment_ratio", 0.0)
+
+        is_complete = enrichment_status in ("COMPLETED", "SKIPPED") or (
+            enrichment_ratio >= 0.90 and total_queries > 0
+        )
+
         return {
             "test_id": test_id,
             "test_status": status_info["test_status"],
             "enrichment_status": status_info["enrichment_status"],
             "enrichment_error": status_info["enrichment_error"],
-            "can_retry": (
-                str(status_info["test_status"]).upper() == "COMPLETED"
-                and str(status_info.get("enrichment_status") or "").upper() == "FAILED"
-            ),
+            "total_queries": total_queries,
+            "enriched_queries": enriched_queries,
+            "enrichment_ratio_pct": round(enrichment_ratio * 100, 1),
+            "is_complete": is_complete,
+            "can_retry": (test_status == "COMPLETED" and enrichment_status == "FAILED"),
         }
     except HTTPException:
         raise

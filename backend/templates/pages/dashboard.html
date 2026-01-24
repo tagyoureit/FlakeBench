@@ -10,10 +10,21 @@
 <div x-data="dashboard({ mode: 'live' })" data-test-id="{{ test_id or '' }}">
     <div class="dashboard-top-grid">
         <div class="card" x-show="templateInfo">
-            <div
-                class="card-title"
-                x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"
-            ></div>
+            <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+                <div
+                    class="card-title"
+                    x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"
+                ></div>
+                <a
+                    class="btn btn-sm btn-secondary"
+                    x-show="templateInfo && templateInfo.template_id"
+                    :href="templateInfo ? `/configure?template_id=${encodeURIComponent(templateInfo.template_id)}&mode=view` : '#'"
+                    target="_blank"
+                    rel="noopener"
+                >
+                    Go to template
+                </a>
+            </div>
             <div class="text-sm text-gray-600">
                 <div>
                     <strong>Template:</strong>
@@ -255,6 +266,19 @@
 
     <div class="card">
         <div class="card-title">Run Logs</div>
+
+        <div
+            class="form-group"
+            x-show="isMultiNode && logTargets && logTargets.length"
+            style="margin-bottom: 0.75rem;"
+        >
+            <label class="form-label">Node Logs</label>
+            <select class="form-select" x-model="logSelectedTestId" @change="onLogTargetChange()">
+                <template x-for="node in logTargets" :key="node.test_id">
+                    <option :value="node.test_id" x-text="node.label || node.test_id"></option>
+                </template>
+            </select>
+        </div>
 
         <div
             class="alert alert-error"

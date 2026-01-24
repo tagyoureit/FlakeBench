@@ -18,7 +18,7 @@ Last updated: 2026-01-21
 - UI actions -> `/api/templates/*` and `/api/tests/*`.
 - Test metrics -> WebSocket (`/ws/test/{test_id}`) -> UI charts.
 - Metrics snapshots -> `METRICS_SNAPSHOTS` table.
-- Per-node snapshots -> `NODE_METRICS_SNAPSHOTS` table (multi-node runs only).
+- Per-worker snapshots -> `NODE_METRICS_SNAPSHOTS` table (multi-node runs only).
 - Summary + metadata -> `TEST_RESULTS` table.
 - Per-query executions -> `QUERY_EXECUTIONS` table.
 
@@ -26,22 +26,22 @@ Last updated: 2026-01-21
 
 - For QPS autoscale runs, the parent run stores autoscale state in
   `TEST_RESULTS.CUSTOM_METRICS.autoscale_state`.
-- Child nodes read `autoscale_state.node_count` to split total target QPS
-  across nodes (`target_qps_total / node_count`).
+- Child workers read `autoscale_state.node_count` to split total target QPS
+  across workers (`target_qps_total / node_count`).
 
 ## Execution Phases
 
 - Warmup phase (if configured).
 - Measurement phase (metrics reset at measurement start).
 - Finalization and persistence.
-- Multi-node aggregation (parent run derived from per-node snapshots).
+- Multi-node aggregation (parent run derived from per-worker snapshots).
 
 ## Multi-Node Run Detection
 
 Parent vs child runs are distinguished by comparing `TEST_ID` and `RUN_ID`:
 
-- **Parent run**: `TEST_ID == RUN_ID` - aggregated view across all child nodes.
-- **Child run**: `TEST_ID != RUN_ID` - single-node execution;
+- **Parent run**: `TEST_ID == RUN_ID` - aggregated view across all child workers.
+- **Child run**: `TEST_ID != RUN_ID` - single-worker execution;
   `RUN_ID` points to parent.
 
 The dashboard uses this logic to determine `isMultiNode` for UI display purposes:
@@ -50,7 +50,7 @@ The dashboard uses this logic to determine `isMultiNode` for UI display purposes
 this.isMultiNode = !!(data && data.run_id && data.run_id === data.test_id);
 ```
 
-For parent runs, the Resources section displays "(averaged across all nodes)"
+For parent runs, the Resources section displays "(averaged across all workers)"
 to indicate the data is aggregated from `NODE_METRICS_SNAPSHOTS`.
 
 ## FIND_MAX_CONCURRENCY

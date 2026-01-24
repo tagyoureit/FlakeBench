@@ -75,15 +75,22 @@ def http_exception(operation: str, exc: BaseException) -> HTTPException:
     """
     Convert an exception into a consistent HTTPException payload.
     """
-    # Log the full traceback to the server console for debugging
-    logger.error(
-        "API error during '%s': %s\n%s",
-        operation,
-        exc,
-        traceback.format_exc(),
-    )
-
     sf = classify_snowflake_error(exc)
+
+    if sf is not None:
+        logger.warning(
+            "Snowflake connectivity issue during '%s': %s (code=%s)",
+            operation,
+            sf.message,
+            sf.code,
+        )
+    else:
+        logger.error(
+            "API error during '%s': %s\n%s",
+            operation,
+            exc,
+            traceback.format_exc(),
+        )
     if sf is not None:
         detail: dict[str, Any] = {
             "code": sf.code,

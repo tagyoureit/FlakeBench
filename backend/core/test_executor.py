@@ -1003,6 +1003,15 @@ class TestExecutor:
                 target_sf_running = int(max(1, round(float(target_raw))))
                 target_qps = float(target_raw)
 
+                tpl_cfg = getattr(self, "_template_config", None)
+                autoscale_parent_run_id: str | None = None
+                autoscale_enabled = False
+                if isinstance(tpl_cfg, dict):
+                    autoscale_enabled = bool(tpl_cfg.get("autoscale_enabled"))
+                    parent_run_id = tpl_cfg.get("parent_run_id")
+                    if parent_run_id:
+                        autoscale_parent_run_id = str(parent_run_id)
+
                 min_workers = int(getattr(self.scenario, "min_concurrency", 1) or 1)
                 max_workers = int(
                     getattr(self.scenario, "concurrent_connections", 1) or 1
@@ -1046,6 +1055,52 @@ class TestExecutor:
 
                 def _live_worker_count() -> int:
                     return len(_live_worker_ids())
+
+                async def _fetch_autoscale_target_qps() -> tuple[
+                    float | None, int | None
+                ]:
+                    if not autoscale_enabled or not autoscale_parent_run_id:
+                        return (None, None)
+                    pool = snowflake_pool.get_default_pool()
+                    rows = await pool.execute_query(
+                        f"""
+                        SELECT CUSTOM_METRICS
+                        FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS
+                        WHERE TEST_ID = ?
+                        """,
+                        params=[autoscale_parent_run_id],
+                    )
+                    if not rows or not rows[0]:
+                        return (None, None)
+                    cm = rows[0][0]
+                    if isinstance(cm, str):
+                        try:
+                            cm = json.loads(cm)
+                        except Exception:
+                            cm = {}
+                    if not isinstance(cm, dict):
+                        return (None, None)
+                    autoscale_state = cm.get("autoscale_state")
+                    if not isinstance(autoscale_state, dict):
+                        return (None, None)
+                    try:
+                        node_count = int(autoscale_state.get("node_count") or 0)
+                    except Exception:
+                        node_count = 0
+                    try:
+                        target_total = float(
+                            autoscale_state.get("target_qps_total") or 0.0
+                        )
+                    except Exception:
+                        target_total = 0.0
+                    if (
+                        node_count <= 0
+                        or not math.isfinite(target_total)
+                        or target_total <= 0
+                    ):
+                        return (None, None)
+                    per_node_target = target_total / float(node_count)
+                    return (float(per_node_target), int(node_count))
 
                 async def _spawn_one(*, warmup: bool) -> None:
                     nonlocal next_worker_id
@@ -1122,6 +1177,7 @@ class TestExecutor:
                     *,
                     current_active: int,
                     current_qps: float,
+                    target_qps_value: float,
                     avg_latency_ms: float = 0.0,
                 ) -> int:
                     """
@@ -1145,12 +1201,14 @@ class TestExecutor:
                             and avg_latency_ms > 0
                         ):
                             ops_per_worker = 1000.0 / avg_latency_ms
-                            theoretical = int(math.ceil(target_qps / ops_per_worker))
+                            theoretical = int(
+                                math.ceil(target_qps_value / ops_per_worker)
+                            )
                             return max(min_workers, min(max_workers, theoretical))
                         return current_active
 
-                    error = target_qps - current_qps
-                    error_ratio = error / target_qps
+                    error = target_qps_value - current_qps
+                    error_ratio = error / target_qps_value
                     abs_error_ratio = abs(error_ratio)
 
                     # Moderate gains - enough to converge but not overshoot
@@ -1223,6 +1281,10 @@ class TestExecutor:
                     last_logged_target: int | None = None
                     above_target_streak = 0
                     under_target_streak = 0
+                    autoscale_last_poll = 0.0
+                    autoscale_target_qps: float | None = None
+                    autoscale_node_count: int | None = None
+                    autoscale_poll_interval = max(5.0, float(control_interval))
 
                     while not self._stop_event.is_set():
                         await asyncio.sleep(control_interval)
@@ -1234,6 +1296,27 @@ class TestExecutor:
                             await _scale_to(target=min_workers, warmup=warmup)
                             current_running = _active_worker_count()
                             current_live = _live_worker_count()
+
+                        current_target_qps = float(target_qps)
+                        if autoscale_enabled and autoscale_parent_run_id:
+                            now_mono = float(asyncio.get_running_loop().time())
+                            if now_mono - autoscale_last_poll >= float(
+                                autoscale_poll_interval
+                            ):
+                                (
+                                    per_node_target,
+                                    node_count,
+                                ) = await _fetch_autoscale_target_qps()
+                                if per_node_target is not None:
+                                    autoscale_target_qps = float(per_node_target)
+                                    autoscale_node_count = (
+                                        int(node_count)
+                                        if node_count is not None
+                                        else None
+                                    )
+                                autoscale_last_poll = float(now_mono)
+                            if autoscale_target_qps is not None:
+                                current_target_qps = float(autoscale_target_qps)
 
                         if use_sf_running_target:
                             now_ctl_mono = float(asyncio.get_running_loop().time())
@@ -1395,10 +1478,11 @@ class TestExecutor:
 
                             # Deadband/hysteresis: ignore small deviations so we don't thrash.
                             # 5% deadband - balance between responsiveness and stability
-                            deadband = max(2.0, float(target_qps) * 0.05)
+                            deadband = max(2.0, float(current_target_qps) * 0.05)
                             if (
                                 qps_used > 0
-                                and abs(qps_used - float(target_qps)) <= deadband
+                                and abs(qps_used - float(current_target_qps))
+                                <= deadband
                             ):
                                 above_target_streak = 0
                                 under_target_streak = 0
@@ -1423,10 +1507,10 @@ class TestExecutor:
                             # Under-target: always allow scale-up. Over-target: require sustained
                             # overage before scaling down to avoid reacting to completion bursts.
                             under_target = qps_used < (
-                                float(target_qps) - float(deadband)
+                                float(current_target_qps) - float(deadband)
                             )
                             over_target = qps_used > (
-                                float(target_qps) + float(deadband)
+                                float(current_target_qps) + float(deadband)
                             )
                             if under_target:
                                 above_target_streak = 0
@@ -1447,6 +1531,7 @@ class TestExecutor:
                             desired = _desired_workers_from_qps(
                                 current_active=current_running,
                                 current_qps=qps_used,
+                                target_qps_value=current_target_qps,
                                 avg_latency_ms=avg_latency,
                             )
                             if under_target and under_target_streak < 2:
@@ -1462,7 +1547,7 @@ class TestExecutor:
                                     logger.info(
                                         "QPS controller (%s): target_qps=%.2f observed_qps=%.2f (windowed=%.2f smoothed=%.2f raw=%.2f) running_workers=%d → %d (live=%d → %d)",
                                         phase,
-                                        float(target_qps),
+                                        float(current_target_qps),
                                         float(qps_used),
                                         float(qps_windowed),
                                         float(qps_smoothed),
@@ -1476,7 +1561,7 @@ class TestExecutor:
                                 self._qps_controller_state = {
                                     "phase": "WARMUP" if warmup else "RUNNING",
                                     "target_mode": "QPS",
-                                    "target_qps": float(target_qps),
+                                    "target_qps": float(current_target_qps),
                                     "observed_qps_raw": float(qps_raw),
                                     "observed_qps_smoothed": float(qps_smoothed),
                                     "observed_qps_windowed": float(qps_windowed),
@@ -1488,12 +1573,13 @@ class TestExecutor:
                                     "control_interval_seconds": float(control_interval),
                                     "above_target_streak": int(above_target_streak),
                                     "under_target_streak": int(under_target_streak),
+                                    "autoscale_node_count": autoscale_node_count,
                                 }
                             else:
                                 self._qps_controller_state = {
                                     "phase": "WARMUP" if warmup else "RUNNING",
                                     "target_mode": "QPS",
-                                    "target_qps": float(target_qps),
+                                    "target_qps": float(current_target_qps),
                                     "observed_qps_raw": float(qps_raw),
                                     "observed_qps_smoothed": float(qps_smoothed),
                                     "observed_qps_windowed": float(qps_windowed),
@@ -1505,6 +1591,7 @@ class TestExecutor:
                                     "control_interval_seconds": float(control_interval),
                                     "above_target_streak": int(above_target_streak),
                                     "under_target_streak": int(under_target_streak),
+                                    "autoscale_node_count": autoscale_node_count,
                                 }
 
                 # Warmup period (ramp workers so the measurement phase starts close to target).

@@ -10,7 +10,10 @@ latency and throughput, and persists results to Snowflake.
 
 ## Runtime Topology
 
-- Single FastAPI process (`backend/main.py`).
+- Controller: single FastAPI process (`backend/main.py`).
+- For autoscale / multi-node runs, the controller spawns headless worker
+  processes (`scripts/run_worker.py`) to generate load and persist per-worker
+  snapshots.
 - WebSocket endpoint for live metrics streaming: `/ws/test/{test_id}`.
 - Snowflake is the authoritative results store.
 - Postgres connections are optional and used only for Postgres-family tests.
@@ -23,6 +26,7 @@ latency and throughput, and persists results to Snowflake.
   `backend/core/test_executor.py`.
 - Persistence in `backend/core/results_store.py`.
 - Templates stored in Snowflake (`UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`).
+- Multi-node orchestration in `backend/core/autoscale.py` and `scripts/run_multi_node.py`.
 
 ## Key Constraints
 

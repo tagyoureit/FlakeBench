@@ -6,6 +6,9 @@
     "heading-style": {
       "enabled": false
     },
+    "heading-start-left": {
+      "enabled": false
+    },
     "blanks-around-headings": {
       "enabled": false
     }

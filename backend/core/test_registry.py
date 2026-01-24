@@ -27,10 +27,12 @@ from backend.connectors import snowflake_pool
 from backend.core.results_store import (
     fetch_warehouse_config_snapshot,
     insert_metrics_snapshot,
+    insert_node_metrics_snapshot,
     insert_query_executions,
     insert_test_logs,
     insert_test_start,
     enrich_query_executions_with_retry,
+    update_parent_run_aggregate,
     update_test_overhead_percentiles,
     update_test_result_final,
     update_enrichment_status,
@@ -403,15 +405,46 @@ class TestRegistry:
                 continue
 
     async def _drain_test_logs(
-        self, *, test_id: str, q: asyncio.Queue, flush_batch_size: int = 200
+        self,
+        *,
+        test_id: str,
+        q: asyncio.Queue,
+        flush_batch_size: int = 200,
+        flush_interval_seconds: float = 5.0,
     ) -> None:
         """
         Drain log events from a queue, stream them to dashboards, and persist to Snowflake.
+        Flushes when batch_size is reached OR flush_interval_seconds has passed (whichever first).
         """
+        import time
+
         pending_rows: list[dict[str, Any]] = []
+        last_flush_time = time.monotonic()
         try:
             while True:
-                event = await q.get()
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    event = None
+                    should_time_flush = (
+                        pending_rows
+                        and (time.monotonic() - last_flush_time)
+                        >= flush_interval_seconds
+                    )
+                    if should_time_flush:
+                        try:
+                            await insert_test_logs(rows=pending_rows)
+                        except Exception as e:
+                            logger.debug(
+                                "Failed to persist TEST_LOGS (time flush) for %s: %s",
+                                test_id,
+                                e,
+                            )
+                        finally:
+                            pending_rows.clear()
+                            last_flush_time = time.monotonic()
+                    continue
+
                 if event is None:
                     break
 
@@ -442,6 +475,7 @@ class TestRegistry:
                         )
                     finally:
                         pending_rows.clear()
+                        last_flush_time = time.monotonic()
         finally:
             if pending_rows:
                 try:
@@ -452,13 +486,24 @@ class TestRegistry:
                     )
 
     async def start_from_template(
-        self, template_id: str, *, auto_start: bool = True
+        self,
+        template_id: str,
+        *,
+        auto_start: bool = True,
+        overrides: dict[str, Any] | None = None,
+        template_overrides: dict[str, Any] | None = None,
     ) -> RunningTest:
         template = await self._load_template(template_id)
         template_name = template["template_name"]
-        template_config = template["config"]
+        template_config = dict(template["config"] or {})
+        if template_overrides:
+            template_config.update(template_overrides)
 
         scenario = self._scenario_from_template_config(template_name, template_config)
+        if overrides:
+            scenario = TestScenario.model_validate(
+                {**scenario.model_dump(mode="json"), **overrides}
+            )
         executor = TestExecutor(scenario)
         # Attach template context for optional AI/pool-based workload adjustments.
         executor._template_id = template_id  # type: ignore[attr-defined]
@@ -788,6 +833,11 @@ class TestRegistry:
         try:
             await insert_test_start(
                 test_id=test_id,
+                run_id=(
+                    str(template_config.get("parent_run_id"))
+                    if template_config.get("parent_run_id")
+                    else None
+                ),
                 test_name=f"{template_name}",
                 scenario=scenario,
                 table_name=table_cfg.name,
@@ -937,6 +987,12 @@ class TestRegistry:
             ):
                 phase = "WARMUP"
 
+            # Track phase in custom metrics so parent (multi-node) aggregations can
+            # render accurate phase progression from node snapshots.
+            custom = dict(metrics.custom_metrics or {})
+            custom["phase"] = phase
+            metrics.custom_metrics = custom
+
             payload = _with_phase(payload, phase=phase, now=metrics.timestamp)
             last_payload = payload
             self._track_task(asyncio.create_task(self._publish(test_id, payload)))
@@ -945,12 +1001,63 @@ class TestRegistry:
                     insert_metrics_snapshot(test_id=test_id, metrics=metrics)
                 )
             )
+            parent_run_id = template_config.get("parent_run_id")
+            if parent_run_id:
+                self._track_task(
+                    asyncio.create_task(
+                        insert_node_metrics_snapshot(
+                            parent_run_id=str(parent_run_id),
+                            test_id=test_id,
+                            worker_group_id=int(
+                                getattr(scenario, "worker_group_id", 0) or 0
+                            ),
+                            worker_group_count=int(
+                                getattr(scenario, "worker_group_count", 1) or 1
+                            ),
+                            node_id=(
+                                str(template_config.get("node_id"))
+                                if template_config.get("node_id")
+                                else None
+                            ),
+                            metrics=metrics,
+                        )
+                    )
+                )
+
+        async def _maybe_update_parent_run() -> None:
+            parent_run_id = template_config.get("parent_run_id")
+            if not parent_run_id:
+                return
+            try:
+                await update_parent_run_aggregate(parent_run_id=str(parent_run_id))
+            except Exception as e:
+                logger.debug("Failed to aggregate parent run %s: %s", parent_run_id, e)
 
         executor.set_metrics_callback(on_metrics)
 
         # Execute
         persisted_query_executions = False
         test_saved_as_completed = False
+        processing_log_stop = asyncio.Event()
+        processing_log_task = None
+
+        def _start_processing_logger() -> asyncio.Task:
+            async def _run() -> None:
+                start = datetime.now(UTC)
+                while True:
+                    try:
+                        await asyncio.wait_for(processing_log_stop.wait(), timeout=30)
+                        break
+                    except asyncio.TimeoutError:
+                        elapsed = (datetime.now(UTC) - start).total_seconds()
+                        logger.info(
+                            "⏳ Post-processing still running for test %s (elapsed %.0fs)",
+                            test_id,
+                            elapsed,
+                        )
+
+            return asyncio.create_task(_run())
+
         try:
             # Pre-create the benchmark Snowflake pool before setup/warmup/measurement so
             # RUNNING never stalls on connection spin-up at high concurrency.
@@ -990,6 +1097,7 @@ class TestRegistry:
                     executor.status = TestStatus.FAILED
                     result = await executor._build_result()
                     await update_test_result_final(test_id=test_id, result=result)
+                    await _maybe_update_parent_run()
                     await _cleanup_logs()
                     return
 
@@ -1012,6 +1120,7 @@ class TestRegistry:
                     executor._setup_error = pool_error
                     result = await executor._build_result()
                     await update_test_result_final(test_id=test_id, result=result)
+                    await _maybe_update_parent_run()
                     return
                 logger.info(
                     "✅ Benchmark Snowflake pool ready (%d sessions).",
@@ -1038,6 +1147,7 @@ class TestRegistry:
                 executor.status = TestStatus.FAILED
                 result = await executor._build_result()
                 await update_test_result_final(test_id=test_id, result=result)
+                await _maybe_update_parent_run()
                 return
 
             result = await executor.execute()
@@ -1059,6 +1169,7 @@ class TestRegistry:
                 }
                 await self._publish(test_id, failure_payload)
                 await update_test_result_final(test_id=test_id, result=result)
+                await _maybe_update_parent_run()
                 return
 
             # =========================================================================
@@ -1071,6 +1182,7 @@ class TestRegistry:
                 test_id=test_id, result=result, find_max_result=find_max_result
             )
             test_saved_as_completed = True
+            await _maybe_update_parent_run()
             logger.info("✅ Test %s saved as COMPLETED", test_id)
 
             # Execution window is finished; post-processing (Snowflake writes,
@@ -1079,6 +1191,7 @@ class TestRegistry:
                 test_id,
                 _with_phase(last_payload, phase="PROCESSING"),
             )
+            processing_log_task = _start_processing_logger()
 
             # Determine if enrichment is requested
             should_enrich = bool(getattr(scenario, "collect_query_history", False))
@@ -1139,13 +1252,22 @@ class TestRegistry:
 
             # Enrich persisted QUERY_EXECUTIONS with Snowflake timings from QUERY_HISTORY.
             # QUERY_HISTORY has ~45+ second latency; retry until 90% of queries are enriched.
+            # Adaptive timeout: base 120s + 1s per 1000 queries, capped at 900s (15 min).
             if should_enrich:
                 try:
+                    query_count = len(rows) if rows else 0
+                    adaptive_timeout = min(120 + (query_count // 1000), 900)
+                    logger.info(
+                        "📊 Starting enrichment for %s: %d queries, timeout=%ds",
+                        test_id,
+                        query_count,
+                        adaptive_timeout,
+                    )
                     await enrich_query_executions_with_retry(
                         test_id=test_id,
                         target_ratio=0.90,
-                        max_wait_seconds=240,
-                        poll_interval_seconds=10,
+                        max_wait_seconds=adaptive_timeout,
+                        poll_interval_seconds=15,
                     )
                     await update_test_overhead_percentiles(test_id=test_id)
                     await update_enrichment_status(
@@ -1188,12 +1310,19 @@ class TestRegistry:
                     await update_test_result_final(
                         test_id=test_id, result=result, find_max_result=find_max_result
                     )
+                    await _maybe_update_parent_run()
                 except Exception:
                     pass
             raise
         except Exception as e:
             logger.exception("Test %s crashed: %s", test_id, e)
         finally:
+            if processing_log_task is not None:
+                processing_log_stop.set()
+                try:
+                    await processing_log_task
+                except asyncio.CancelledError:
+                    pass
             await _cleanup_logs()
 
             # Best-effort persistence of QUERY_EXECUTIONS even for CANCELLED/crashed runs.

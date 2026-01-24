@@ -383,31 +383,54 @@
                     </tr>
                 </thead>
                 <tbody>
-                    <template x-for="test in sortedTests" :key="test.test_id">
-                        <tr>
+                    <template x-for="row in displayRows" :key="row.type + ':' + row.test.test_id">
+                        <tr :style="row.type === 'child' ? 'background: #f9fafb;' : ''">
                             <td>
-                                <a :href="dashboardUrl(test)" class="text-blue-600 hover:underline" x-text="test.test_name"></a>
+                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                    <button
+                                        type="button"
+                                        class="btn btn-secondary btn-sm"
+                                        style="min-width: 1.5rem; padding: 0 0.5rem;"
+                                        x-show="row.type === 'parent' && row.child_count > 0"
+                                        @click="toggleMultiNode(row.run_id)"
+                                        x-text="multiNodeExpanded[row.run_id] ? 'v' : '>'"
+                                    ></button>
+                                    <span x-show="row.type === 'child'" style="color: #6b7280;">-</span>
+                                    <a
+                                        :href="dashboardUrl(row.test)"
+                                        class="text-blue-600 hover:underline"
+                                        x-text="row.test.test_name"
+                                    ></a>
+                                    <span
+                                        x-show="row.type === 'parent'"
+                                        style="font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 0.25rem; background: #e0f2fe; color: #0369a1;"
+                                    >PARENT</span>
+                                    <span
+                                        x-show="row.type === 'child'"
+                                        style="font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 0.25rem; background: #fef3c7; color: #92400e;"
+                                    >CHILD</span>
+                                </div>
                             </td>
                             <td>
                                 <img
-                                    x-show="tableTypeIconSrc(test)"
+                                    x-show="tableTypeIconSrc(row.test)"
                                     class="template-type-icon"
-                                    :src="tableTypeIconSrc(test)"
-                                    :alt="tableTypeLabel(test)"
-                                    :title="tableTypeLabel(test)"
+                                    :src="tableTypeIconSrc(row.test)"
+                                    :alt="tableTypeLabel(row.test)"
+                                    :title="tableTypeLabel(row.test)"
                                 >
                             </td>
-                            <td x-text="tableTypeLabel(test) || test.table_type"></td>
-                            <td x-text="new Date(test.created_at).toLocaleString()"></td>
-                            <td x-text="test.ops_per_sec.toFixed(0)"></td>
-                            <td x-text="test.p95_latency.toFixed(2) + ' ms'"></td>
+                            <td x-text="tableTypeLabel(row.test) || row.test.table_type"></td>
+                            <td x-text="new Date(row.test.created_at).toLocaleString()"></td>
+                            <td x-text="row.test.ops_per_sec.toFixed(0)"></td>
+                            <td x-text="row.test.p95_latency.toFixed(2) + ' ms'"></td>
                             <td>
                                 <div class="flex flex-col gap-1">
                                     <span 
                                         class="status-badge"
                                         :class="(() => {
-                                            const phase = test.phase ? test.phase.toUpperCase() : null;
-                                            const status = test.status ? test.status.toUpperCase() : '';
+                                            const phase = row.test.phase ? row.test.phase.toUpperCase() : null;
+                                            const status = row.test.status ? row.test.status.toUpperCase() : '';
                                             if (phase && (status === 'RUNNING' || phase === 'PROCESSING')) {
                                                 return {
                                                     'status-preparing': phase === 'PREPARING',
@@ -424,13 +447,13 @@
                                                 'status-cancelled': status === 'CANCELLED'
                                             };
                                         })()"
-                                        x-text="test.phase && (test.status === 'RUNNING' || test.phase === 'PROCESSING') ? test.phase : test.status">
+                                        x-text="row.test.phase && (row.test.status === 'RUNNING' || row.test.phase === 'PROCESSING') ? row.test.phase : row.test.status">
                                     </span>
-                                    <template x-if="test.status && test.status.toUpperCase() === 'FAILED' && test.failure_reason">
+                                    <template x-if="row.test.status && row.test.status.toUpperCase() === 'FAILED' && row.test.failure_reason">
                                         <span 
                                             class="text-xs text-red-600 max-w-[200px] truncate cursor-help"
-                                            :title="test.failure_reason"
-                                            x-text="test.failure_reason.length > 50 ? test.failure_reason.substring(0, 50) + '...' : test.failure_reason">
+                                            :title="row.test.failure_reason"
+                                            x-text="row.test.failure_reason.length > 50 ? row.test.failure_reason.substring(0, 50) + '...' : row.test.failure_reason">
                                         </span>
                                     </template>
                                 </div>
@@ -440,27 +463,27 @@
                                     <button 
                                         type="button" 
                                         class="btn btn-primary btn-sm"
-                                        @click="viewTest(test)">
+                                        @click="viewTest(row.test)">
                                         View
                                     </button>
                                     <button
                                         type="button"
                                         class="btn btn-secondary btn-sm"
-                                        @click="toggleCompare(test.test_id)"
-                                        :disabled="!isCompared(test.test_id) && compareTests.length >= 2"
+                                        @click="toggleCompare(row.test.test_id)"
+                                        :disabled="!isCompared(row.test.test_id) && compareTests.length >= 2"
                                     >
-                                        <span x-text="isCompared(test.test_id) ? 'Remove' : 'Compare'"></span>
+                                        <span x-text="isCompared(row.test.test_id) ? 'Remove' : 'Compare'"></span>
                                     </button>
                                     <button 
                                         type="button" 
                                         class="btn btn-secondary btn-sm"
-                                        @click="rerunTest(test.test_id)">
+                                        @click="rerunTest(row.test.test_id)">
                                         Re-run
                                     </button>
                                     <button 
                                         type="button" 
                                         class="btn btn-error btn-sm"
-                                        @click="deleteTest(test.test_id)">
+                                        @click="deleteTest(row.test.test_id)">
                                         Delete
                                     </button>
                                 </div>

@@ -165,9 +165,11 @@ function templatesManager() {
           }
         }
 
-        const resp = await fetch(`/api/tests/from-template/${template.template_id}`, {
-          method: "POST",
-        });
+        const autoscaleEnabled = Boolean(template?.config?.autoscale_enabled);
+        const endpoint = autoscaleEnabled
+          ? `/api/tests/from-template/${template.template_id}/autoscale`
+          : `/api/tests/from-template/${template.template_id}`;
+        const resp = await fetch(endpoint, { method: "POST" });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
           throw new Error(err.detail || "Failed to prepare test");

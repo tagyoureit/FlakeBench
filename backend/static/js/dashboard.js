@@ -88,6 +88,10 @@ function dashboard(opts) {
     logs: [],
     _logSeen: {},
     logMaxLines: 1000,
+    logTargets: [],
+    logTargetsLoading: false,
+    logSelectedTestId: null,
+    _logPollIntervalId: null,
     warehouseTs: [],
     warehouseTsLoading: false,
     warehouseTsError: null,
@@ -98,6 +102,11 @@ function dashboard(opts) {
     warehouseTsRetryIntervalMs: 10000,
     warehouseTsRetryTimerId: null,
     warehouseQueueMode: "avg", // 'avg' | 'total'
+    overheadTs: [],
+    overheadTsLoading: false,
+    overheadTsError: null,
+    overheadTsAvailable: false,
+    overheadTsLoaded: false,
     warehouseDetails: null,
     warehouseDetailsLoading: false,
     warehouseDetailsError: null,
@@ -105,9 +114,17 @@ function dashboard(opts) {
     errorSummaryLoading: false,
     errorSummaryLoaded: false,
     errorSummaryError: null,
+    nodeMetricsLoading: false,
+    nodeMetricsError: null,
+    nodeMetricsAvailable: false,
+    nodeMetricsNodes: [],
+    nodeMetricsExpanded: {},
+    isMultiNode: false,
     _elapsedIntervalId: null,
     _elapsedStartTime: null,
     _elapsedBaseValue: 0,
+    _multiNodeMetricsIntervalId: null,
+    _multiNodeTestInfoIntervalId: null,
     aiAnalysisModal: false,
     aiAnalysisLoading: false,
     aiAnalysisError: null,
@@ -117,12 +134,17 @@ function dashboard(opts) {
     chatLoading: false,
     clusterBreakdownExpanded: false,
     stepHistoryExpanded: false,
+    selectedStepHistoryNode: "aggregate",
     resourcesHistoryExpanded: false,
     findMaxController: null,
     findMaxCountdownSeconds: null,
     _findMaxCountdownIntervalId: null,
     _findMaxCountdownTargetEpochMs: null,
     enrichmentRetrying: false,
+    enrichmentProgress: null,
+    _enrichmentPollIntervalId: null,
+    _processingLogIntervalId: null,
+    _processingLogStartMs: null,
 
     init() {
       // Enable debug logging when ?debug=1 is present.
@@ -195,9 +217,11 @@ function dashboard(opts) {
     async startTest() {
       if (!this.testId) return;
       try {
-        const resp = await fetch(`/api/tests/${this.testId}/start`, {
-          method: "POST",
-        });
+        const autoscaleEnabled = Boolean(this.templateInfo?.autoscale_enabled);
+        const endpoint = autoscaleEnabled
+          ? `/api/tests/${this.testId}/start-autoscale`
+          : `/api/tests/${this.testId}/start`;
+        const resp = await fetch(endpoint, { method: "POST" });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
           const detail = err && err.detail ? err.detail : null;
@@ -205,6 +229,11 @@ function dashboard(opts) {
             (detail && (detail.message || detail.detail || detail)) ||
               "Failed to start test",
           );
+        }
+        if (this.mode === "live" && this.isMultiNode) {
+          this.phase = "PREPARING";
+          this.status = "RUNNING";
+          this.startElapsedTimer(0);
         }
         // Kick a refresh; status/details will update as soon as execution starts.
         await this.loadTestInfo();
@@ -245,6 +274,27 @@ function dashboard(opts) {
     openRunAnalysis() {
       if (!this.testId) return;
       window.location.href = `/dashboard/history/${this.testId}`;
+    },
+
+    async rerunTest(testId) {
+      const id = testId ? String(testId) : "";
+      if (!id) return;
+      const confirmed = await window.toast.confirm(
+        "Re-run this test with the same configuration?",
+        { confirmText: "Re-run", confirmVariant: "primary", timeoutMs: 10_000 }
+      );
+      if (!confirmed) return;
+
+      try {
+        const response = await fetch(`/api/tests/${id}/rerun`, {
+          method: "POST",
+        });
+        const data = await response.json();
+        window.location.href = `/dashboard/${data.new_test_id}`;
+      } catch (error) {
+        console.error("Failed to rerun test:", error);
+        window.toast.error("Failed to rerun test");
+      }
     },
 
     formatWarehouseOption(wh) {
@@ -386,10 +436,8 @@ function dashboard(opts) {
       const n = typeof value === "number" ? value : Number(value);
       if (!Number.isFinite(n)) return "0";
 
-      // Cap at one decimal place (tenths).
-      const tenthsInt = Math.trunc(n * 10);
-      if (tenthsInt % 10 === 0) return String(tenthsInt / 10);
-      return (tenthsInt / 10).toFixed(1);
+      // Display in whole seconds (no tenths) for all charts/tooltips.
+      return String(Math.trunc(n));
     },
 
     formatCompact(value) {
@@ -1179,7 +1227,33 @@ function dashboard(opts) {
     },
 
     sfLatencyAvailable() {
-      return !!(this.templateInfo && this.templateInfo.sf_latency_available);
+      if (!this.templateInfo) return false;
+      if (this.templateInfo.sf_latency_available) return true;
+      if (this.templateInfo.sf_estimated_available) return true;
+      return false;
+    },
+
+    sfEnrichmentLowWarning() {
+      return !!(this.templateInfo && this.templateInfo.sf_enrichment_low_warning);
+    },
+
+    sfEnrichmentRatioPct() {
+      if (!this.templateInfo) return null;
+      return this.templateInfo.sf_enrichment_ratio_pct;
+    },
+
+    sfEnrichmentSampleCount() {
+      if (!this.templateInfo) return null;
+      return this.templateInfo.sf_enrichment_enriched_queries;
+    },
+
+    sfEnrichmentTotalQueries() {
+      if (!this.templateInfo) return null;
+      return this.templateInfo.sf_enrichment_total_queries;
+    },
+
+    sfEstimatedAvailable() {
+      return !!(this.templateInfo && this.templateInfo.sf_estimated_available);
     },
 
     isEnrichmentComplete() {
@@ -1230,7 +1304,16 @@ function dashboard(opts) {
     },
 
     latencyViewLabel() {
-      if (this.latencyView === "sf_execution") return "SQL execution (Snowflake)";
+      if (this.latencyView === "sf_execution") {
+        if (this.sfEnrichmentLowWarning()) {
+          const estP50 = this.templateInfo?.sf_estimated_p50_latency_ms;
+          if (this.sfEstimatedAvailable() && estP50 != null && estP50 > 0) {
+            return "SQL execution (estimated)";
+          }
+          return "SQL execution (sample)";
+        }
+        return "SQL execution (Snowflake)";
+      }
       return "End-to-end (app)";
     },
 
@@ -1238,7 +1321,15 @@ function dashboard(opts) {
       const p = Number(pct);
       if (this.latencyView === "sf_execution") {
         if (!this.templateInfo) return null;
-        if (!this.sfLatencyAvailable()) return null;
+        if (!this.sfLatencyAvailable() && !this.sfEstimatedAvailable()) return null;
+
+        if (this.sfEnrichmentLowWarning() && this.sfEstimatedAvailable()) {
+          const estVal = p === 50 ? this.templateInfo.sf_estimated_p50_latency_ms
+                       : p === 95 ? this.templateInfo.sf_estimated_p95_latency_ms
+                       : p === 99 ? this.templateInfo.sf_estimated_p99_latency_ms
+                       : null;
+          if (estVal != null && estVal > 0) return estVal;
+        }
         if (p === 50) return this.templateInfo.sf_p50_latency_ms;
         if (p === 95) return this.templateInfo.sf_p95_latency_ms;
         if (p === 99) return this.templateInfo.sf_p99_latency_ms;
@@ -1270,12 +1361,72 @@ function dashboard(opts) {
         if (!resp.ok) return;
         const data = await resp.json();
         this.templateInfo = data;
+        this.isMultiNode = !!(data && data.run_id && data.run_id === data.test_id);
         this.duration = data.duration_seconds || 0;
         this.status = data.status || null;
         if (data.phase != null) {
           this.phase = data.phase;
         } else if (!this.phase && data.status) {
           this.phase = data.status;
+        }
+
+        // Extract timing info for phase-specific counters
+        if (data.timing) {
+          const timing = data.timing;
+          const warmupSeconds = Number(timing.warmup_seconds);
+          if (Number.isFinite(warmupSeconds) && warmupSeconds >= 0) {
+            this.warmupSeconds = Math.round(warmupSeconds);
+          }
+          const runSeconds = Number(timing.run_seconds);
+          if (Number.isFinite(runSeconds) && runSeconds >= 0) {
+            this.runSeconds = Math.round(runSeconds);
+          }
+          const totalExpectedSeconds = Number(timing.total_expected_seconds);
+          if (Number.isFinite(totalExpectedSeconds) && totalExpectedSeconds >= 0) {
+            this.duration = Math.round(totalExpectedSeconds);
+          }
+          const elapsedDisplay = Number(timing.elapsed_display_seconds);
+          if (Number.isFinite(elapsedDisplay) && elapsedDisplay >= 0 && this.mode === "live") {
+            if (!this.isMultiNode) {
+              this.startElapsedTimer(elapsedDisplay);
+            } else if (this._elapsedIntervalId) {
+              this.syncElapsedTimer(elapsedDisplay);
+            } else {
+              this.startElapsedTimer(elapsedDisplay);
+            }
+            if (this.duration > 0) {
+              this.progress = Math.min(100, (this.elapsed / this.duration) * 100);
+            }
+          }
+        }
+
+        const phaseUpper = (this.phase || "").toString().toUpperCase();
+        if (phaseUpper === "PROCESSING") {
+          this.startProcessingLogTimer();
+        } else {
+          this.stopProcessingLogTimer();
+        }
+
+        if (data.enrichment_status === "PENDING") {
+          this.startEnrichmentPolling();
+        } else {
+          this.stopEnrichmentPolling();
+        }
+
+        if (this.mode === "live") {
+          const statusUpper = (data.status || "").toString().toUpperCase();
+          const isTerminal = ["COMPLETED", "STOPPED", "FAILED", "CANCELLED"].includes(
+            statusUpper,
+          );
+          if (this.isMultiNode && !isTerminal) {
+            this.startMultiNodeMetricsPolling();
+            this.startMultiNodeLogPolling();
+            this.startMultiNodeTestInfoPolling();
+          } else {
+            this.stopMultiNodeMetricsPolling();
+            this.stopMultiNodeLogPolling();
+            this.stopMultiNodeTestInfoPolling();
+          }
         }
 
         // Ensure the "Concurrent Queries" chart uses Postgres-appropriate legends
@@ -1354,19 +1505,252 @@ function dashboard(opts) {
           
           // Load historical metrics for completed tests to populate charts
           await this.loadHistoricalMetrics();
+          await this.loadNodeMetrics();
 
         // On history view, load per-second warehouse series once post-processing is complete.
+        // For parent (multi-node) runs, we don't require enrichment_status=COMPLETED on the parent
+        // since the children handle enrichment and the API aggregates from children.
         if (
           this.mode === "history" &&
           this.isFinalMetricsReady() &&
-          this.isEnrichmentComplete()
+          (this.isEnrichmentComplete() || this.isMultiNode)
         ) {
           this.resetWarehouseTimeseriesRetry();
           await this.loadWarehouseTimeseries();
         }
+
+        // Load overhead timeseries independently (doesn't require full enrichment complete)
+        if (this.mode === "history" && this.isFinalMetricsReady()) {
+          await this.loadOverheadTimeseries();
+        }
         }
       } catch (e) {
         console.error("Failed to load test info:", e);
+      }
+    },
+
+    async loadNodeMetrics() {
+      if (!this.testId) return;
+      if (this.mode !== "history") return;
+      if (!this.isMultiNode) return;
+
+      this.nodeMetricsLoading = true;
+      this.nodeMetricsError = null;
+      this.nodeMetricsAvailable = false;
+      this.nodeMetricsNodes = [];
+      this.nodeMetricsExpanded = {};
+
+      try {
+        const resp = await fetch(`/api/tests/${this.testId}/node-metrics`);
+        if (!resp.ok) {
+          const payload = await resp.json().catch(() => ({}));
+          const detail = payload && payload.detail ? payload.detail : null;
+          throw new Error(
+            (detail && (detail.message || detail.detail || detail)) ||
+              `Failed to load node metrics (HTTP ${resp.status})`,
+          );
+        }
+
+        const data = await resp.json().catch(() => ({}));
+        if (data && data.error) {
+          throw new Error(String(data.error));
+        }
+
+        const nodes = data && Array.isArray(data.nodes) ? data.nodes : [];
+        nodes.sort((a, b) => {
+          const aId = Number(a?.worker_group_id ?? 0);
+          const bId = Number(b?.worker_group_id ?? 0);
+          if (aId !== bId) return aId - bId;
+          const aNode = String(a?.node_id ?? "");
+          const bNode = String(b?.node_id ?? "");
+          return aNode.localeCompare(bNode);
+        });
+        this.nodeMetricsNodes = nodes.map((node) => {
+          const snapshots = Array.isArray(node.snapshots) ? node.snapshots : [];
+          const latest = snapshots.length ? snapshots[snapshots.length - 1] : null;
+          return { ...node, snapshots, latest };
+        });
+        this.nodeMetricsAvailable = !!(data && data.available && nodes.length);
+      } catch (e) {
+        console.error("Failed to load node metrics:", e);
+        this.nodeMetricsError = e && e.message ? e.message : String(e);
+        this.nodeMetricsNodes = [];
+        this.nodeMetricsAvailable = false;
+      } finally {
+        this.nodeMetricsLoading = false;
+      }
+    },
+
+    async loadMultiNodeLiveMetrics() {
+      if (!this.testId) return;
+      if (this.mode !== "live") return;
+      if (!this.isMultiNode) return;
+
+      try {
+        const resp = await fetch(`/api/tests/${this.testId}/metrics`);
+        if (!resp.ok) return;
+        const data = await resp.json().catch(() => ({}));
+        const snapshots = data && Array.isArray(data.snapshots) ? data.snapshots : [];
+        if (!snapshots.length) return;
+        const latest = snapshots[snapshots.length - 1];
+        const payload = this._multiNodePayloadFromSnapshot(latest);
+        if (payload) {
+          this.applyMetricsPayload(payload);
+        }
+      } catch (e) {
+        console.error("[dashboard] multi-node metrics polling failed:", e);
+      }
+    },
+
+    _multiNodePayloadFromSnapshot(snapshot) {
+      if (!snapshot) return null;
+      const phase = this.phase || this.status || null;
+      const status = this.status || null;
+
+      const resources = {
+        cpu_percent: snapshot.resources_cpu_percent,
+        memory_mb: snapshot.resources_memory_mb,
+        process_cpu_percent: snapshot.resources_process_cpu_percent,
+        process_memory_mb: snapshot.resources_process_memory_mb,
+        host_cpu_percent: snapshot.resources_host_cpu_percent,
+        host_cpu_cores: snapshot.resources_host_cpu_cores,
+        host_memory_mb: snapshot.resources_host_memory_mb,
+        host_memory_total_mb: snapshot.resources_host_memory_total_mb,
+        host_memory_available_mb: snapshot.resources_host_memory_available_mb,
+        host_memory_percent: snapshot.resources_host_memory_percent,
+        cgroup_cpu_percent: snapshot.resources_cgroup_cpu_percent,
+        cgroup_cpu_quota_cores: snapshot.resources_cgroup_cpu_quota_cores,
+        cgroup_memory_mb: snapshot.resources_cgroup_memory_mb,
+        cgroup_memory_limit_mb: snapshot.resources_cgroup_memory_limit_mb,
+        cgroup_memory_percent: snapshot.resources_cgroup_memory_percent,
+      };
+
+      const appOps = {
+        point_lookup_ops_sec: snapshot.app_point_lookup_ops_sec,
+        range_scan_ops_sec: snapshot.app_range_scan_ops_sec,
+        insert_ops_sec: snapshot.app_insert_ops_sec,
+        update_ops_sec: snapshot.app_update_ops_sec,
+        read_ops_sec: snapshot.app_read_ops_sec,
+        write_ops_sec: snapshot.app_write_ops_sec,
+      };
+
+      const sfBench = {
+        running: snapshot.sf_running,
+        queued: snapshot.sf_queued_bench,
+        blocked: snapshot.sf_blocked,
+        running_read: snapshot.sf_running_read,
+        running_write: snapshot.sf_running_write,
+        running_point_lookup: snapshot.sf_running_point_lookup,
+        running_range_scan: snapshot.sf_running_range_scan,
+        running_insert: snapshot.sf_running_insert,
+        running_update: snapshot.sf_running_update,
+        running_tagged: snapshot.sf_running_tagged,
+        running_other: snapshot.sf_running_other,
+      };
+
+      const warehouse = {
+        queued: snapshot.sf_queued,
+      };
+
+      return {
+        timestamp: snapshot.timestamp,
+        phase,
+        status,
+        elapsed: snapshot.elapsed_seconds,
+        ops: {
+          current_per_sec: snapshot.ops_per_sec,
+        },
+        latency: {
+          p50: snapshot.p50_latency,
+          p95: snapshot.p95_latency,
+          p99: snapshot.p99_latency,
+        },
+        connections: {
+          active: snapshot.active_connections,
+          target: snapshot.target_workers,
+        },
+        custom_metrics: {
+          app_ops_breakdown: appOps,
+          sf_bench: sfBench,
+          warehouse,
+          resources,
+        },
+      };
+    },
+
+    startMultiNodeMetricsPolling() {
+      if (this._multiNodeMetricsIntervalId) return;
+      const poll = () => this.loadMultiNodeLiveMetrics();
+      poll();
+      this._multiNodeMetricsIntervalId = setInterval(poll, 1000);
+    },
+
+    stopMultiNodeMetricsPolling() {
+      if (!this._multiNodeMetricsIntervalId) return;
+      clearInterval(this._multiNodeMetricsIntervalId);
+      this._multiNodeMetricsIntervalId = null;
+    },
+
+    startMultiNodeTestInfoPolling() {
+      if (this._multiNodeTestInfoIntervalId) return;
+      const poll = () => this.loadMultiNodeTestInfo();
+      poll();
+      this._multiNodeTestInfoIntervalId = setInterval(poll, 1000);
+    },
+
+    stopMultiNodeTestInfoPolling() {
+      if (!this._multiNodeTestInfoIntervalId) return;
+      clearInterval(this._multiNodeTestInfoIntervalId);
+      this._multiNodeTestInfoIntervalId = null;
+    },
+
+    async loadMultiNodeTestInfo() {
+      if (!this.testId) return;
+      if (this.mode !== "live") return;
+      if (!this.isMultiNode) return;
+
+      try {
+        const resp = await fetch(`/api/tests/${this.testId}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        if (data.phase) this.phase = data.phase;
+        if (data.status) this.status = data.status;
+
+        if (data.timing) {
+          const timing = data.timing;
+          const warmupSeconds = Number(timing.warmup_seconds);
+          if (Number.isFinite(warmupSeconds) && warmupSeconds >= 0) {
+            this.warmupSeconds = Math.round(warmupSeconds);
+          }
+          const runSeconds = Number(timing.run_seconds);
+          if (Number.isFinite(runSeconds) && runSeconds >= 0) {
+            this.runSeconds = Math.round(runSeconds);
+          }
+          const totalExpectedSeconds = Number(timing.total_expected_seconds);
+          if (Number.isFinite(totalExpectedSeconds) && totalExpectedSeconds >= 0) {
+            this.duration = Math.round(totalExpectedSeconds);
+          }
+          const elapsedDisplay = Number(timing.elapsed_display_seconds);
+          if (Number.isFinite(elapsedDisplay) && elapsedDisplay >= 0) {
+            if (this._elapsedIntervalId) {
+              this.syncElapsedTimer(elapsedDisplay);
+            } else {
+              this.startElapsedTimer(elapsedDisplay);
+            }
+            if (this.duration > 0) {
+              this.progress = Math.min(100, (this.elapsed / this.duration) * 100);
+            }
+          }
+        }
+
+        const statusUpper = (data.status || "").toString().toUpperCase();
+        const isTerminal = ["COMPLETED", "STOPPED", "FAILED", "CANCELLED"].includes(statusUpper);
+        if (isTerminal) {
+          this.stopMultiNodeTestInfoPolling();
+        }
+      } catch (e) {
+        console.error("[dashboard] multi-node test info polling failed:", e);
       }
     },
 
@@ -1644,17 +2028,116 @@ function dashboard(opts) {
       chart.update();
     },
 
+    async loadOverheadTimeseries() {
+      if (!this.testId) return;
+      if (this.mode !== "history") return;
+
+      this.overheadTsLoading = true;
+      this.overheadTsError = null;
+      this.overheadTs = [];
+      this.overheadTsAvailable = false;
+      this.overheadTsLoaded = false;
+
+      try {
+        const resp = await fetch(`/api/tests/${this.testId}/overhead-timeseries`);
+        if (!resp.ok) {
+          const payload = await resp.json().catch(() => ({}));
+          const detail = payload && payload.detail ? payload.detail : null;
+          throw new Error(
+            (detail && (detail.message || detail.detail || detail)) ||
+              `Failed to load overhead timeseries (HTTP ${resp.status})`,
+          );
+        }
+
+        const data = await resp.json();
+        if (data && data.error) {
+          throw new Error(String(data.error));
+        }
+        this.overheadTs = data && Array.isArray(data.points) ? data.points : [];
+        this.overheadTsAvailable = !!(data && data.available);
+
+        this.initCharts({ onlyOverhead: true });
+        this.renderOverheadTimeseriesChart();
+      } catch (e) {
+        console.error("Failed to load overhead timeseries:", e);
+        this.overheadTsError = e && e.message ? e.message : String(e);
+        this.overheadTs = [];
+        this.overheadTsAvailable = false;
+      } finally {
+        this.overheadTsLoading = false;
+        this.overheadTsLoaded = true;
+      }
+    },
+
+    renderOverheadTimeseriesChart() {
+      const canvas = document.getElementById("overheadChart");
+      const chart =
+        canvas &&
+        (canvas.__chart ||
+          (window.Chart && Chart.getChart ? Chart.getChart(canvas) : null));
+      if (!canvas || !chart) return;
+
+      const points = Array.isArray(this.overheadTs) ? this.overheadTs : [];
+
+      const labels = [];
+      const overheadData = [];
+      const appData = [];
+      const sfTotalData = [];
+      const enrichedCountData = [];
+
+      for (const p of points) {
+        if (!p) continue;
+        const secs = Number(p.elapsed_seconds || 0);
+        labels.push(`${this.formatSecondsTenths(secs)}s`);
+
+        const overhead = p.p50_overhead_ms != null ? Number(p.p50_overhead_ms) : null;
+        overheadData.push(overhead);
+        appData.push(p.avg_app_ms != null ? Number(p.avg_app_ms) : null);
+        sfTotalData.push(p.avg_sf_total_ms != null ? Number(p.avg_sf_total_ms) : null);
+        enrichedCountData.push(Number(p.enriched_queries || 0));
+      }
+
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = overheadData;
+      chart.data.datasets[1].data = appData;
+      chart.data.datasets[2].data = sfTotalData;
+      chart.data.datasets[3].data = enrichedCountData;
+
+      chart.update();
+    },
+
     async loadLogs() {
       if (!this.testId) return;
       try {
-        const resp = await fetch(`/api/tests/${this.testId}/logs?limit=${this.logMaxLines}`);
+        const params = new URLSearchParams({ limit: String(this.logMaxLines) });
+        if (this.isMultiNode && this.logSelectedTestId) {
+          params.set("child_test_id", this.logSelectedTestId);
+        }
+        const resp = await fetch(
+          `/api/tests/${this.testId}/logs?${params.toString()}`,
+        );
         if (!resp.ok) return;
         const data = await resp.json().catch(() => ({}));
+        if (data && Array.isArray(data.nodes)) {
+          this.logTargets = data.nodes;
+          const selected = data.selected_test_id || this.logSelectedTestId;
+          if (selected) {
+            this.logSelectedTestId = selected;
+          } else if (this.logTargets.length) {
+            this.logSelectedTestId = this.logTargets[0].test_id || null;
+          }
+        }
         const logs = data && Array.isArray(data.logs) ? data.logs : [];
         this.appendLogs(logs);
       } catch (e) {
         console.error("Failed to load logs:", e);
       }
+    },
+
+    onLogTargetChange() {
+      this.logs = [];
+      this._logSeen = {};
+      this.loadLogs();
     },
 
     appendLogs(logs) {
@@ -1684,6 +2167,19 @@ function dashboard(opts) {
           if (r && r.log_id) delete this._logSeen[r.log_id];
         }
       }
+    },
+
+    startMultiNodeLogPolling() {
+      if (this._logPollIntervalId) return;
+      const poll = () => this.loadLogs();
+      poll();
+      this._logPollIntervalId = setInterval(poll, 1000);
+    },
+
+    stopMultiNodeLogPolling() {
+      if (!this._logPollIntervalId) return;
+      clearInterval(this._logPollIntervalId);
+      this._logPollIntervalId = null;
     },
 
     logsText() {
@@ -2034,9 +2530,10 @@ function dashboard(opts) {
       const initOpts = opts && typeof opts === "object" ? opts : {};
       const onlyWarehouse = !!initOpts.onlyWarehouse;
       const onlyConcurrency = !!initOpts.onlyConcurrency;
+      const onlyOverhead = !!initOpts.onlyOverhead;
 
       if (this.debug) {
-        console.log("[dashboard][debug] initCharts", { onlyWarehouse });
+        console.log("[dashboard][debug] initCharts", { onlyWarehouse, onlyOverhead });
       }
 
       // Make chart init idempotent. HTMX/Alpine can re-initialize components and
@@ -2053,7 +2550,7 @@ function dashboard(opts) {
 
       // Allow callers (e.g. after templateInfo loads) to rebuild ONLY the concurrency chart
       // so we can correct legends/datasets for Postgres without resetting other charts.
-      if (!onlyWarehouse && onlyConcurrency) {
+      if (!onlyWarehouse && !onlyOverhead && onlyConcurrency) {
         const concurrencyCanvas = document.getElementById("concurrencyChart");
         if (concurrencyCanvas && window.Chart && Chart.getChart) {
           safeDestroy(Chart.getChart(concurrencyCanvas));
@@ -2136,7 +2633,7 @@ function dashboard(opts) {
       }
 
       const throughputCanvas = document.getElementById("throughputChart");
-      if (!onlyWarehouse) {
+      if (!onlyWarehouse && !onlyOverhead) {
         // If Alpine re-initializes, our old chart refs are lost, but Chart.js still has
         // a chart bound to the canvas. Destroy by canvas first.
         if (throughputCanvas && window.Chart && Chart.getChart) {
@@ -2217,7 +2714,7 @@ function dashboard(opts) {
       }
 
       const concurrencyCanvas = document.getElementById("concurrencyChart");
-      if (!onlyWarehouse) {
+      if (!onlyWarehouse && !onlyOverhead) {
         if (concurrencyCanvas && window.Chart && Chart.getChart) {
           safeDestroy(Chart.getChart(concurrencyCanvas));
         }
@@ -2308,7 +2805,7 @@ function dashboard(opts) {
       const resourcesCpuCanvas = document.getElementById("resourcesCpuSparkline");
       const resourcesMemCanvas = document.getElementById("resourcesMemSparkline");
       const resourcesHistoryCanvas = document.getElementById("resourcesHistoryChart");
-      if (!onlyWarehouse) {
+      if (!onlyWarehouse && !onlyOverhead) {
         if (resourcesCpuCanvas && window.Chart && Chart.getChart) {
           safeDestroy(Chart.getChart(resourcesCpuCanvas));
         }
@@ -2475,7 +2972,7 @@ function dashboard(opts) {
       }
 
       const sfRunningCanvas = document.getElementById("sfRunningChart");
-      if (!onlyWarehouse) {
+      if (!onlyWarehouse && !onlyOverhead) {
         if (sfRunningCanvas && window.Chart && Chart.getChart) {
           safeDestroy(Chart.getChart(sfRunningCanvas));
         }
@@ -2588,7 +3085,7 @@ function dashboard(opts) {
 
       // OPS/SEC Breakdown Chart (history view)
       const opsSecCanvas = document.getElementById("opsSecChart");
-      if (!onlyWarehouse) {
+      if (!onlyWarehouse && !onlyOverhead) {
         if (opsSecCanvas && window.Chart && Chart.getChart) {
           safeDestroy(Chart.getChart(opsSecCanvas));
         }
@@ -2692,7 +3189,7 @@ function dashboard(opts) {
       }
 
       const latencyCanvas = document.getElementById("latencyChart");
-      if (!onlyWarehouse) {
+      if (!onlyWarehouse && !onlyOverhead) {
         if (latencyCanvas && window.Chart && Chart.getChart) {
           safeDestroy(Chart.getChart(latencyCanvas));
         }
@@ -2758,7 +3255,7 @@ function dashboard(opts) {
 
       // MCW Live Chart (real-time active clusters for live dashboard)
       const mcwLiveCanvas = document.getElementById("mcwLiveChart");
-      if (!onlyWarehouse) {
+      if (!onlyWarehouse && !onlyOverhead) {
         if (mcwLiveCanvas && window.Chart && Chart.getChart) {
           safeDestroy(Chart.getChart(mcwLiveCanvas));
         }
@@ -2808,16 +3305,21 @@ function dashboard(opts) {
       }
 
       const warehouseCanvas = document.getElementById("warehouseQueueChart");
-      if (warehouseCanvas && window.Chart && Chart.getChart) {
-        safeDestroy(Chart.getChart(warehouseCanvas));
-      }
-
-      const warehouseCtx =
-        warehouseCanvas && warehouseCanvas.getContext
-          ? warehouseCanvas.getContext("2d")
-          : null;
-      if (warehouseCtx) {
-        warehouseCanvas.__chart = new Chart(warehouseCtx, {
+      const existingWarehouseChart =
+        warehouseCanvas &&
+        (warehouseCanvas.__chart ||
+          (window.Chart && Chart.getChart ? Chart.getChart(warehouseCanvas) : null));
+      if (existingWarehouseChart) {
+        if (onlyWarehouse) {
+          return;
+        }
+      } else {
+        const warehouseCtx =
+          warehouseCanvas && warehouseCanvas.getContext
+            ? warehouseCanvas.getContext("2d")
+            : null;
+        if (warehouseCtx) {
+          warehouseCanvas.__chart = new Chart(warehouseCtx, {
           type: "line",
           data: {
             labels: [],
@@ -2884,6 +3386,105 @@ function dashboard(opts) {
                       return `${ctx.dataset.label}: ${Math.trunc(Number(y))}`;
                     }
                     return `${ctx.dataset.label}: ${Number(y).toFixed(2)} ms`;
+                  },
+                },
+              },
+            },
+          },
+        });
+        }
+      }
+
+      const overheadCanvas = document.getElementById("overheadChart");
+      if (overheadCanvas && window.Chart && Chart.getChart) {
+        safeDestroy(Chart.getChart(overheadCanvas));
+      }
+
+      const overheadCtx =
+        overheadCanvas && overheadCanvas.getContext
+          ? overheadCanvas.getContext("2d")
+          : null;
+      if (overheadCtx) {
+        overheadCanvas.__chart = new Chart(overheadCtx, {
+          type: "line",
+          data: {
+            labels: [],
+            datasets: [
+              {
+                label: "Overhead (P50)",
+                data: [],
+                yAxisID: "yMs",
+                borderColor: "rgb(245, 158, 11)",
+                backgroundColor: "rgba(245, 158, 11, 0.1)",
+                tension: 0.2,
+                fill: true,
+              },
+              {
+                label: "End-to-end (avg)",
+                data: [],
+                yAxisID: "yMs",
+                borderColor: "rgb(239, 68, 68)",
+                backgroundColor: "transparent",
+                tension: 0.2,
+                borderDash: [4, 4],
+              },
+              {
+                label: "SF total (avg)",
+                data: [],
+                yAxisID: "yMs",
+                borderColor: "rgb(34, 197, 94)",
+                backgroundColor: "transparent",
+                tension: 0.2,
+                borderDash: [4, 4],
+              },
+              {
+                label: "Enriched queries",
+                data: [],
+                yAxisID: "yCount",
+                borderColor: "rgb(59, 130, 246)",
+                backgroundColor: "transparent",
+                tension: 0.2,
+                borderWidth: 1,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 0 },
+            interaction: { mode: "index", intersect: false },
+            scales: {
+              yMs: {
+                position: "left",
+                beginAtZero: true,
+                title: { display: true, text: "Latency (ms)" },
+                ticks: {
+                  callback: (value) => `${Number(value).toFixed(0)} ms`,
+                },
+              },
+              yCount: {
+                position: "right",
+                beginAtZero: true,
+                grid: { drawOnChartArea: false },
+                title: { display: true, text: "Enriched samples / sec" },
+                ticks: {
+                  callback: (value) => formatCompact(value),
+                },
+              },
+              x: {
+                ticks: { maxTicksLimit: 12 },
+              },
+            },
+            plugins: {
+              tooltip: {
+                callbacks: {
+                  label: (ctx) => {
+                    const y = ctx && ctx.parsed ? ctx.parsed.y : null;
+                    if (y == null) return ctx.dataset.label;
+                    if (ctx.dataset.yAxisID === "yCount") {
+                      return `${ctx.dataset.label}: ${formatCompact(y)}`;
+                    }
+                    return `${ctx.dataset.label}: ${Number(y).toFixed(1)} ms`;
                   },
                 },
               },
@@ -2962,6 +3563,27 @@ function dashboard(opts) {
         this._elapsedIntervalId = null;
       }
       this._elapsedStartTime = null;
+    },
+
+    startProcessingLogTimer() {
+      this.stopProcessingLogTimer();
+      this._processingLogStartMs = Date.now();
+      this._processingLogIntervalId = setInterval(() => {
+        const elapsedSeconds = Math.floor(
+          (Date.now() - this._processingLogStartMs) / 1000,
+        );
+        console.log(
+          `[dashboard] Post-processing still running (${elapsedSeconds}s elapsed)`,
+        );
+      }, 30000);
+    },
+
+    stopProcessingLogTimer() {
+      if (this._processingLogIntervalId) {
+        clearInterval(this._processingLogIntervalId);
+        this._processingLogIntervalId = null;
+      }
+      this._processingLogStartMs = null;
     },
 
     syncElapsedTimer(serverElapsed) {
@@ -3230,11 +3852,23 @@ function dashboard(opts) {
         }
 
         const timing = payload.timing || {};
+        const hasTiming =
+          timing && typeof timing === "object" && Object.keys(timing).length > 0;
+        const allowPayloadPhase = !this.isMultiNode || hasTiming;
+        const allowPayloadElapsed = !this.isMultiNode;
         const phase = payload.phase ? String(payload.phase) : null;
         const status = payload.status ? String(payload.status) : null;
         const prevPhase = this.phase ? String(this.phase).toUpperCase() : "";
-        if (phase) this.phase = phase;
+        if (phase && allowPayloadPhase) this.phase = phase;
         if (status) this.status = status;
+
+        const nextPhaseUpper =
+          phase && allowPayloadPhase ? phase.toUpperCase() : "";
+        if (nextPhaseUpper === "PROCESSING" && prevPhase !== "PROCESSING") {
+          this.startProcessingLogTimer();
+        } else if (prevPhase === "PROCESSING" && nextPhaseUpper !== "PROCESSING") {
+          this.stopProcessingLogTimer();
+        }
 
         const warmupSeconds = Number(timing.warmup_seconds);
         if (Number.isFinite(warmupSeconds) && warmupSeconds >= 0) {
@@ -3253,7 +3887,7 @@ function dashboard(opts) {
         let serverElapsed = null;
         if (Number.isFinite(elapsedDisplay) && elapsedDisplay >= 0) {
           serverElapsed = elapsedDisplay;
-        } else if (payload.elapsed != null) {
+        } else if (allowPayloadElapsed && payload.elapsed != null) {
           const fallback = Number(payload.elapsed);
           if (Number.isFinite(fallback) && fallback >= 0) {
             serverElapsed = fallback;
@@ -3263,9 +3897,12 @@ function dashboard(opts) {
         const phaseUpper = (this.phase || "").toString().toUpperCase();
         const isTerminal = phaseUpper === "COMPLETED" || 
           ["STOPPED", "FAILED", "CANCELLED"].includes((this.status || "").toString().toUpperCase());
+        if (isTerminal) {
+          this.stopProcessingLogTimer();
+        }
 
         // Handle phase transitions for elapsed timer
-        if (phase) {
+        if (phase && allowPayloadPhase) {
           const newPhaseUpper = phase.toUpperCase();
           // Start timer when entering PREPARING
           if (newPhaseUpper === "PREPARING" && prevPhase !== "PREPARING") {
@@ -3730,6 +4367,45 @@ function dashboard(opts) {
       }
     },
 
+    startEnrichmentPolling() {
+      if (this._enrichmentPollIntervalId) return;
+      this.pollEnrichmentStatus();
+      this._enrichmentPollIntervalId = setInterval(() => {
+        this.pollEnrichmentStatus();
+      }, 5000);
+    },
+
+    stopEnrichmentPolling() {
+      if (this._enrichmentPollIntervalId) {
+        clearInterval(this._enrichmentPollIntervalId);
+        this._enrichmentPollIntervalId = null;
+      }
+    },
+
+    async pollEnrichmentStatus() {
+      if (!this.testId) return;
+      try {
+        const resp = await fetch(`/api/tests/${this.testId}/enrichment-status`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.enrichmentProgress = data;
+        if (data.enrichment_status !== "PENDING" || data.is_complete) {
+          this.stopEnrichmentPolling();
+          if (this.templateInfo) {
+            this.templateInfo.enrichment_status = data.enrichment_status;
+          }
+          if (data.enrichment_status === "COMPLETED") {
+            await this.loadTestInfo();
+            if (window.toast && typeof window.toast.success === "function") {
+              window.toast.success(`Enrichment completed (${data.enrichment_ratio_pct}% queries enriched)`);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("Failed to poll enrichment status:", e);
+      }
+    },
+
     async sendChatMessage() {
       const msg = this.chatMessage.trim();
       if (!msg || !this.testId || this.chatLoading) return;
@@ -3800,7 +4476,7 @@ function dashboard(opts) {
       const breakdown = this.templateInfo?.cluster_breakdown || [];
       if (!breakdown.length) return null;
 
-      const count = breakdown.length;
+      let count = 0;
       let totalQueries = 0;
       let sumP50 = 0;
       let sumP95 = 0;
@@ -3810,8 +4486,15 @@ function dashboard(opts) {
       let totalRs = 0;
       let totalIns = 0;
       let totalUpd = 0;
+      let unattributedQueries = 0;
 
       for (const c of breakdown) {
+        const clusterNumber = Number(c.cluster_number || 0);
+        if (clusterNumber > 0) {
+          count += 1;
+        } else {
+          unattributedQueries += Number(c.query_count || 0);
+        }
         totalQueries += Number(c.query_count || 0);
         sumP50 += Number(c.p50_exec_ms || 0);
         sumP95 += Number(c.p95_exec_ms || 0);
@@ -3826,15 +4509,21 @@ function dashboard(opts) {
       return {
         cluster_count: count,
         total_queries: totalQueries,
-        avg_p50_exec_ms: sumP50 / count,
-        avg_p95_exec_ms: sumP95 / count,
-        avg_queued_overload_ms: sumQueueOverload / count,
-        avg_queued_provisioning_ms: sumQueueProvisioning / count,
+        avg_p50_exec_ms: count > 0 ? sumP50 / count : null,
+        avg_p95_exec_ms: count > 0 ? sumP95 / count : null,
+        avg_queued_overload_ms: count > 0 ? sumQueueOverload / count : null,
+        avg_queued_provisioning_ms: count > 0 ? sumQueueProvisioning / count : null,
         total_point_lookups: totalPl,
         total_range_scans: totalRs,
         total_inserts: totalIns,
         total_updates: totalUpd,
+        unattributed_queries: unattributedQueries,
       };
+    },
+
+    clusterLabel(cluster) {
+      const clusterNumber = Number(cluster?.cluster_number || 0);
+      return clusterNumber > 0 ? clusterNumber : "Unattributed";
     },
 
     toggleStepHistory() {
@@ -3845,6 +4534,92 @@ function dashboard(opts) {
       this.resourcesHistoryExpanded = !this.resourcesHistoryExpanded;
     },
 
+    toggleNodeMetrics(node) {
+      if (!node || !node.key) return;
+      const key = String(node.key);
+      this.nodeMetricsExpanded[key] = !this.nodeMetricsExpanded[key];
+      if (this.nodeMetricsExpanded[key]) {
+        this.$nextTick(() => {
+          this.renderNodeMetricsChart(node);
+        });
+      }
+    },
+
+    renderNodeMetricsChart(node) {
+      if (!node || !node.key) return;
+      const canvasId = `nodeMetricsChart-${node.key}`;
+      const canvas = document.getElementById(canvasId);
+      if (!canvas || !window.Chart) return;
+      const existing =
+        canvas.__chart || (Chart.getChart ? Chart.getChart(canvas) : null);
+      if (existing) {
+        try {
+          existing.destroy();
+        } catch (_) {}
+      }
+      const ctx = canvas.getContext ? canvas.getContext("2d") : null;
+      if (!ctx) return;
+
+      const snapshots = Array.isArray(node.snapshots) ? node.snapshots : [];
+      const labels = snapshots.map((s) => s.timestamp);
+      const qpsData = snapshots.map((s) => Number(s.qps || 0));
+      const p95Data = snapshots.map((s) => Number(s.p95_latency || 0));
+
+      canvas.__chart = new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "QPS",
+              data: qpsData,
+              borderColor: "rgb(59, 130, 246)",
+              backgroundColor: "transparent",
+              tension: 0.1,
+              borderWidth: 2,
+              yAxisID: "y",
+            },
+            {
+              label: "P95 latency (ms)",
+              data: p95Data,
+              borderColor: "rgb(234, 88, 12)",
+              backgroundColor: "transparent",
+              tension: 0.1,
+              borderWidth: 2,
+              yAxisID: "y1",
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          scales: {
+            y: {
+              title: { display: true, text: "QPS" },
+              ticks: { callback: (value) => this.formatCompact(value) },
+            },
+            y1: {
+              position: "right",
+              title: { display: true, text: "P95 (ms)" },
+              ticks: { callback: (value) => this.formatCompact(value) },
+              grid: { drawOnChartArea: false },
+            },
+            x: { display: false },
+          },
+          plugins: {
+            legend: { display: true },
+            tooltip: {
+              callbacks: {
+                label: (ctx) =>
+                  `${ctx.dataset.label}: ${this.formatCompact(ctx.parsed.y)}`,
+              },
+            },
+          },
+        },
+      });
+    },
+
     hasStepHistory() {
       const fmr = this.templateInfo?.find_max_result;
       if (!fmr || typeof fmr !== "object") return false;
@@ -3852,27 +4627,77 @@ function dashboard(opts) {
       return Array.isArray(hist) && hist.length > 0;
     },
 
+    hasMultiNodeStepHistory() {
+      const nodes = this.templateInfo?.node_find_max_results;
+      return Array.isArray(nodes) && nodes.length > 1;
+    },
+
+    stepHistoryNodeOptions() {
+      const opts = [];
+      const agg = this.templateInfo?.aggregated_find_max_result;
+      if (agg) {
+        const totalQps = agg.final_best_qps ?? "?";
+        const nodes = agg.total_nodes ?? "?";
+        opts.push({
+          value: "aggregate",
+          label: `All ${nodes} Nodes (${typeof totalQps === "number" ? totalQps.toFixed(1) : totalQps} QPS total)`,
+        });
+      }
+      const nodes = this.templateInfo?.node_find_max_results;
+      if (Array.isArray(nodes)) {
+        nodes.forEach((n, idx) => {
+          const fmr = n.find_max_result;
+          const bestCc = fmr?.final_best_concurrency ?? fmr?.best_concurrency ?? "?";
+          const qps = fmr?.final_best_qps ?? fmr?.best_qps;
+          const qpsStr = typeof qps === "number" ? ` @ ${qps.toFixed(1)} QPS` : "";
+          opts.push({
+            value: String(idx),
+            label: `Node ${n.node_index} (best=${bestCc}${qpsStr})`,
+          });
+        });
+      }
+      return opts;
+    },
+
+    selectedFindMaxResult() {
+      if (this.selectedStepHistoryNode === "aggregate") {
+        const agg = this.templateInfo?.aggregated_find_max_result;
+        if (agg) return agg;
+        return this.templateInfo?.find_max_result;
+      }
+      const idx = parseInt(this.selectedStepHistoryNode, 10);
+      const nodes = this.templateInfo?.node_find_max_results;
+      if (Array.isArray(nodes) && nodes[idx]) {
+        return nodes[idx].find_max_result;
+      }
+      return this.templateInfo?.find_max_result;
+    },
+
     stepHistory() {
-      const fmr = this.templateInfo?.find_max_result;
+      const fmr = this.selectedFindMaxResult();
       if (!fmr || typeof fmr !== "object") return [];
       const hist = fmr.step_history;
       return Array.isArray(hist) ? hist : [];
     },
 
     stepHistorySummary() {
-      const fmr = this.templateInfo?.find_max_result;
+      const fmr = this.selectedFindMaxResult();
       if (!fmr || typeof fmr !== "object") return null;
+      const isAgg = !!fmr.is_aggregate;
       return {
         best_concurrency: fmr.final_best_concurrency ?? fmr.best_concurrency ?? null,
         best_qps: fmr.final_best_qps ?? fmr.best_qps ?? null,
         baseline_p95_ms: fmr.baseline_p95_latency_ms ?? null,
         final_reason: fmr.final_reason ?? null,
         total_steps: Array.isArray(fmr.step_history) ? fmr.step_history.length : 0,
+        is_aggregate: isAgg,
+        total_nodes: isAgg ? fmr.total_nodes : null,
       };
     },
 
     stepP99DiffPct(step) {
-      const baseline = this.findMaxBaselineP99Ms();
+      const fmr = this.selectedFindMaxResult();
+      const baseline = fmr?.baseline_p99_latency_ms;
       const current = Number(step?.p99_latency_ms);
       if (!baseline || baseline <= 0 || !Number.isFinite(current) || current <= 0) {
         return null;
@@ -3881,7 +4706,8 @@ function dashboard(opts) {
     },
 
     stepP95DiffPct(step) {
-      const baseline = this.findMaxBaselineP95Ms();
+      const fmr = this.selectedFindMaxResult();
+      const baseline = fmr?.baseline_p95_latency_ms;
       const current = Number(step?.p95_latency_ms);
       if (!baseline || baseline <= 0 || !Number.isFinite(current) || current <= 0) {
         return null;

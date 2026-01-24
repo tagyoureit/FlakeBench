@@ -77,7 +77,6 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     -- Errors and issues
     error_count INTEGER DEFAULT 0,
     error_rate FLOAT DEFAULT 0.0,
-    failure_reason TEXT,  -- Reason for test failure (setup/validation errors)
     errors VARIANT,
     
     -- Detailed data (JSON/VARIANT)
@@ -148,6 +147,9 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     -- FIND_MAX_CONCURRENCY mode results (step history, best concurrency, etc.)
     find_max_result VARIANT,
 
+    -- Reason for test failure (setup/validation errors)
+    failure_reason TEXT,
+
     -- Post-processing enrichment status (separate from test execution status)
     -- Values: NULL (legacy), PENDING, COMPLETED, FAILED, SKIPPED
     enrichment_status VARCHAR(20),
@@ -190,6 +192,55 @@ CREATE OR ALTER TABLE METRICS_SNAPSHOTS (
     -- Additional metrics (JSON)
     custom_metrics VARIANT,
     
+    -- Audit
+    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    target_workers INTEGER DEFAULT 0
+);
+
+-- =============================================================================
+-- NODE_METRICS_SNAPSHOTS: Per-node time-series metrics (multi-node runs)
+-- =============================================================================
+CREATE OR ALTER TABLE NODE_METRICS_SNAPSHOTS (
+    snapshot_id VARCHAR(36),
+    parent_run_id VARCHAR(36) NOT NULL,
+    test_id VARCHAR(36),
+    worker_group_id INTEGER NOT NULL,
+    worker_group_count INTEGER NOT NULL,
+    node_id VARCHAR(200),
+
+    -- Timing
+    timestamp TIMESTAMP_NTZ NOT NULL,
+    elapsed_seconds FLOAT NOT NULL,
+
+    -- Core metrics
+    total_queries INTEGER NOT NULL,
+    qps FLOAT NOT NULL,
+
+    -- Latency metrics (milliseconds)
+    p50_latency_ms FLOAT NOT NULL,
+    p95_latency_ms FLOAT NOT NULL,
+    p99_latency_ms FLOAT NOT NULL,
+    avg_latency_ms FLOAT NOT NULL,
+
+    -- Operation breakdown
+    read_count INTEGER DEFAULT 0,
+    write_count INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+
+    -- Throughput
+    bytes_per_second FLOAT DEFAULT 0.0,
+    rows_per_second FLOAT DEFAULT 0.0,
+
+    -- Connection pool
+    active_connections INTEGER DEFAULT 0,
+    target_workers INTEGER DEFAULT 0,
+    
+    -- Phase tracking (WARMUP, MEASUREMENT, COOLDOWN)
+    phase VARCHAR(50),
+
+    -- Additional metrics (JSON)
+    custom_metrics VARIANT,
+
     -- Audit
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
@@ -249,6 +300,73 @@ CREATE OR ALTER TABLE QUERY_EXECUTIONS (
     -- Warehouse / caching details
     sf_cluster_number INTEGER,
     sf_pct_scanned_from_cache FLOAT
+);
+
+-- =============================================================================
+-- WAREHOUSE_POLL_SNAPSHOTS: Controller-side warehouse metrics
+-- =============================================================================
+CREATE OR ALTER TABLE WAREHOUSE_POLL_SNAPSHOTS (
+    snapshot_id VARCHAR(36) NOT NULL,
+    run_id VARCHAR(36) NOT NULL,
+    
+    -- Timing
+    timestamp TIMESTAMP_NTZ NOT NULL,
+    elapsed_seconds FLOAT,
+    
+    -- Warehouse Identity
+    warehouse_name VARCHAR(500) NOT NULL,
+    
+    -- MCW Metrics (from SHOW WAREHOUSES)
+    started_clusters INTEGER,
+    running INTEGER,
+    queued INTEGER,
+    
+    -- Scaling State
+    min_cluster_count INTEGER,
+    max_cluster_count INTEGER,
+    scaling_policy VARCHAR(50),
+    
+    -- Raw SHOW WAREHOUSES row (for debugging)
+    raw_result VARIANT,
+    
+    -- Audit
+    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- =============================================================================
+-- FIND_MAX_STEP_HISTORY: Step-by-step history for Find Max runs
+-- =============================================================================
+CREATE OR ALTER TABLE FIND_MAX_STEP_HISTORY (
+    step_id VARCHAR(36) NOT NULL,
+    run_id VARCHAR(36) NOT NULL,
+    step_number INTEGER NOT NULL,
+    
+    -- Step Configuration
+    target_workers INTEGER NOT NULL,
+    step_start_time TIMESTAMP_NTZ NOT NULL,
+    step_end_time TIMESTAMP_NTZ,
+    step_duration_seconds FLOAT,
+    
+    -- Aggregate Metrics (worst-node for P95/P99)
+    total_queries INTEGER,
+    qps FLOAT,
+    p50_latency_ms FLOAT,
+    p95_latency_ms FLOAT,
+    p99_latency_ms FLOAT,
+    error_count INTEGER,
+    error_rate FLOAT,
+    
+    -- Stability Evaluation
+    qps_vs_prior_pct FLOAT,         -- % change vs prior step
+    p95_vs_baseline_pct FLOAT,      -- % change vs baseline (step 1)
+    queue_detected BOOLEAN DEFAULT FALSE,
+    
+    -- Outcome
+    outcome VARCHAR(50),            -- STABLE, DEGRADED, ERROR_THRESHOLD, QUEUE_DETECTED
+    stop_reason TEXT,               -- Populated if this step triggered stop
+    
+    -- Audit
+    created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
 -- =============================================================================
@@ -341,10 +459,11 @@ JOIN TEST_RESULTS tr ON qe.TEST_ID = tr.TEST_ID
 GROUP BY qe.TEST_ID, tr.TEST_NAME, tr.WAREHOUSE, tr.START_TIME, tr.END_TIME, tr.CONCURRENT_CONNECTIONS;
 
 -- Per-cluster breakdown for MCW tests.
+-- Note: CLUSTER_NUMBER = 0 represents queries without an enriched cluster number.
 CREATE OR REPLACE VIEW V_CLUSTER_BREAKDOWN AS
 SELECT
     TEST_ID,
-    SF_CLUSTER_NUMBER AS CLUSTER_NUMBER,
+    COALESCE(SF_CLUSTER_NUMBER, 0) AS CLUSTER_NUMBER,
     COUNT(*) AS QUERY_COUNT,
     PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY SF_EXECUTION_MS) AS P50_EXEC_MS,
     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY SF_EXECUTION_MS) AS P95_EXEC_MS,
@@ -358,8 +477,6 @@ SELECT
 FROM QUERY_EXECUTIONS
 WHERE COALESCE(WARMUP, FALSE) = FALSE
   AND SUCCESS = TRUE
-  AND SF_CLUSTER_NUMBER IS NOT NULL
-  AND SF_EXECUTION_MS IS NOT NULL
 GROUP BY TEST_ID, SF_CLUSTER_NUMBER;
 
 -- Per-second time-series for graphing warehouse metrics during a test.

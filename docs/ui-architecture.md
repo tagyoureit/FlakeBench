@@ -11,7 +11,7 @@ Last updated: 2026-01-21
 
 ## Pages
 
-- `/templates` (root): templates list and actions.
+- `/templates` (root) and `/`: templates list and actions.
 - `/configure`: create/edit templates.
 - `/dashboard`, `/dashboard/{test_id}`: live metrics and control.
 - `/dashboard/history/{test_id}`: read-only analysis.
@@ -53,6 +53,7 @@ avoid race conditions:
   `loadHistoricalMetrics()`.
 
 Pattern for safe chart creation:
+
 ```javascript
 const existingChart = canvas.__chart ||
   (window.Chart && Chart.getChart ? Chart.getChart(canvas) : null);
@@ -67,6 +68,7 @@ if (existingChart) {
 ## Alpine.js Data Access
 
 Alpine.js component data can be accessed programmatically via the data stack:
+
 ```javascript
 const alpineData = element._x_dataStack[0];
 ```

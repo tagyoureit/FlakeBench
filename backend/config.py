@@ -5,6 +5,7 @@ Loads configuration from environment variables with sensible defaults.
 """
 
 from typing import List
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -131,8 +132,25 @@ class Settings(BaseSettings):
     # ========================================================================
     # Security Settings
     # ========================================================================
-    CORS_ORIGINS: List[str] = ["http://localhost:8000", "http://127.0.0.1:8000"]
+    CORS_ORIGINS: List[str] = []
     SECRET_KEY: str = "your_secret_key_here_change_this_in_production"
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def _build_cors_origins(cls, v, info):
+        if v:
+            if isinstance(v, str):
+                import json
+                return json.loads(v)
+            return v
+        host = info.data.get("APP_HOST", "127.0.0.1")
+        port = info.data.get("APP_PORT", 8000)
+        origins = [f"http://{host}:{port}"]
+        if host == "127.0.0.1":
+            origins.append(f"http://localhost:{port}")
+        elif host == "localhost":
+            origins.append(f"http://127.0.0.1:{port}")
+        return origins
 
     # ========================================================================
     # Logging Settings

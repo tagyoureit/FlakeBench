@@ -4,6 +4,22 @@
  * Manages the test results list, filtering, sorting, and pagination.
  * This function must be globally available for HTMX-swapped content to work.
  */
+
+// Polyfill for Object.groupBy (ES2024) - required for older browsers
+if (typeof Object.groupBy !== "function") {
+  Object.groupBy = function (items, callbackFn) {
+    const result = Object.create(null);
+    for (let i = 0; i < items.length; i++) {
+      const key = callbackFn(items[i], i);
+      if (!(key in result)) {
+        result[key] = [];
+      }
+      result[key].push(items[i]);
+    }
+    return result;
+  };
+}
+
 function testHistory() {
   const MAX_COMPARE = 2;
 
@@ -170,6 +186,7 @@ function testHistory() {
     chatLoading: false,
 
     _refreshInterval: null,
+    multiNodeExpanded: {},
     tableTypeLabel,
     tableTypeIconSrc,
 
@@ -361,7 +378,8 @@ function testHistory() {
     },
 
     get sortedTests() {
-      return [...this.tests].sort((a, b) => {
+      const items = Array.isArray(this.tests) ? this.tests : [];
+      const sorter = (a, b) => {
         let aVal = a[this.sortField];
         let bVal = b[this.sortField];
 
@@ -375,7 +393,108 @@ function testHistory() {
         } else {
           return aVal < bVal ? 1 : -1;
         }
+      };
+      if (typeof items.toSorted === "function") {
+        return items.toSorted(sorter);
+      }
+      return [...items].sort(sorter);
+    },
+
+    get displayRows() {
+      const rows = [];
+      const tests = Array.isArray(this.sortedTests) ? this.sortedTests : [];
+      const grouped = Object.groupBy(tests, (test) => {
+        const runId = test?.run_id != null ? String(test.run_id) : "";
+        const testId = test?.test_id != null ? String(test.test_id) : "";
+        if (runId) {
+          return `run:${runId}`;
+        }
+        return `single:${testId}`;
       });
+      const groups = new Map();
+      for (const [key, groupTests] of Object.entries(grouped)) {
+        if (!key.startsWith("run:")) continue;
+        const runId = key.slice(4);
+        const group = { run_id: runId, parent: null, children: [] };
+        for (const test of groupTests) {
+          const testId = test?.test_id != null ? String(test.test_id) : "";
+          if (runId === testId) {
+            group.parent = test;
+          } else {
+            group.children.push(test);
+          }
+        }
+        groups.set(runId, group);
+      }
+
+      const renderedParents = new Set();
+      const renderChildren = (group) => {
+        const children = Array.isArray(group.children) ? group.children : [];
+        const sortedChildren =
+          typeof children.toSorted === "function"
+            ? children.toSorted((a, b) => {
+                const aTime = new Date(a?.created_at || 0);
+                const bTime = new Date(b?.created_at || 0);
+                return bTime - aTime;
+              })
+            : [...children].sort((a, b) => {
+                const aTime = new Date(a?.created_at || 0);
+                const bTime = new Date(b?.created_at || 0);
+                return bTime - aTime;
+              });
+        for (const child of sortedChildren) {
+          rows.push({
+            type: "child",
+            test: child,
+            run_id: group.run_id,
+          });
+        }
+      };
+
+      for (const test of tests) {
+        const runId = test?.run_id != null ? String(test.run_id) : "";
+        const testId = test?.test_id != null ? String(test.test_id) : "";
+        const group = runId ? groups.get(runId) : null;
+
+        if (runId && runId === testId) {
+          if (renderedParents.has(runId)) continue;
+          rows.push({
+            type: "parent",
+            test,
+            run_id: runId,
+            child_count: group && Array.isArray(group.children) ? group.children.length : 0,
+          });
+          if (this.multiNodeExpanded[runId]) {
+            if (group) {
+              renderChildren(group);
+            }
+          }
+          renderedParents.add(runId);
+          continue;
+        }
+
+        if (runId && runId !== testId) {
+          if (group && group.parent) {
+            continue;
+          }
+          rows.push({
+            type: "child",
+            test,
+            run_id: runId,
+          });
+          continue;
+        }
+
+        rows.push({ type: "single", test });
+      }
+
+      return rows;
+    },
+
+    toggleMultiNode(runId) {
+      const id = runId != null ? String(runId) : "";
+      if (!id) return;
+      this.multiNodeExpanded[id] = !this.multiNodeExpanded[id];
     },
 
     sortBy(field) {
