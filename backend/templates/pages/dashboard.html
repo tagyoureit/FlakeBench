@@ -11,25 +11,36 @@
     <div class="dashboard-top-grid">
         <div class="card" x-show="templateInfo">
             <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
-                <div
-                    class="card-title"
-                    x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"
-                ></div>
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <img
+                        x-show="tableTypeIconSrc()"
+                        class="template-type-icon"
+                        :src="tableTypeIconSrc()"
+                        :alt="tableTypeLabel()"
+                        :title="tableTypeLabel()"
+                        style="width: 24px; height: 24px;"
+                    >
+                    <div
+                        class="card-title"
+                        x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"
+                    ></div>
+                </div>
                 <a
-                    class="btn btn-sm btn-secondary"
                     x-show="templateInfo && templateInfo.template_id"
                     :href="templateInfo ? `/configure?template_id=${encodeURIComponent(templateInfo.template_id)}&mode=view` : '#'"
                     target="_blank"
                     rel="noopener"
+                    title="View template"
+                    style="color: var(--text-secondary); display: flex; align-items: center;"
                 >
-                    Go to template
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                        <polyline points="15 3 21 3 21 9"></polyline>
+                        <line x1="10" y1="14" x2="21" y2="3"></line>
+                    </svg>
                 </a>
             </div>
             <div class="text-sm text-gray-600">
-                <div>
-                    <strong>Template:</strong>
-                    <span x-text="templateInfo ? (templateInfo.template_name || templateInfo.test_name || '') : ''"></span>
-                </div>
                 <div class="mt-1">
                     <strong>Table:</strong>
                     <span x-text="templateInfo ? (templateInfo.table_full_name || '') : ''"></span>
@@ -51,20 +62,24 @@
                     <strong>Postgres:</strong>
                     <span x-text="postgresConnectionsDisplay()"></span>
                 </div>
-                <div class="mt-1">
-                    <strong>Workload:</strong>
+                <div class="mt-1" x-show="loadModeDisplay()">
+                    <strong>Load Mode:</strong>
+                    <span x-text="loadModeDisplay()"></span>
+                </div>
+                <div class="mt-1" x-show="workloadDisplay()">
+                    <strong>Workload Mix:</strong>
                     <span x-text="workloadDisplay()"></span>
-                    <span x-show="String(templateInfo?.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
-                        • <strong>Workers:</strong> <span x-text="templateInfo ? (templateInfo.concurrent_connections ?? '') : ''"></span>
+                </div>
+                <div class="mt-1" x-show="templateInfo && Number(templateInfo.duration_seconds || 0) > 0">
+                    <strong>Duration:</strong>
+                    <span x-text="templateInfo ? (templateInfo.duration_seconds ?? '') : ''"></span>s
+                </div>
+                <div class="mt-1" x-show="scalingSummary()">
+                    <strong>Scaling:</strong>
+                    <span x-text="scalingSummary()"></span>
+                    <span x-show="boundsStatusText()">
+                        • <span x-text="boundsStatusText()"></span>
                     </span>
-                    <span x-show="String(templateInfo?.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
-                        • <strong>Target:</strong>
-                        <span x-text="templateInfo ? 'QPS (ops/sec)' : ''"></span>
-                        = <span x-text="templateInfo ? (templateInfo.target_qps ?? '') : ''"></span>
-                        • <strong>Workers:</strong>
-                        <span x-text="templateInfo ? ((templateInfo.min_concurrency ?? '') + '-' + (templateInfo.concurrent_connections ?? '')) : ''"></span>
-                    </span>
-                    • <strong>Duration:</strong> <span x-text="templateInfo ? (templateInfo.duration_seconds ?? '') : ''"></span>s
                 </div>
             </div>
         </div>
@@ -96,7 +111,7 @@
                 </button>
             </div>
 
-            <div x-show="testRunning">
+            <div x-show="hasTestStarted()">
                 <div class="form-group">
                     <label class="form-label">Test Progress</label>
                     
@@ -111,12 +126,12 @@
                                     <!-- Spinner for active untimed phases -->
                                     <span 
                                         class="phase-spinner"
-                                        x-show="phaseState(phaseName) === 'active' && (phaseName === 'PREPARING' || phaseName === 'PROCESSING')"
+                                        x-show="phaseState(phaseName) === 'current' && (phaseName === 'PREPARING' || phaseName === 'PROCESSING')"
                                     ></span>
-                                    <!-- Checkmark for completed phases -->
+                                    <!-- Checkmark for completed phases OR the COMPLETED phase when current -->
                                     <span 
                                         class="phase-checkmark"
-                                        x-show="phaseState(phaseName) === 'completed'"
+                                        x-show="phaseState(phaseName) === 'completed' || (phaseName === 'COMPLETED' && phaseState(phaseName) === 'current')"
                                     >✓</span>
                                     <span x-text="completedPhaseDisplayName(phaseName)"></span>
                                 </span>
@@ -156,6 +171,149 @@
     </div>
     
     {% include "components/latency_sections.html" %}
+
+    <div class="card" x-show="mode === 'live'">
+        <div class="card-title">Workers</div>
+        <div class="text-sm text-gray-600" style="margin-top: -0.25rem;">
+            Live health and throughput from the controller. Click a worker to load per-worker snapshots.
+        </div>
+
+        <div
+            x-show="!liveWorkers.length"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            Waiting for worker heartbeats...
+        </div>
+
+        <div class="worker-grid" x-show="liveWorkers.length" style="margin-top: 1rem;">
+            <template x-for="worker in liveWorkers" :key="worker.key">
+                <button
+                    type="button"
+                    class="worker-card"
+                    :class="workerMetricsExpanded[worker.key] ? 'worker-card--expanded' : ''"
+                    @click="toggleLiveWorker(worker)"
+                >
+                    <div class="worker-card__header">
+                        <div class="worker-card__title">
+                            <span class="worker-status-dot" :style="`background: ${workerHealthColor(worker)}`"></span>
+                            <span x-text="workerLabel(worker)"></span>
+                        </div>
+                        <span class="worker-card__health" x-text="worker.health || 'UNKNOWN'"></span>
+                    </div>
+                    <div class="worker-card__metrics">
+                        <div class="worker-card__metric">
+                            <div class="worker-metric-label">QPS</div>
+                            <div class="worker-metric-value" x-text="formatCompact(workerMetric(worker, 'qps') || 0)"></div>
+                        </div>
+                        <div class="worker-card__metric">
+                            <div class="worker-metric-label">Errors</div>
+                            <div class="worker-metric-value" x-text="formatCompact(workerMetric(worker, 'error_count') || 0)"></div>
+                        </div>
+                        <div class="worker-card__metric">
+                            <div class="worker-metric-label">Active</div>
+                            <div class="worker-metric-value" x-text="formatCompact(workerMetric(worker, 'active_connections') || 0)"></div>
+                        </div>
+                        <div class="worker-card__metric">
+                            <div class="worker-metric-label">Heartbeat</div>
+                            <div class="worker-metric-value" x-text="formatHeartbeatAge(worker)"></div>
+                        </div>
+                    </div>
+                    <div class="worker-card__footer" x-text="worker.phase ? ('Phase: ' + worker.phase) : 'Phase: n/a'"></div>
+                </button>
+            </template>
+        </div>
+    </div>
+
+    <div
+        class="card"
+        x-show="mode === 'live' && Object.values(workerMetricsExpanded).some(Boolean)"
+    >
+        <div class="card-title">Worker Details</div>
+        <div class="text-sm text-gray-600" style="margin-top: -0.25rem;">
+            Snapshot details pulled on demand from <code>WORKER_METRICS_SNAPSHOTS</code>.
+        </div>
+
+        <div x-show="workerMetricsError" class="alert alert-error" style="margin-top: 1rem;">
+            <strong>Failed to load worker metrics.</strong>
+            <span x-text="workerMetricsError"></span>
+        </div>
+
+        <div x-show="!workerMetricsError && workerMetricsLoading" style="margin-top: 1rem;">
+            {% include "components/loading_spinner.html" %}
+        </div>
+
+        <template x-for="worker in workerMetricsWorkers" :key="'live-worker-' + worker.key">
+            <div x-show="workerMetricsExpanded[worker.key]" x-cloak class="worker-detail-panel">
+                <div class="worker-detail-header">
+                    <div class="worker-detail-title">
+                        <span class="worker-status-dot" :style="`background: ${workerHealthColor(worker)}`"></span>
+                        <span x-text="workerLabel(worker)"></span>
+                    </div>
+                    <button
+                        type="button"
+                        class="btn btn-sm btn-secondary"
+                        @click="toggleLiveWorker(worker)"
+                    >
+                        Hide
+                    </button>
+                </div>
+                <div class="worker-detail-kpis">
+                    <div class="worker-detail-kpi">
+                        <div class="worker-detail-label">QPS</div>
+                        <div class="worker-detail-value" x-text="formatCompact(worker.latest ? worker.latest.qps : 0)"></div>
+                    </div>
+                    <div class="worker-detail-kpi">
+                        <div class="worker-detail-label">P95</div>
+                        <div class="worker-detail-value" x-text="formatMsWithUnit(worker.latest ? worker.latest.p95_latency : 0)"></div>
+                    </div>
+                    <div class="worker-detail-kpi">
+                        <div class="worker-detail-label">Errors</div>
+                        <div class="worker-detail-value" x-text="formatCompact(worker.latest ? worker.latest.error_count : 0)"></div>
+                    </div>
+                    <div class="worker-detail-kpi">
+                        <div class="worker-detail-label">Active</div>
+                        <div class="worker-detail-value" x-text="formatCompact(worker.latest ? worker.latest.active_connections : 0)"></div>
+                    </div>
+                    <div class="worker-detail-kpi">
+                        <div class="worker-detail-label">Target</div>
+                        <div class="worker-detail-value" x-text="formatCompact(worker.latest ? worker.latest.target_connections : 0)"></div>
+                    </div>
+                </div>
+                <div class="worker-detail-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Elapsed</th>
+                                <th>P50</th>
+                                <th>P99</th>
+                                <th>Read</th>
+                                <th>Write</th>
+                                <th>Errors</th>
+                                <th>Active</th>
+                                <th>Target</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td x-text="formatSecondsTenths(worker.latest ? worker.latest.elapsed_seconds : 0) + 's'"></td>
+                                <td x-text="formatMsWithUnit(worker.latest ? worker.latest.p50_latency : 0)"></td>
+                                <td x-text="formatMsWithUnit(worker.latest ? worker.latest.p99_latency : 0)"></td>
+                                <td x-text="formatCompact(worker.latest ? worker.latest.read_count : 0)"></td>
+                                <td x-text="formatCompact(worker.latest ? worker.latest.write_count : 0)"></td>
+                                <td x-text="formatCompact(worker.latest ? worker.latest.error_count : 0)"></td>
+                                <td x-text="formatCompact(worker.latest ? worker.latest.active_connections : 0)"></td>
+                                <td x-text="formatCompact(worker.latest ? worker.latest.target_connections : 0)"></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="chart-container" style="height: 220px; margin-top: 1rem;">
+                    <canvas :id="'workerMetricsChart-' + worker.key"></canvas>
+                </div>
+            </div>
+        </template>
+    </div>
     
     <div class="card">
         <div class="card-title">Real-Time Metrics</div>
@@ -269,13 +427,13 @@
 
         <div
             class="form-group"
-            x-show="isMultiNode && logTargets && logTargets.length"
+            x-show="logTargets && logTargets.length"
             style="margin-bottom: 0.75rem;"
         >
-            <label class="form-label">Node Logs</label>
+            <label class="form-label">Worker Logs</label>
             <select class="form-select" x-model="logSelectedTestId" @change="onLogTargetChange()">
-                <template x-for="node in logTargets" :key="node.test_id">
-                    <option :value="node.test_id" x-text="node.label || node.test_id"></option>
+                <template x-for="worker in logTargets" :key="worker.test_id">
+                    <option :value="worker.test_id" x-text="worker.label || worker.test_id"></option>
                 </template>
             </select>
         </div>

@@ -132,7 +132,7 @@
             <span x-text="'P50 (Median)'"></span>
             <span
                 class="info-icon"
-                title="P50 latency (selected view): 50% of operations complete faster than this (the median). This represents the typical user experience. End-to-end (app) includes client/network + Snowflake; SQL execution (Snowflake) uses QUERY_HISTORY.EXECUTION_TIME and excludes client/network."
+                :title="latencyCardTitle(50)"
             >i</span>
         </div>
         <div class="metric-value" x-text="formatMsWithUnit(currentLatencyMs(50))"></div>
@@ -144,7 +144,7 @@
             <span x-text="'P95 Latency'"></span>
             <span
                 class="info-icon"
-                title="P95 latency (selected view): 95% of operations complete faster than this. End-to-end (app) includes client/network + Snowflake; SQL execution (Snowflake) uses QUERY_HISTORY.EXECUTION_TIME and excludes client/network."
+                :title="latencyCardTitle(95)"
             >i</span>
         </div>
         <div class="metric-value" x-text="formatMsWithUnit(currentLatencyMs(95))"></div>
@@ -156,7 +156,7 @@
             <span x-text="'P99 Latency'"></span>
             <span
                 class="info-icon"
-                title="P99 latency (selected view): 99% of operations complete faster than this. End-to-end (app) includes client/network + Snowflake; SQL execution (Snowflake) uses QUERY_HISTORY.EXECUTION_TIME and excludes client/network."
+                :title="latencyCardTitle(99)"
             >i</span>
         </div>
         <div class="metric-value" x-text="formatMsWithUnit(currentLatencyMs(99))"></div>

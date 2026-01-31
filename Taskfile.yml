@@ -7,6 +7,10 @@ vars:
   MAX_WAIT_SECONDS: '{{.MAX_WAIT_SECONDS | default "1800"}}'
   POLL_INTERVAL_SECONDS: '{{.POLL_INTERVAL_SECONDS | default "5"}}'
   METRICS_WAIT_SECONDS: '{{.METRICS_WAIT_SECONDS | default "60"}}'
+  DURATION_SECONDS: '{{.DURATION_SECONDS | default "45"}}'
+  WARMUP_SECONDS: '{{.WARMUP_SECONDS | default "0"}}'
+  SMOKE_CONCURRENCY: '{{.SMOKE_CONCURRENCY | default "5"}}'
+  SMOKE_ROWS: '{{.SMOKE_ROWS | default "300"}}'
 
 tasks:
   default:
@@ -15,20 +19,20 @@ tasks:
       - task --list
 
   test:variations:smoke:
-    desc: "Run short (45s) 4-variation smoke checks via API"
+    desc: "Run short 4-variation smoke checks via API (override with DURATION_SECONDS=5)"
     preconditions:
       - sh: command -v uv
         msg: "uv not found. Install from https://docs.astral.sh/uv/"
     cmds:
-      - BASE_URL="{{.BASE_URL}}" MAX_WAIT_SECONDS="300" POLL_INTERVAL_SECONDS="{{.POLL_INTERVAL_SECONDS}}" METRICS_WAIT_SECONDS="30" DURATION_SECONDS="45" WARMUP_SECONDS="0" SMOKE_CONCURRENCY="5" SMOKE_ROWS="300" uv run python scripts/run_variation_smoke.py
+      - BASE_URL="{{.BASE_URL}}" MAX_WAIT_SECONDS="300" POLL_INTERVAL_SECONDS="{{.POLL_INTERVAL_SECONDS}}" METRICS_WAIT_SECONDS="{{.METRICS_WAIT_SECONDS}}" DURATION_SECONDS="{{.DURATION_SECONDS}}" WARMUP_SECONDS="{{.WARMUP_SECONDS}}" SMOKE_CONCURRENCY="{{.SMOKE_CONCURRENCY}}" SMOKE_ROWS="{{.SMOKE_ROWS}}" uv run python scripts/run_variation_smoke.py
 
   test:variations:smoke:long:
-    desc: "Run long 4-variation smoke checks via API"
+    desc: "Run long 4-variation smoke checks via API (5min duration, 10s warmup)"
     preconditions:
       - sh: command -v uv
         msg: "uv not found. Install from https://docs.astral.sh/uv/"
     cmds:
-      - BASE_URL="{{.BASE_URL}}" MAX_WAIT_SECONDS="{{.MAX_WAIT_SECONDS}}" POLL_INTERVAL_SECONDS="{{.POLL_INTERVAL_SECONDS}}" METRICS_WAIT_SECONDS="{{.METRICS_WAIT_SECONDS}}" DURATION_SECONDS="300" WARMUP_SECONDS="10" SMOKE_CONCURRENCY="10" SMOKE_ROWS="300" uv run python scripts/run_variation_smoke.py
+      - BASE_URL="{{.BASE_URL}}" MAX_WAIT_SECONDS="{{.MAX_WAIT_SECONDS}}" POLL_INTERVAL_SECONDS="{{.POLL_INTERVAL_SECONDS}}" METRICS_WAIT_SECONDS="{{.METRICS_WAIT_SECONDS}}" DURATION_SECONDS="300" WARMUP_SECONDS="10" SMOKE_CONCURRENCY="10" SMOKE_ROWS="{{.SMOKE_ROWS}}" uv run python scripts/run_variation_smoke.py
 
   test:variations:setup:
     desc: "Create smoke data tables + templates (no tests)"
@@ -36,7 +40,7 @@ tasks:
       - sh: command -v uv
         msg: "uv not found. Install from https://docs.astral.sh/uv/"
     cmds:
-      - BASE_URL="{{.BASE_URL}}" DURATION_SECONDS="45" WARMUP_SECONDS="0" SMOKE_CONCURRENCY="5" SMOKE_ROWS="300" uv run python scripts/run_variation_smoke.py --setup-only
+      - BASE_URL="{{.BASE_URL}}" DURATION_SECONDS="{{.DURATION_SECONDS}}" WARMUP_SECONDS="{{.WARMUP_SECONDS}}" SMOKE_CONCURRENCY="{{.SMOKE_CONCURRENCY}}" SMOKE_ROWS="{{.SMOKE_ROWS}}" uv run python scripts/run_variation_smoke.py --setup-only
 
   test:variations:cleanup:
     desc: "Drop smoke data tables + templates (no tests)"

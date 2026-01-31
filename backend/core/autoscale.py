@@ -1,5 +1,5 @@
 """
-Autoscale orchestration for multi-node benchmark runs.
+Autoscale orchestration for multi-worker benchmark runs.
 
 Scale-out only (Option A) using host-level guardrails (Option B).
 """
@@ -35,8 +35,8 @@ class AutoscaleSpec:
 @dataclass
 class AutoscaleRun:
     parent_run_id: str
-    target_node_count: int
-    started_nodes: int = 0
+    target_worker_count: int
+    started_workers: int = 0
     stopped_by_guardrail: bool = False
 
 
@@ -75,8 +75,8 @@ async def _fetch_latest_resources(parent_run_id: str) -> dict[str, Any]:
     pool = snowflake_pool.get_default_pool()
     query = f"""
     SELECT CUSTOM_METRICS
-    FROM {results_store._results_prefix()}.NODE_METRICS_SNAPSHOTS
-    WHERE PARENT_RUN_ID = ?
+    FROM {results_store._results_prefix()}.WORKER_METRICS_SNAPSHOTS
+    WHERE RUN_ID = ?
     ORDER BY TIMESTAMP DESC
     LIMIT 1
     """
@@ -130,35 +130,30 @@ async def _guardrails_ok(
 def _build_worker_cmd(
     *,
     uv_bin: str,
-    template_id: str,
-    parent_run_id: str,
+    run_id: str,
     worker_group_id: int,
     worker_group_count: int,
-    node_id: str,
-    per_node_concurrency: int,
-    target_qps: float | None = None,
+    worker_id: str,
 ) -> list[str]:
-    cmd = [
+    """Build worker command with canonical CLI args per next-worker-implementation.md.
+
+    Workers fetch all configuration (template, concurrency, target_qps, etc.)
+    from the database using run_id.
+    """
+    return [
         uv_bin,
         "run",
         "python",
         "scripts/run_worker.py",
-        "--template-id",
-        template_id,
+        "--run-id",
+        run_id,
+        "--worker-id",
+        worker_id,
         "--worker-group-id",
         str(worker_group_id),
         "--worker-group-count",
         str(worker_group_count),
-        "--parent-run-id",
-        parent_run_id,
-        "--node-id",
-        node_id,
-        "--concurrency",
-        str(per_node_concurrency),
     ]
-    if target_qps is not None:
-        cmd.extend(["--target-qps", str(float(target_qps))])
-    return cmd
 
 
 def _load_mode_from_config(cfg: dict[str, Any]) -> str:
@@ -178,26 +173,33 @@ def _autoscale_target_qps(cfg: dict[str, Any]) -> float:
     return _coerce_float(raw, default=0.0)
 
 
-async def _fetch_latest_node_metrics(parent_run_id: str) -> list[dict[str, Any]]:
+async def _fetch_latest_worker_metrics(parent_run_id: str) -> list[dict[str, Any]]:
     pool = snowflake_pool.get_default_pool()
     query = f"""
-    SELECT WORKER_GROUP_ID, NODE_ID, QPS, TARGET_WORKERS, ACTIVE_CONNECTIONS, TIMESTAMP
-    FROM {results_store._results_prefix()}.NODE_METRICS_SNAPSHOTS
-    WHERE PARENT_RUN_ID = ?
+    SELECT WORKER_GROUP_ID, WORKER_ID, QPS, TARGET_CONNECTIONS, ACTIVE_CONNECTIONS, TIMESTAMP
+    FROM {results_store._results_prefix()}.WORKER_METRICS_SNAPSHOTS
+    WHERE RUN_ID = ?
     QUALIFY ROW_NUMBER() OVER (
-        PARTITION BY WORKER_GROUP_ID
+        PARTITION BY WORKER_ID
         ORDER BY TIMESTAMP DESC
     ) = 1
     """
     rows = await pool.execute_query(query, params=[parent_run_id])
     out: list[dict[str, Any]] = []
-    for worker_group_id, node_id, qps, target_workers, active_connections, ts in rows:
+    for (
+        worker_group_id,
+        worker_id,
+        qps,
+        target_connections,
+        active_connections,
+        ts,
+    ) in rows:
         out.append(
             {
                 "worker_group_id": int(worker_group_id or 0),
-                "node_id": str(node_id or ""),
+                "worker_id": str(worker_id or ""),
                 "qps": _coerce_float(qps, default=0.0),
-                "target_workers": _coerce_int(target_workers, default=0),
+                "target_connections": _coerce_int(target_connections, default=0),
                 "active_connections": _coerce_int(active_connections, default=0),
                 "timestamp": ts,
             }
@@ -208,9 +210,9 @@ async def _fetch_latest_node_metrics(parent_run_id: str) -> list[dict[str, Any]]
 async def _update_autoscale_state(
     *,
     parent_run_id: str,
-    node_count: int,
+    worker_count: int,
     target_qps_total: float | None,
-    per_node_target_qps: float | None,
+    per_worker_target_qps: float | None,
 ) -> None:
     pool = snowflake_pool.get_default_pool()
     rows = await pool.execute_query(
@@ -227,12 +229,12 @@ async def _update_autoscale_state(
         if isinstance(cm, dict):
             base = dict(cm)
     autoscale_state = {
-        "node_count": int(max(1, node_count)),
+        "worker_count": int(max(1, worker_count)),
         "target_qps_total": float(target_qps_total)
         if target_qps_total is not None
         else None,
-        "target_qps_per_node": float(per_node_target_qps)
-        if per_node_target_qps is not None
+        "target_qps_per_worker": float(per_worker_target_qps)
+        if per_worker_target_qps is not None
         else None,
     }
     base["autoscale_state"] = autoscale_state
@@ -251,11 +253,11 @@ async def _run_autoscale(
     *,
     spec: AutoscaleSpec,
     run: AutoscaleRun,
-    per_node_concurrency: int,
+    per_worker_concurrency: int,
     load_mode: str,
     target_qps_total: float | None = None,
     uv_bin: str = "uv",
-    node_id_prefix: str = "autoscale",
+    worker_id_prefix: str = "autoscale",
 ) -> None:
     if not _uv_available(uv_bin):
         raise RuntimeError("uv not found. Install uv to run autoscale workers.")
@@ -265,29 +267,26 @@ async def _run_autoscale(
     procs: list[tuple[int, asyncio.subprocess.Process]] = []
     under_target_streak = 0
 
-    async def _start_node(
-        *, node_idx: int, node_count: int, target_qps_per_node: float | None
+    async def _start_worker(
+        *, worker_idx: int, worker_count: int, target_qps_per_worker: float | None
     ) -> None:
-        node_id = f"{node_id_prefix}-{node_idx}"
+        worker_id = f"{worker_id_prefix}-{worker_idx}"
         cmd = _build_worker_cmd(
             uv_bin=uv_bin,
-            template_id=spec.template_id,
-            parent_run_id=run.parent_run_id,
-            worker_group_id=node_idx,
-            worker_group_count=node_count,
-            node_id=node_id,
-            per_node_concurrency=per_node_concurrency,
-            target_qps=target_qps_per_node,
+            run_id=run.parent_run_id,
+            worker_group_id=worker_idx,
+            worker_group_count=worker_count,
+            worker_id=worker_id,
         )
         logger.info(
-            "Autoscale: starting worker %s/%s node_id=%s",
-            node_idx + 1,
-            node_count,
-            node_id,
+            "Autoscale: starting worker %s/%s worker_id=%s",
+            worker_idx + 1,
+            worker_count,
+            worker_id,
         )
         proc = await asyncio.create_subprocess_exec(*cmd, env=env)
-        procs.append((node_idx, proc))
-        run.started_nodes += 1
+        procs.append((worker_idx, proc))
+        run.started_workers += 1
 
     if load_mode == "QPS":
         target_qps_total = (
@@ -295,17 +294,19 @@ async def _run_autoscale(
         )
         if not target_qps_total or not math.isfinite(target_qps_total):
             raise ValueError("Autoscale QPS requires target_qps > 0.")
-        per_node_target = float(target_qps_total)
+        per_worker_target = float(target_qps_total)
         await _update_autoscale_state(
             parent_run_id=run.parent_run_id,
-            node_count=1,
+            worker_count=1,
             target_qps_total=target_qps_total,
-            per_node_target_qps=per_node_target,
+            per_worker_target_qps=per_worker_target,
         )
-        await _start_node(node_idx=0, node_count=1, target_qps_per_node=per_node_target)
+        await _start_worker(
+            worker_idx=0, worker_count=1, target_qps_per_worker=per_worker_target
+        )
     else:
-        while run.started_nodes < run.target_node_count:
-            if run.started_nodes > 0:
+        while run.started_workers < run.target_worker_count:
+            if run.started_workers > 0:
                 await asyncio.sleep(spec.scale_interval_seconds)
                 ok = await _guardrails_ok(
                     parent_run_id=run.parent_run_id,
@@ -316,11 +317,11 @@ async def _run_autoscale(
                     run.stopped_by_guardrail = True
                     break
 
-            idx = run.started_nodes
-            await _start_node(
-                node_idx=idx,
-                node_count=run.target_node_count,
-                target_qps_per_node=None,
+            idx = run.started_workers
+            await _start_worker(
+                worker_idx=idx,
+                worker_count=run.target_worker_count,
+                target_qps_per_worker=None,
             )
 
     while True:
@@ -340,15 +341,15 @@ async def _run_autoscale(
         if load_mode != "QPS":
             continue
 
-        nodes = await _fetch_latest_node_metrics(run.parent_run_id)
-        total_qps = sum(float(n.get("qps") or 0.0) for n in nodes)
+        workers = await _fetch_latest_worker_metrics(run.parent_run_id)
+        total_qps = sum(float(w.get("qps") or 0.0) for w in workers)
         all_at_ceiling = (
-            bool(nodes)
+            bool(workers)
             and all(
-                int(n.get("target_workers") or 0) >= int(per_node_concurrency)
-                for n in nodes
+                int(w.get("target_connections") or 0) >= int(per_worker_concurrency)
+                for w in workers
             )
-            and run.started_nodes == len(nodes)
+            and run.started_workers == len(workers)
         )
         if target_qps_total is None:
             break
@@ -361,20 +362,20 @@ async def _run_autoscale(
 
         if under_target_streak >= 2:
             under_target_streak = 0
-            next_idx = run.started_nodes
-            next_count = run.started_nodes + 1
-            run.target_node_count = max(run.target_node_count, next_count)
-            per_node_target = float(target_qps_total_value) / float(next_count)
+            next_idx = run.started_workers
+            next_count = run.started_workers + 1
+            run.target_worker_count = max(run.target_worker_count, next_count)
+            per_worker_target = float(target_qps_total_value) / float(next_count)
             await _update_autoscale_state(
                 parent_run_id=run.parent_run_id,
-                node_count=next_count,
+                worker_count=next_count,
                 target_qps_total=target_qps_total,
-                per_node_target_qps=per_node_target,
+                per_worker_target_qps=per_worker_target,
             )
-            await _start_node(
-                node_idx=next_idx,
-                node_count=next_count,
-                target_qps_per_node=per_node_target,
+            await _start_worker(
+                worker_idx=next_idx,
+                worker_count=next_count,
+                target_qps_per_worker=per_worker_target,
             )
 
     exit_code = 0
@@ -392,18 +393,18 @@ async def _run_autoscale(
 
     if exit_code == 0:
         logger.info(
-            "Autoscale complete parent_run_id=%s nodes_started=%s/%s guardrail=%s",
+            "Autoscale complete parent_run_id=%s workers_started=%s/%s guardrail=%s",
             run.parent_run_id,
-            run.started_nodes,
-            run.target_node_count,
+            run.started_workers,
+            run.target_worker_count,
             run.stopped_by_guardrail,
         )
     else:
         logger.warning(
-            "Autoscale finished with errors parent_run_id=%s nodes_started=%s/%s guardrail=%s",
+            "Autoscale finished with errors parent_run_id=%s workers_started=%s/%s guardrail=%s",
             run.parent_run_id,
-            run.started_nodes,
-            run.target_node_count,
+            run.started_workers,
+            run.target_worker_count,
             run.stopped_by_guardrail,
         )
 
@@ -416,21 +417,21 @@ async def prepare_autoscale_from_template(
     template_config = dict(template["config"] or {})
 
     scenario = registry._scenario_from_template_config(template_name, template_config)
-    per_node_concurrency = int(scenario.concurrent_connections)
+    per_worker_concurrency = int(scenario.total_threads)
     load_mode = _load_mode_from_config(template_config)
-    if per_node_concurrency < 1:
+    if per_worker_concurrency < 1:
         if load_mode == "QPS":
             raise ValueError(
-                "Autoscale QPS requires max workers (concurrent_connections) >= 1 per node."
+                "Autoscale QPS requires max workers (concurrent_connections) >= 1 per worker."
             )
-        raise ValueError("Autoscale requires concurrent_connections >= 1 per node.")
+        raise ValueError("Autoscale requires concurrent_connections >= 1 per worker.")
 
-    target_nodes = 1
+    target_workers = 1
     if load_mode != "QPS":
         target_total = _autoscale_total_target_concurrency(template_config)
         if target_total < 1:
             raise ValueError("Autoscale target must be >= 1 (from load mode).")
-        target_nodes = max(1, math.ceil(target_total / per_node_concurrency))
+        target_workers = max(1, math.ceil(target_total / per_worker_concurrency))
     else:
         target_qps = _autoscale_target_qps(template_config)
         if target_qps <= 0:
@@ -463,7 +464,7 @@ async def prepare_autoscale_from_template(
 
     run = AutoscaleRun(
         parent_run_id=parent_run_id,
-        target_node_count=target_nodes,
+        target_worker_count=target_workers,
     )
     return run
 
@@ -493,22 +494,22 @@ async def start_autoscale_from_test(
     scenario = registry._scenario_from_template_config(
         str(cfg.get("template_name") or "autoscale"), template_cfg
     )
-    per_node_concurrency = int(scenario.concurrent_connections)
+    per_worker_concurrency = int(scenario.total_threads)
     load_mode = _load_mode_from_config(template_cfg)
-    if per_node_concurrency < 1:
+    if per_worker_concurrency < 1:
         if load_mode == "QPS":
             raise ValueError(
-                "Autoscale QPS requires max workers (concurrent_connections) >= 1 per node."
+                "Autoscale QPS requires max workers (concurrent_connections) >= 1 per worker."
             )
-        raise ValueError("Autoscale requires concurrent_connections >= 1 per node.")
+        raise ValueError("Autoscale requires concurrent_connections >= 1 per worker.")
 
-    target_nodes = 1
+    target_workers = 1
     target_qps_total: float | None = None
     if load_mode != "QPS":
         target_total = _autoscale_total_target_concurrency(template_cfg)
         if target_total < 1:
             raise ValueError("Autoscale target must be >= 1 (from load mode).")
-        target_nodes = max(1, math.ceil(target_total / per_node_concurrency))
+        target_workers = max(1, math.ceil(target_total / per_worker_concurrency))
     else:
         target_qps_total = _autoscale_target_qps(template_cfg)
         if target_qps_total <= 0:
@@ -518,7 +519,7 @@ async def start_autoscale_from_test(
         f"""
         UPDATE {results_store._results_prefix()}.TEST_RESULTS
         SET STATUS = 'RUNNING',
-            START_TIME = COALESCE(START_TIME, CURRENT_TIMESTAMP())
+            START_TIME = CURRENT_TIMESTAMP()
         WHERE TEST_ID = ?
         """,
         params=[test_id],
@@ -526,13 +527,13 @@ async def start_autoscale_from_test(
 
     run = AutoscaleRun(
         parent_run_id=str(test_id),
-        target_node_count=target_nodes,
+        target_worker_count=target_workers,
     )
     asyncio.create_task(
         _run_autoscale(
             spec=spec,
             run=run,
-            per_node_concurrency=per_node_concurrency,
+            per_worker_concurrency=per_worker_concurrency,
             load_mode=load_mode,
             target_qps_total=target_qps_total,
         )

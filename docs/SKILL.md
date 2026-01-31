@@ -1,69 +1,50 @@
 ---
 name: unistore-rules
 description: >-
-  Documents current, implemented Unistore Benchmark architecture and workflows.
-  Use when updating or verifying app behavior, autoscale/multi-worker flow,
-  templates, or metrics persistence/enrichment.
-version: 1.2.0
+  Authoritative index for current Unistore Benchmark docs. Use when updating
+  or verifying behavior, orchestration, templates, and persistence.
+version: 1.3.0
 ---
 
-# Overview
+# SKILL: Unistore Benchmark Docs Index
 
-This folder is the authoritative documentation for the current, implemented
-architecture of the Unistore Benchmark app.
+This file is the authoritative index for agents working in this repository.
 
-## Index (all docs in this folder)
+## Start here
 
-This file:
+- `index.md` — human landing page for the docs set
+- `architecture-overview.md` — system purpose, topology, components
+- `operations-and-runbooks.md` — run, validate, troubleshoot
+- `project-plan.md` — implementation checklist and open work
+- `specifications.md` — schemas, payloads, and implementation details
 
-- `SKILL.md`: entrypoint + constraints + full index (this document)
+## Architecture and lifecycle
 
-Start here:
+- `data-flow-and-lifecycle.md` — lifecycle, control-plane state, metrics flow
+- `metrics-streaming-debug.md` — **debug guide**: phase transitions, QPS=0 issues, websocket flow
+- `orchestrator-spec.md` — orchestrator contract and behaviors
+- `worker-implementation.md` — worker CLI, state machine, SQL, and flow details
+- `scaling.md` — scaling model, guardrails, sharding
+- `multi-worker-gap-analysis.md` — gaps, risks, and fixes
 
-- `index.md`: human-friendly index for the docs set
-- `project-plan.md`: canonical current architecture + status (not a roadmap)
-- `operations-and-runbooks.md`: how to run the app + schema + smoke + headless multi-worker
+## UI
 
-Architecture:
+- `ui-architecture.md` — UI contracts and dashboard behavior
 
-- `architecture-overview.md`: system context and runtime topology
-- `backend-architecture.md`: FastAPI, registry, executor, connectors
-- `data-flow-and-lifecycle.md`: test lifecycle, WebSocket streaming, autoscale lifecycle
+## Notes
 
-Persistence and metrics:
-
-- `persistence-and-schema.md`: results/tables schema and how it is applied
-- `Refined Metrics.md`: what is captured during the run vs post-run enrichment
-
-Templates and workloads:
-
-- `templates-and-workloads.md`: templates, workloads, normalization, load patterns
-
-UI:
-
-- `ui-architecture.md`: pages, JS modules, routing, and dashboard invariants
-
-Scaling:
-
-- `scaling.md`: concurrency model, thread pools, sharding, and why scale-out matters
-
-Testing:
-
-- `testing-and-validation.md`: test locations and expectations
-
-Constraints:
-
-- `constraints-and-non-goals.md`: hard constraints and explicit non-goals
+- `docs/archive/` contains historical snapshots. Do not edit or reference as
+  authoritative sources.
 
 ## Canonical constraints (must remain true)
 
-These constraints are treated as **design preferences** and must be respected:
-
-- Table creation and DDL changes are disabled in the app. Tests run against
-  existing tables/views only.
-- Results/schema persistence is via rerunnable DDL in `sql/schema/` (no migrations).
-  The app does not apply schema changes at runtime.
-- Templates are stored in Snowflake (`UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`);
-  YAML in `config/test_scenarios/` is reference only.
-- In QPS autoscale, `concurrent_connections` is the per-worker max connections, and
+- No DDL or table creation at runtime; schema changes live in `sql/schema/`.
+- No migration framework exists in this repository.
+- Templates are stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES` with
+  `CONFIG` as the authoritative payload.
+- YAML templates in `config/test_scenarios/` are reference-only for the UI.
+- Snowflake is the authoritative results store.
+- QPS autoscale uses `concurrent_connections` as per-worker max connections;
   total `target_qps` is split across workers.
+- AUTO/BOUNDED runs use the orchestrator path; FIXED runs use the legacy registry
+  path.

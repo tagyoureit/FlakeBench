@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 import logging
 
 from backend.config import settings
+from backend.core import results_store
 from backend.core.test_registry import registry
 from backend.connectors import snowflake_pool
 
@@ -262,7 +263,7 @@ async def dashboard_test(request: Request, test_id: str):
         return RedirectResponse(url=history_url, status_code=302)
 
     status = str(getattr(running, "status", "") or "").upper()
-    live_statuses = {"PREPARED", "READY", "PENDING", "RUNNING", "CANCELLING"}
+    live_statuses = {"PREPARED", "READY", "PENDING", "RUNNING", "CANCELLING", "STARTING"}
     if status not in live_statuses:
         if request.headers.get("HX-Request") == "true":
             resp = HTMLResponse("")
@@ -491,12 +492,14 @@ async def api_info():
 # ============================================================================
 
 # Import and include API routers
+from backend.api.routes import runs  # noqa: E402
 from backend.api.routes import tests  # noqa: E402
 from backend.api.routes import templates as templates_router  # noqa: E402
 from backend.api.routes import warehouses  # noqa: E402
 from backend.api.routes import catalog  # noqa: E402
 from backend.api.routes import test_results  # noqa: E402
 
+app.include_router(runs.router, prefix="/api/runs", tags=["runs"])
 app.include_router(tests.router, prefix="/api/test", tags=["tests"])
 app.include_router(templates_router.router, prefix="/api/templates", tags=["templates"])
 app.include_router(warehouses.router, prefix="/api/warehouses", tags=["warehouses"])
@@ -512,26 +515,6 @@ app.include_router(test_results.router, prefix="/api/tests", tags=["test_results
 # ============================================================================
 # WebSocket endpoint (placeholder)
 # ============================================================================
-
-
-async def _is_multi_node_parent(test_id: str) -> bool:
-    try:
-        pool = snowflake_pool.get_default_pool()
-        rows = await pool.execute_query(
-            f"""
-            SELECT RUN_ID, STATUS
-            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS
-            WHERE TEST_ID = ?
-            LIMIT 1
-            """,
-            params=[test_id],
-        )
-        if not rows:
-            return False
-        run_id = rows[0][0]
-        return bool(run_id) and str(run_id) == str(test_id)
-    except Exception:
-        return False
 
 
 async def _get_parent_test_status(test_id: str) -> str | None:
@@ -553,38 +536,275 @@ async def _get_parent_test_status(test_id: str) -> str | None:
         return None
 
 
-async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
+def _coerce_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", ""))
+        except Exception:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _parse_variant_dict(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _build_aggregate_metrics(
+    *,
+    ops: dict[str, Any] | None,
+    latency: dict[str, Any] | None,
+    errors: dict[str, Any] | None,
+    connections: dict[str, Any] | None,
+    operations: dict[str, Any] | None,
+) -> dict[str, Any]:
+    ops_payload = ops or {}
+    latency_payload = latency or {}
+    errors_payload = errors or {}
+    connections_payload = connections or {}
+    operations_payload = operations or {}
+    total_ops = int(ops_payload.get("total") or 0)
+    return {
+        "total_ops": total_ops,
+        "qps": float(ops_payload.get("current_per_sec") or 0),
+        "p50_latency_ms": float(latency_payload.get("p50") or 0),
+        "p95_latency_ms": float(latency_payload.get("p95") or 0),
+        "p99_latency_ms": float(latency_payload.get("p99") or 0),
+        "avg_latency_ms": float(latency_payload.get("avg") or 0),
+        "error_rate": float(errors_payload.get("rate") or 0),
+        "total_errors": int(errors_payload.get("count") or 0),
+        "active_connections": int(connections_payload.get("active") or 0),
+        "target_connections": int(connections_payload.get("target") or 0),
+        "read_count": int(operations_payload.get("reads") or 0),
+        "write_count": int(operations_payload.get("writes") or 0),
+    }
+
+
+def _build_run_snapshot(
+    *,
+    run_id: str,
+    status: str | None,
+    phase: str | None,
+    elapsed_seconds: float | None,
+    worker_count: int,
+    aggregate_metrics: dict[str, Any],
+    run_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    run_payload: dict[str, Any] = {
+        "run_id": run_id,
+        "status": status or "RUNNING",
+        "phase": phase or status or "RUNNING",
+        "worker_count": worker_count,
+        "elapsed_seconds": float(elapsed_seconds or 0),
+        "aggregate_metrics": aggregate_metrics,
+    }
+    if run_status:
+        run_payload["workers_expected"] = run_status.get("total_workers_expected")
+        run_payload["workers_registered"] = run_status.get("workers_registered")
+        run_payload["workers_active"] = run_status.get("workers_active")
+        run_payload["workers_completed"] = run_status.get("workers_completed")
+        start_time = _coerce_datetime(run_status.get("start_time"))
+        end_time = _coerce_datetime(run_status.get("end_time"))
+        run_payload["start_time"] = (
+            start_time.isoformat() if start_time is not None else None
+        )
+        run_payload["end_time"] = end_time.isoformat() if end_time is not None else None
+    return run_payload
+
+
+async def _fetch_run_status(run_id: str) -> dict[str, Any] | None:
+    try:
+        pool = snowflake_pool.get_default_pool()
+        rows = await pool.execute_query(
+            f"""
+            SELECT
+                rs.STATUS,
+                rs.PHASE,
+                rs.START_TIME,
+                rs.END_TIME,
+                rs.WARMUP_END_TIME,
+                rs.TOTAL_WORKERS_EXPECTED,
+                rs.WORKERS_REGISTERED,
+                rs.WORKERS_ACTIVE,
+                rs.WORKERS_COMPLETED,
+                rs.FIND_MAX_STATE,
+                rs.CANCELLATION_REASON,
+                CASE
+                    WHEN rs.STATUS IN ('COMPLETED', 'FAILED', 'CANCELLED', 'STOPPED') THEN
+                        COALESCE(
+                            NULLIF(tr.DURATION_SECONDS, 0),
+                            TIMESTAMPDIFF(SECOND, rs.START_TIME, rs.END_TIME)
+                        )
+                    ELSE
+                        TIMESTAMPDIFF(
+                            SECOND,
+                            rs.START_TIME,
+                            CURRENT_TIMESTAMP()::TIMESTAMP_NTZ
+                        )
+                END AS ELAPSED_SECONDS
+            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.RUN_STATUS rs
+            LEFT JOIN {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS tr
+                ON tr.TEST_ID = rs.RUN_ID
+            WHERE rs.RUN_ID = ?
+            LIMIT 1
+            """,
+            params=[run_id],
+        )
+        if not rows:
+            return None
+        (
+            status,
+            phase,
+            start_time,
+            end_time,
+            warmup_end_time,
+            total_workers_expected,
+            workers_registered,
+            workers_active,
+            workers_completed,
+            find_max_state,
+            cancellation_reason,
+            elapsed_seconds,
+        ) = rows[0]
+        return {
+            "status": str(status or "").upper(),
+            "phase": str(phase or "").upper(),
+            "start_time": start_time,
+            "end_time": end_time,
+            "warmup_end_time": warmup_end_time,
+            "total_workers_expected": total_workers_expected,
+            "workers_registered": workers_registered,
+            "workers_active": workers_active,
+            "workers_completed": workers_completed,
+            "find_max_state": find_max_state,
+            "cancellation_reason": str(cancellation_reason) if cancellation_reason else None,
+            "elapsed_seconds": float(elapsed_seconds)
+            if elapsed_seconds is not None
+            else None,
+        }
+    except Exception:
+        return None
+
+
+async def _fetch_parent_enrichment_status(run_id: str) -> str | None:
+    """Fetch enrichment status for a test run.
+    
+    Enrichment is done centrally by the orchestrator and updates ONLY the parent
+    row (where TEST_ID = RUN_ID). So we check the parent row first - it's the
+    authoritative source. This matches the HTTP /enrichment-status endpoint logic.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        # Always check the parent row first - enrichment status is updated here
+        parent_rows = await pool.execute_query(
+            f"""
+            SELECT ENRICHMENT_STATUS
+            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS
+            WHERE TEST_ID = ?
+            """,
+            params=[run_id],
+        )
+        if parent_rows and parent_rows[0] and parent_rows[0][0]:
+            parent_status = str(parent_rows[0][0]).strip().upper()
+            # If parent has a definitive status, return it
+            if parent_status in ("COMPLETED", "FAILED", "SKIPPED"):
+                return parent_status
+            # If parent is PENDING, also check child rows (for multi-worker tests)
+            # in case they have a more specific status
+            if parent_status == "PENDING":
+                child_rows = await pool.execute_query(
+                    f"""
+                    SELECT ENRICHMENT_STATUS
+                    FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS
+                    WHERE RUN_ID = ?
+                      AND TEST_ID <> ?
+                    """,
+                    params=[run_id, run_id],
+                )
+                child_statuses = [
+                    str(row[0] or "").strip().upper()
+                    for row in child_rows or []
+                    if row and row[0]
+                ]
+                # If any child has a terminal status, use the worst case
+                if "FAILED" in child_statuses:
+                    return "FAILED"
+                # Otherwise return parent's PENDING status
+                return "PENDING"
+            return parent_status
+        return None
+    except Exception:
+        return None
+
+
+async def _aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
     pool = snowflake_pool.get_default_pool()
     rows = await pool.execute_query(
         f"""
-        WITH latest_per_node AS (
+        WITH latest_per_worker AS (
             SELECT
-                nms.*,
-                ROW_NUMBER() OVER (PARTITION BY NODE_ID ORDER BY TIMESTAMP DESC) AS rn
-            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.NODE_METRICS_SNAPSHOTS nms
-            WHERE PARENT_RUN_ID = ?
+                wms.*,
+                ROW_NUMBER() OVER (PARTITION BY WORKER_ID ORDER BY TIMESTAMP DESC) AS rn
+            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.WORKER_METRICS_SNAPSHOTS wms
+            WHERE RUN_ID = ?
         )
         SELECT
-            ELAPSED_SECONDS,
-            TOTAL_QUERIES,
-            QPS,
-            P50_LATENCY_MS,
-            P95_LATENCY_MS,
-            P99_LATENCY_MS,
-            AVG_LATENCY_MS,
-            READ_COUNT,
-            WRITE_COUNT,
-            ERROR_COUNT,
+            wms.ELAPSED_SECONDS,
+            wms.TOTAL_QUERIES,
+            wms.QPS,
+            wms.P50_LATENCY_MS,
+            wms.P95_LATENCY_MS,
+            wms.P99_LATENCY_MS,
+            wms.AVG_LATENCY_MS,
+            wms.READ_COUNT,
+            wms.WRITE_COUNT,
+            wms.ERROR_COUNT,
+            wms.ACTIVE_CONNECTIONS,
+            wms.TARGET_CONNECTIONS,
+            wms.CUSTOM_METRICS,
+            wms.PHASE,
+            wms.WORKER_ID,
+            wms.WORKER_GROUP_ID
+        FROM latest_per_worker wms
+        WHERE wms.rn = 1
+        """,
+        params=[parent_run_id],
+    )
+    heartbeat_rows = await pool.execute_query(
+        f"""
+        SELECT
+            WORKER_ID,
+            WORKER_GROUP_ID,
+            STATUS,
+            PHASE,
+            LAST_HEARTBEAT,
             ACTIVE_CONNECTIONS,
-            TARGET_WORKERS,
-            CUSTOM_METRICS
-        FROM latest_per_node
-        WHERE rn = 1
+            TARGET_CONNECTIONS,
+            QUERIES_PROCESSED,
+            ERROR_COUNT
+        FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.WORKER_HEARTBEATS
+        WHERE RUN_ID = ?
         """,
         params=[parent_run_id],
     )
 
-    if not rows:
+    if not rows and not heartbeat_rows:
         return {}
 
     def _to_int(v: Any) -> int:
@@ -615,6 +835,18 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
         summed = _sum_dicts(dicts)
         return {key: value / len(dicts) for key, value in summed.items()}
 
+    def _health_from(status_value: Any, age_seconds: float | None) -> str:
+        status_upper = str(status_value or "").upper()
+        if status_upper == "DEAD":
+            return "DEAD"
+        if age_seconds is None:
+            return "STALE"
+        if age_seconds >= 60:
+            return "DEAD"
+        if age_seconds >= 30:
+            return "STALE"
+        return "HEALTHY"
+
     elapsed_seconds = 0.0
     total_ops = 0
     qps = 0.0
@@ -626,7 +858,7 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
     write_count = 0
     error_count = 0
     active_connections = 0
-    target_workers = 0
+    target_connections = 0
 
     app_ops_list: list[dict[str, Any]] = []
     sf_bench_list: list[dict[str, Any]] = []
@@ -635,6 +867,7 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
     find_max_controller: dict[str, Any] | None = None
     qps_controller: dict[str, Any] | None = None
     phases: list[str] = []
+    snapshot_by_worker: dict[str, dict[str, Any]] = {}
 
     for (
         elapsed,
@@ -650,19 +883,56 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
         active_row,
         target_row,
         custom_metrics,
+        phase,
+        _worker_id,
+        worker_group_id,
     ) in rows:
-        elapsed_seconds = max(float(elapsed or 0), elapsed_seconds)
-        total_ops += _to_int(total_queries)
-        qps += _to_float(qps_row)
-        p50_vals.append(_to_float(p50))
-        p95_vals.append(_to_float(p95))
-        p99_vals.append(_to_float(p99))
-        avg_vals.append(_to_float(avg_latency))
-        read_count += _to_int(read_row)
-        write_count += _to_int(write_row)
-        error_count += _to_int(error_row)
-        active_connections += _to_int(active_row)
-        target_workers += _to_int(target_row)
+        worker_id = str(_worker_id or "")
+        snapshot_by_worker[worker_id] = {
+            "worker_id": worker_id,
+            "worker_group_id": int(worker_group_id or 0),
+            "elapsed_seconds": float(elapsed or 0),
+            "total_queries": _to_int(total_queries),
+            "qps": _to_float(qps_row),
+            "p50_latency_ms": _to_float(p50),
+            "p95_latency_ms": _to_float(p95),
+            "p99_latency_ms": _to_float(p99),
+            "avg_latency_ms": _to_float(avg_latency),
+            "read_count": _to_int(read_row),
+            "write_count": _to_int(write_row),
+            "error_count": _to_int(error_row),
+            "active_connections": _to_int(active_row),
+            "target_connections": _to_int(target_row),
+            "phase": str(phase or ""),
+        }
+        phase_value = str(phase or "").strip().upper()
+        if phase_value:
+            phases.append(phase_value)
+
+        heartbeat_status = None
+        for hb in heartbeat_rows:
+            if str(hb[0] or "") == worker_id:
+                heartbeat_status = hb[2]
+                break
+        status_upper = str(heartbeat_status or "").upper()
+        # Include both WARMUP and MEASUREMENT phase metrics for real-time streaming.
+        # Excluding WARMUP caused ~45s delay before metrics appeared on dashboard.
+        include_for_metrics = (
+            not phase_value or phase_value in ("WARMUP", "MEASUREMENT")
+        ) and status_upper != "DEAD"
+        if include_for_metrics:
+            elapsed_seconds = max(float(elapsed or 0), elapsed_seconds)
+            total_ops += _to_int(total_queries)
+            qps += _to_float(qps_row)
+            p50_vals.append(_to_float(p50))
+            p95_vals.append(_to_float(p95))
+            p99_vals.append(_to_float(p99))
+            avg_vals.append(_to_float(avg_latency))
+            read_count += _to_int(read_row)
+            write_count += _to_int(write_row)
+            error_count += _to_int(error_row)
+            active_connections += _to_int(active_row)
+            target_connections += _to_int(target_row)
 
         cm: Any = custom_metrics
         if isinstance(cm, str):
@@ -673,9 +943,10 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
         if not isinstance(cm, dict):
             cm = {}
 
-        phase_val = cm.get("phase")
-        if isinstance(phase_val, str) and phase_val.strip():
-            phases.append(phase_val.strip().upper())
+        if not phase_value:
+            phase_val = cm.get("phase")
+            if isinstance(phase_val, str) and phase_val.strip():
+                phases.append(phase_val.strip().upper())
 
         app_ops = cm.get("app_ops_breakdown")
         if isinstance(app_ops, dict):
@@ -698,16 +969,22 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
 
     error_rate = (error_count / total_ops) if total_ops > 0 else 0.0
     p50_latency = sum(p50_vals) / len(p50_vals) if p50_vals else 0.0
-    p95_latency = sum(p95_vals) / len(p95_vals) if p95_vals else 0.0
-    p99_latency = sum(p99_vals) / len(p99_vals) if p99_vals else 0.0
+    p95_latency = max(p95_vals) if p95_vals else 0.0
+    p99_latency = max(p99_vals) if p99_vals else 0.0
     avg_latency = sum(avg_vals) / len(avg_vals) if avg_vals else 0.0
 
     custom_metrics_out = {
         "app_ops_breakdown": _sum_dicts(app_ops_list),
         "sf_bench": _sum_dicts(sf_bench_list),
-        "warehouse": _sum_dicts(warehouse_list),
         "resources": _avg_dicts(resources_list),
     }
+    poller_snapshot = await results_store.fetch_latest_warehouse_poll_snapshot(
+        run_id=parent_run_id
+    )
+    if poller_snapshot is not None:
+        custom_metrics_out["warehouse"] = poller_snapshot
+    else:
+        custom_metrics_out["warehouse"] = _sum_dicts(warehouse_list)
     if find_max_controller is not None:
         custom_metrics_out["find_max_controller"] = find_max_controller
     if qps_controller is not None:
@@ -733,6 +1010,101 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
     if resolved_phase is None and phases:
         resolved_phase = min(phases, key=lambda p: phase_order.get(p, 99))
 
+    heartbeat_by_worker: dict[str, dict[str, Any]] = {}
+    now = datetime.now(UTC)
+    for (
+        worker_id,
+        worker_group_id,
+        status_value,
+        phase_value,
+        last_heartbeat,
+        active_connections,
+        target_connections,
+        queries_processed,
+        error_count_value,
+    ) in heartbeat_rows:
+        worker_id_str = str(worker_id or "")
+        last_dt = _coerce_datetime(last_heartbeat)
+        age_seconds = (now - last_dt).total_seconds() if last_dt is not None else None
+        heartbeat_by_worker[worker_id_str] = {
+            "worker_id": worker_id_str,
+            "worker_group_id": int(worker_group_id or 0),
+            "status": str(status_value or "").upper(),
+            "phase": str(phase_value or "").upper(),
+            "last_heartbeat": last_dt,
+            "last_heartbeat_ago_s": age_seconds,
+            "active_connections": _to_int(active_connections),
+            "target_connections": _to_int(target_connections),
+            "queries_processed": _to_int(queries_processed),
+            "error_count": _to_int(error_count_value),
+        }
+
+    workers_out: list[dict[str, Any]] = []
+    for worker_id, hb in heartbeat_by_worker.items():
+        snapshot = snapshot_by_worker.get(worker_id, {})
+        last_dt = hb.get("last_heartbeat")
+        workers_out.append(
+            {
+                "worker_id": worker_id,
+                "worker_group_id": hb.get("worker_group_id", 0),
+                "status": hb.get("status"),
+                "phase": hb.get("phase") or snapshot.get("phase"),
+                "health": _health_from(
+                    hb.get("status"), hb.get("last_heartbeat_ago_s")
+                ),
+                "last_heartbeat": (
+                    last_dt.isoformat() if isinstance(last_dt, datetime) else None
+                ),
+                "last_heartbeat_ago_s": hb.get("last_heartbeat_ago_s"),
+                "metrics": {
+                    "qps": snapshot.get("qps") or 0.0,
+                    "p50_latency_ms": snapshot.get("p50_latency_ms") or 0.0,
+                    "p95_latency_ms": snapshot.get("p95_latency_ms") or 0.0,
+                    "p99_latency_ms": snapshot.get("p99_latency_ms") or 0.0,
+                    "avg_latency_ms": snapshot.get("avg_latency_ms") or 0.0,
+                    "error_count": snapshot.get("error_count")
+                    if snapshot
+                    else hb.get("error_count", 0),
+                    "active_connections": snapshot.get("active_connections")
+                    if snapshot
+                    else hb.get("active_connections", 0),
+                    "target_connections": snapshot.get("target_connections")
+                    if snapshot
+                    else hb.get("target_connections", 0),
+                },
+            }
+        )
+    for worker_id, snapshot in snapshot_by_worker.items():
+        if worker_id in heartbeat_by_worker:
+            continue
+        workers_out.append(
+            {
+                "worker_id": worker_id,
+                "worker_group_id": snapshot.get("worker_group_id", 0),
+                "status": "UNKNOWN",
+                "phase": snapshot.get("phase") or None,
+                "health": "STALE",
+                "last_heartbeat": None,
+                "last_heartbeat_ago_s": None,
+                "metrics": {
+                    "qps": snapshot.get("qps") or 0.0,
+                    "p50_latency_ms": snapshot.get("p50_latency_ms") or 0.0,
+                    "p95_latency_ms": snapshot.get("p95_latency_ms") or 0.0,
+                    "p99_latency_ms": snapshot.get("p99_latency_ms") or 0.0,
+                    "avg_latency_ms": snapshot.get("avg_latency_ms") or 0.0,
+                    "error_count": snapshot.get("error_count") or 0,
+                    "active_connections": snapshot.get("active_connections") or 0,
+                    "target_connections": snapshot.get("target_connections") or 0,
+                },
+            }
+        )
+    workers_out.sort(
+        key=lambda w: (
+            int(w.get("worker_group_id") or 0),
+            str(w.get("worker_id") or ""),
+        )
+    )
+
     return {
         "phase": resolved_phase,
         "elapsed": float(elapsed_seconds),
@@ -750,19 +1122,66 @@ async def _aggregate_multi_node_metrics(parent_run_id: str) -> dict[str, Any]:
             "p99": float(p99_latency),
             "avg": float(avg_latency),
         },
+        "latency_aggregation_method": "slowest_worker_approximation",
         "errors": {
             "count": error_count,
             "rate": float(error_rate),
         },
         "connections": {
             "active": active_connections,
-            "target": target_workers,
+            "target": target_connections,
         },
         "custom_metrics": custom_metrics_out,
+        "workers": workers_out,
     }
 
 
-async def _stream_multi_node_metrics(websocket: WebSocket, test_id: str) -> None:
+async def _fetch_logs_since_seq(test_id: str, since_seq: int, limit: int = 100) -> list[dict[str, Any]]:
+    """
+    Fetch logs from TEST_LOGS table for a given test since a sequence number.
+    Returns logs ordered by sequence ascending.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
+        query = f"""
+        SELECT
+            LOG_ID,
+            TEST_ID,
+            SEQ,
+            TIMESTAMP,
+            LEVEL,
+            LOGGER,
+            MESSAGE,
+            EXCEPTION
+        FROM {prefix}.TEST_LOGS
+        WHERE TEST_ID = ?
+          AND SEQ > ?
+        ORDER BY SEQ ASC
+        LIMIT ?
+        """
+        rows = await pool.execute_query(query, params=[test_id, since_seq, limit])
+        logs = []
+        for row in rows:
+            log_id, tid, seq, ts, level, logger_name, message, exception = row
+            logs.append({
+                "kind": "log",
+                "log_id": str(log_id) if log_id else None,
+                "test_id": str(tid) if tid else test_id,
+                "seq": int(seq) if seq is not None else 0,
+                "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts) if ts else None,
+                "level": str(level) if level else "INFO",
+                "logger": str(logger_name) if logger_name else "",
+                "message": str(message) if message else "",
+                "exception": str(exception) if exception else None,
+            })
+        return logs
+    except Exception as e:
+        logger.debug(f"Failed to fetch logs for test {test_id}: {e}")
+        return []
+
+
+async def _stream_run_metrics(websocket: WebSocket, test_id: str) -> None:
     await websocket.send_json(
         {
             "status": "connected",
@@ -772,6 +1191,8 @@ async def _stream_multi_node_metrics(websocket: WebSocket, test_id: str) -> None
     )
 
     poll_interval = 1.0
+    last_sent_phase: str | None = None  # Track phase to ensure PROCESSING is shown
+    last_log_seq: int = 0  # Track last log sequence to fetch only new logs
     while True:
         recv_task = asyncio.create_task(websocket.receive())
         sleep_task = asyncio.create_task(asyncio.sleep(poll_interval))
@@ -790,32 +1211,113 @@ async def _stream_multi_node_metrics(websocket: WebSocket, test_id: str) -> None
         if websocket.client_state != WebSocketState.CONNECTED:
             break
 
-        status = await _get_parent_test_status(test_id)
-        if status in {"COMPLETED", "FAILED", "CANCELLED"}:
-            await websocket.send_json(
-                {
-                    "test_id": test_id,
-                    "status": status,
-                    "phase": status,
-                    "timestamp": datetime.now(UTC).isoformat(),
-                }
-            )
-            break
+        run_status = await _fetch_run_status(test_id)
+        status = run_status.get("status") if run_status else None
+        status = status or await _get_parent_test_status(test_id) or "RUNNING"
+        status_upper = str(status or "").upper()
+        metrics = await _aggregate_multi_worker_metrics(test_id)
+        metrics = metrics or {}
+        workers = metrics.pop("workers", [])
+        metrics_phase = metrics.pop("phase", None)
+        phase = (
+            run_status.get("phase")
+            if run_status and run_status.get("phase")
+            else metrics_phase
+        )
+        if not phase:
+            phase = status_upper
+        if status_upper in {"STOPPED", "FAILED", "CANCELLED", "COMPLETED"}:
+            phase = status_upper
+        # Show PROCESSING phase during worker draining (STOPPING) and enrichment
+        if status_upper == "STOPPING":
+            phase = "PROCESSING"
+        if status_upper == "COMPLETED":
+            enrichment_status = await _fetch_parent_enrichment_status(test_id)
+            # Treat None as PENDING to handle race condition where RUN_STATUS is
+            # updated before TEST_RESULTS.ENRICHMENT_STATUS is set
+            if enrichment_status in ("PENDING", None):
+                phase = "PROCESSING"
+            elif last_sent_phase not in {"PROCESSING", "COMPLETED"}:
+                # Ensure PROCESSING is shown at least once before COMPLETED
+                # even if enrichment finished before we polled
+                phase = "PROCESSING"
 
-        metrics = await _aggregate_multi_node_metrics(test_id)
-        if metrics:
-            metrics_phase = metrics.pop("phase", None)
-            phase = metrics_phase or "RUNNING"
-            if status in {"STOPPED", "FAILED", "CANCELLED", "COMPLETED"}:
-                phase = status
-            payload = {
-                "test_id": test_id,
-                "status": status or "RUNNING",
-                "phase": phase,
-                "timestamp": datetime.now(UTC).isoformat(),
-                **metrics,
-            }
-            await websocket.send_json(payload)
+        elapsed_seconds = None
+        if run_status:
+            elapsed_raw = run_status.get("elapsed_seconds")
+            if isinstance(elapsed_raw, (int, float)):
+                elapsed_seconds = float(elapsed_raw)
+        if elapsed_seconds is None:
+            elapsed_raw = metrics.get("elapsed")
+            if isinstance(elapsed_raw, (int, float)):
+                elapsed_seconds = float(elapsed_raw)
+
+        ops = metrics.get("ops")
+        latency = metrics.get("latency")
+        errors = metrics.get("errors")
+        connections = metrics.get("connections")
+        operations = metrics.get("operations")
+        aggregate_metrics = _build_aggregate_metrics(
+            ops=ops,
+            latency=latency,
+            errors=errors,
+            connections=connections,
+            operations=operations,
+        )
+        run_snapshot = _build_run_snapshot(
+            run_id=test_id,
+            status=status_upper,
+            phase=phase,
+            elapsed_seconds=elapsed_seconds,
+            worker_count=len(workers),
+            aggregate_metrics=aggregate_metrics,
+            run_status=run_status,
+        )
+        payload = {
+            "test_id": test_id,
+            "status": status_upper,
+            "phase": phase,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "run": run_snapshot,
+            "workers": workers,
+            **metrics,
+        }
+        if run_status and run_status.get("cancellation_reason"):
+            payload["cancellation_reason"] = run_status.get("cancellation_reason")
+        custom_metrics = metrics.get("custom_metrics")
+        if isinstance(custom_metrics, dict):
+            warehouse = custom_metrics.get("warehouse")
+            if isinstance(warehouse, dict):
+                payload["warehouse"] = warehouse
+        if elapsed_seconds is not None:
+            payload["elapsed"] = float(elapsed_seconds)
+            timing = {"elapsed_display_seconds": round(float(elapsed_seconds), 1)}
+            run_snapshot["timing"] = timing
+            payload["timing"] = timing
+        find_max_state = (
+            _parse_variant_dict(run_status.get("find_max_state"))
+            if run_status
+            else None
+        )
+        if find_max_state is not None:
+            payload["find_max"] = find_max_state
+        
+        # Fetch new logs since last sequence
+        new_logs = await _fetch_logs_since_seq(test_id, last_log_seq, limit=100)
+        if new_logs:
+            payload["logs"] = new_logs
+            # Update last_log_seq to the highest seq we received
+            last_log_seq = max(log.get("seq", 0) for log in new_logs)
+        
+        await websocket.send_json({"event": "RUN_UPDATE", "data": payload})
+        last_sent_phase = phase  # Track what we sent
+        # Only break when phase reaches COMPLETED (cleanup finished).
+        # For FAILED/CANCELLED: orchestrator continues through PROCESSING phase
+        # to drain workers, flush logs, and run enrichment before setting phase=COMPLETED.
+        if phase == "COMPLETED":
+            # Grace period to ensure frontend receives final message before socket closes
+            await asyncio.sleep(0.5)
+            break
 
 
 @app.websocket("/ws/test/{test_id}")
@@ -823,67 +1325,18 @@ async def websocket_test_metrics(websocket: WebSocket, test_id: str):
     """
     WebSocket endpoint for real-time test metrics streaming.
 
+    All runs now use the unified orchestrator-based streaming which polls
+    RUN_STATUS and WORKER_METRICS_SNAPSHOTS for metrics.
+
     Args:
         websocket: WebSocket connection
-        test_id: Unique test identifier
+        test_id: Unique test identifier (run_id)
     """
     await websocket.accept()
     logger.info(f"📡 WebSocket connected for test: {test_id}")
 
     try:
-        if await _is_multi_node_parent(test_id):
-            logger.info(
-                f"📡 Multi-node parent test detected: {test_id}, using polling mode"
-            )
-            await _stream_multi_node_metrics(websocket, test_id)
-            return
-
-        q = await registry.subscribe(test_id)
-        try:
-            await websocket.send_json(
-                {
-                    "status": "connected",
-                    "test_id": test_id,
-                    "timestamp": datetime.now(UTC).isoformat(),
-                }
-            )
-            while True:
-                get_payload = asyncio.create_task(q.get())
-                recv_ws = asyncio.create_task(websocket.receive())
-                done, pending = await asyncio.wait(
-                    {get_payload, recv_ws}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
-
-                if recv_ws in done:
-                    msg = recv_ws.result()
-                    if msg.get("type") == "websocket.disconnect":
-                        break
-                    continue
-
-                payload = get_payload.result()
-                if websocket.client_state != WebSocketState.CONNECTED:
-                    break
-                await websocket.send_json(payload)
-        finally:
-            await registry.unsubscribe(test_id, q)
-
-    except KeyError:
-        logger.warning(f"📡 Test not found in registry: {test_id}")
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-    except WebSocketDisconnect:
-        logger.info(f"📡 WebSocket disconnected for multi-node test: {test_id}")
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-
+        await _stream_run_metrics(websocket, test_id)
     except WebSocketDisconnect:
         logger.info(f"📡 WebSocket disconnected for test: {test_id}")
     except Exception as e:

@@ -59,7 +59,6 @@ def _run_snow_sql(sql: str, timeout: int) -> None:
         sql,
         "--format",
         "json",
-        "--no-input",
     ]
     proc = subprocess.run(
         cmd,
@@ -663,11 +662,6 @@ def main() -> int:
         default=_get_env_int("SMOKE_CONCURRENCY", 5),
         help="Concurrent connections for smoke templates",
     )
-    parser.add_argument(
-        "--allow-same-warehouse",
-        action="store_true",
-        help="Allow smoke warehouse to match results warehouse",
-    )
     args = parser.parse_args()
 
     base_url = _normalize_base_url(args.base_url)
@@ -688,15 +682,6 @@ def main() -> int:
     smoke_warehouse_size = _normalize_ident(
         args.smoke_warehouse_size, "SMOKE_WAREHOUSE_SIZE"
     )
-
-    results_wh = str(os.environ.get("SNOWFLAKE_WAREHOUSE", "")).strip()
-    if results_wh and not args.allow_same_warehouse:
-        if smoke_warehouse.upper() == results_wh.upper():
-            print(
-                "SMOKE_WAREHOUSE must differ from SNOWFLAKE_WAREHOUSE for test execution.",
-                file=sys.stderr,
-            )
-            return 1
 
     if args.cleanup_only:
         try:

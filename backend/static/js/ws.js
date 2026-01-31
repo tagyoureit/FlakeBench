@@ -65,23 +65,6 @@ This extension adds support for WebSockets to htmx.  See /www/extensions/ws.md f
 		}
 	});
 
-	function splitOnWhitespace(trigger) {
-		return trigger.trim().split(/\s+/);
-	}
-
-	function getLegacyWebsocketURL(elt) {
-		var legacySSEValue = api.getAttributeValue(elt, "hx-ws");
-		if (legacySSEValue) {
-			var values = splitOnWhitespace(legacySSEValue);
-			for (var i = 0; i < values.length; i++) {
-				var value = values[i].split(/:(.+)/);
-				if (value[0] === "connect") {
-					return value[1];
-				}
-			}
-		}
-	}
-
 	/**
 	 * ensureWebSocket creates a new WebSocket on the designated element, using
 	 * the element's "ws-connect" attribute.
@@ -100,12 +83,7 @@ This extension adds support for WebSockets to htmx.  See /www/extensions/ws.md f
 		var wssSource = api.getAttributeValue(socketElt, "ws-connect")
 
 		if (wssSource == null || wssSource === "") {
-			var legacySource = getLegacyWebsocketURL(socketElt);
-			if (legacySource == null) {
-				return;
-			} else {
-				wssSource = legacySource;
-			}
+			return;
 		}
 
 		// Guarantee that the wssSource value is a fully qualified URL
@@ -306,11 +284,6 @@ This extension adds support for WebSockets to htmx.  See /www/extensions/ws.md f
 	 * @param {HTMLElement} elt
 	 */
 	function ensureWebSocketSend(elt) {
-		var legacyAttribute = api.getAttributeValue(elt, "hx-ws");
-		if (legacyAttribute && legacyAttribute !== 'send') {
-			return;
-		}
-
 		var webSocketParent = api.getClosestMatch(elt, hasWebSocket)
 		processWebSocketSend(webSocketParent, elt);
 	}
@@ -448,12 +421,12 @@ This extension adds support for WebSockets to htmx.  See /www/extensions/ws.md f
 		var result = []
 
 		// If the parent element also contains the requested attribute, then add it to the results too.
-		if (api.hasAttribute(elt, attributeName) || api.hasAttribute(elt, "hx-ws")) {
+		if (api.hasAttribute(elt, attributeName)) {
 			result.push(elt);
 		}
 
 		// Search all child nodes that match the requested attribute
-		elt.querySelectorAll("[" + attributeName + "], [data-" + attributeName + "], [data-hx-ws], [hx-ws]").forEach(function (node) {
+		elt.querySelectorAll("[" + attributeName + "], [data-" + attributeName + "]").forEach(function (node) {
 			result.push(node)
 		})
 

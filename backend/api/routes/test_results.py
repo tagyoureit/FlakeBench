@@ -12,6 +12,7 @@ UI endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -23,7 +24,7 @@ from pydantic import BaseModel
 
 from backend.config import settings
 from backend.connectors import postgres_pool, snowflake_pool
-from backend.core import autoscale
+from backend.core.orchestrator import orchestrator
 from backend.core.results_store import update_parent_run_aggregate
 from backend.core.test_registry import registry
 from backend.api.error_handling import http_exception
@@ -43,6 +44,7 @@ _ABORTED_BECAUSE_RE = re.compile(
 _SQL_COMPILATION_RE = re.compile(
     r"\bsql\s+compilation\s+error\b\s*:\s*(.*?)(?:\.|$)", re.IGNORECASE
 )
+LATENCY_AGGREGATION_METHOD = "slowest_worker_approximation"
 
 
 def _error_reason(msg: str) -> str:
@@ -103,28 +105,144 @@ def _prefix() -> str:
     return f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
 
 
-def _compute_aggregated_find_max(node_results: list[dict]) -> dict:
+async def _fetch_run_status(pool: Any, run_id: str) -> dict[str, Any] | None:
+    rows = await pool.execute_query(
+        f"""
+        SELECT RUN_ID, STATUS, PHASE, START_TIME, END_TIME, FIND_MAX_STATE, CANCELLATION_REASON,
+               TIMESTAMPDIFF(SECOND, START_TIME, CURRENT_TIMESTAMP()) AS ELAPSED_SECONDS
+        FROM {_prefix()}.RUN_STATUS
+        WHERE RUN_ID = ?
+        """,
+        params=[run_id],
+    )
+    if not rows:
+        return None
+    run_id_val, status, phase, start_time, end_time, find_max_state, cancellation_reason, elapsed_secs = (
+        rows[0]
+    )
+    return {
+        "run_id": str(run_id_val or ""),
+        "status": str(status or "").upper() or None,
+        "phase": str(phase or "").upper() or None,
+        "start_time": start_time,
+        "end_time": end_time,
+        "find_max_state": find_max_state,
+        "cancellation_reason": str(cancellation_reason) if cancellation_reason else None,
+        "elapsed_seconds": float(elapsed_secs) if elapsed_secs is not None else None,
+    }
+
+
+async def _aggregate_parent_enrichment_status(
+    *, pool: Any, run_id: str
+) -> tuple[str | None, str | None]:
+    """Aggregate ENRICHMENT_STATUS, checking parent first (authoritative), then workers.
+
+    This mirrors the logic in _fetch_parent_enrichment_status() (main.py) to ensure
+    HTTP and WebSocket endpoints return consistent enrichment status.
     """
-    Compute true aggregate metrics across all nodes' find_max_result.
+    prefix = _prefix()
+
+    # Check parent row first - it's the authoritative source for enrichment status.
+    # The orchestrator sets enrichment status on the parent row in _mark_run_completed()
+    # and updates it when enrichment completes/fails.
+    parent_rows = await pool.execute_query(
+        f"""
+        SELECT ENRICHMENT_STATUS, ENRICHMENT_ERROR
+        FROM {prefix}.TEST_RESULTS
+        WHERE TEST_ID = ?
+        """,
+        params=[run_id],
+    )
+    if parent_rows and parent_rows[0][0]:
+        parent_status = str(parent_rows[0][0]).strip().upper()
+        parent_error = parent_rows[0][1]
+        # If parent has a terminal enrichment status, use it immediately
+        if parent_status in ("COMPLETED", "FAILED", "SKIPPED"):
+            return parent_status, str(parent_error) if parent_error else None
+
+    # Fallback: aggregate worker rows (for multi-worker runs where parent may still
+    # be PENDING but we want to reflect any worker-level failures)
+    worker_rows = await pool.execute_query(
+        f"""
+        SELECT ENRICHMENT_STATUS, ENRICHMENT_ERROR
+        FROM {prefix}.TEST_RESULTS
+        WHERE RUN_ID = ?
+          AND TEST_ID <> ?
+        """,
+        params=[run_id, run_id],
+    )
+    statuses: list[str] = []
+    errors: list[str] = []
+    for status_value, error in worker_rows or []:
+        status_val = str(status_value or "").strip().upper()
+        if status_val:
+            statuses.append(status_val)
+        if error:
+            errors.append(str(error))
+    if not statuses:
+        # No workers yet - return parent status (likely PENDING)
+        if parent_rows and parent_rows[0][0]:
+            parent_status = str(parent_rows[0][0]).strip().upper()
+            parent_error = parent_rows[0][1]
+            return parent_status, str(parent_error) if parent_error else None
+        return None, None
+    if "PENDING" in statuses:
+        return "PENDING", None
+    if "FAILED" in statuses:
+        error_out = next((err for err in errors if err), None)
+        return "FAILED", error_out
+    if "COMPLETED" in statuses:
+        return "COMPLETED", None
+    if "SKIPPED" in statuses:
+        return "SKIPPED", None
+    return statuses[0], None
+
+
+async def _aggregate_parent_enrichment_stats(
+    *, pool: Any, run_id: str
+) -> tuple[int, int, float]:
+    prefix = _prefix()
+    rows = await pool.execute_query(
+        f"""
+        SELECT
+            COUNT(*) AS total,
+            COUNT(SF_CLUSTER_NUMBER) AS enriched
+        FROM {prefix}.QUERY_EXECUTIONS qe
+        JOIN {prefix}.TEST_RESULTS tr
+          ON qe.TEST_ID = tr.TEST_ID
+        WHERE tr.RUN_ID = ?
+          AND tr.TEST_ID <> ?
+        """,
+        params=[run_id, run_id],
+    )
+    total = int(rows[0][0] or 0) if rows else 0
+    enriched = int(rows[0][1] or 0) if rows else 0
+    ratio = enriched / total if total > 0 else 0.0
+    return total, enriched, ratio
+
+
+def _compute_aggregated_find_max(worker_results: list[dict]) -> dict:
+    """
+    Compute true aggregate metrics across all workers' find_max_result.
 
     For each concurrency level (step), aggregates:
-    - Total QPS (sum across nodes)
+    - Total QPS (sum across workers)
     - Max P95/P99 latencies (worst case)
-    - Number of active nodes at each step
+    - Number of active workers at each step
     """
-    if not node_results:
+    if not worker_results:
         return {}
 
     steps_by_concurrency: dict[int, dict[int, dict]] = {}
     all_baselines_p95 = []
     all_baselines_p99 = []
 
-    for node in node_results:
-        fmr = node.get("find_max_result", {})
+    for worker in worker_results:
+        fmr = worker.get("find_max_result", {})
         if not fmr:
             continue
 
-        node_idx = node.get("node_index", 0)
+        worker_idx = worker.get("worker_index", 0)
         if fmr.get("baseline_p95_latency_ms"):
             all_baselines_p95.append(fmr["baseline_p95_latency_ms"])
         if fmr.get("baseline_p99_latency_ms"):
@@ -136,49 +254,49 @@ def _compute_aggregated_find_max(node_results: list[dict]) -> dict:
             if cc is not None:
                 if cc not in steps_by_concurrency:
                     steps_by_concurrency[cc] = {}
-                if node_idx not in steps_by_concurrency[cc]:
-                    steps_by_concurrency[cc][node_idx] = {
-                        "node_index": node_idx,
+                if worker_idx not in steps_by_concurrency[cc]:
+                    steps_by_concurrency[cc][worker_idx] = {
+                        "worker_index": worker_idx,
                         **step,
                     }
 
     aggregated_steps = []
-    total_nodes = len(node_results)
+    total_workers = len(worker_results)
 
     for cc in sorted(steps_by_concurrency.keys()):
-        node_steps = list(steps_by_concurrency[cc].values())
-        active_nodes = len(node_steps)
+        worker_steps = list(steps_by_concurrency[cc].values())
+        active_workers = len(worker_steps)
 
-        total_qps = sum(s.get("qps", 0) or 0 for s in node_steps)
-        max_p95 = max((s.get("p95_latency_ms") or 0 for s in node_steps), default=0)
-        max_p99 = max((s.get("p99_latency_ms") or 0 for s in node_steps), default=0)
+        total_qps = sum(s.get("qps", 0) or 0 for s in worker_steps)
+        max_p95 = max((s.get("p95_latency_ms") or 0 for s in worker_steps), default=0)
+        max_p99 = max((s.get("p99_latency_ms") or 0 for s in worker_steps), default=0)
         avg_p95 = (
-            sum(s.get("p95_latency_ms") or 0 for s in node_steps) / active_nodes
-            if active_nodes > 0
+            sum(s.get("p95_latency_ms") or 0 for s in worker_steps) / active_workers
+            if active_workers > 0
             else 0
         )
         avg_p99 = (
-            sum(s.get("p99_latency_ms") or 0 for s in node_steps) / active_nodes
-            if active_nodes > 0
+            sum(s.get("p99_latency_ms") or 0 for s in worker_steps) / active_workers
+            if active_workers > 0
             else 0
         )
 
-        any_degraded = any(s.get("degraded") for s in node_steps)
+        any_degraded = any(s.get("degraded") for s in worker_steps)
         reasons = [
-            s.get("degrade_reason") for s in node_steps if s.get("degrade_reason")
+            s.get("degrade_reason") for s in worker_steps if s.get("degrade_reason")
         ]
 
         aggregated_steps.append(
             {
                 "concurrency": cc,
-                "total_concurrency": cc * active_nodes,
+                "total_concurrency": cc * active_workers,
                 "qps": round(total_qps, 2),
                 "p95_latency_ms": round(max_p95, 2),
                 "p99_latency_ms": round(max_p99, 2),
                 "avg_p95_latency_ms": round(avg_p95, 2),
                 "avg_p99_latency_ms": round(avg_p99, 2),
-                "active_nodes": active_nodes,
-                "total_nodes": total_nodes,
+                "active_workers": active_workers,
+                "total_workers": total_workers,
                 "degraded": any_degraded,
                 "degrade_reasons": reasons if reasons else None,
             }
@@ -186,7 +304,7 @@ def _compute_aggregated_find_max(node_results: list[dict]) -> dict:
 
     best_step = None
     for step in aggregated_steps:
-        if step["active_nodes"] == total_nodes and not step["degraded"]:
+        if step["active_workers"] == total_workers and not step["degraded"]:
             if best_step is None or step["qps"] > best_step["qps"]:
                 best_step = step
 
@@ -207,7 +325,7 @@ def _compute_aggregated_find_max(node_results: list[dict]) -> dict:
         else None,
         "final_best_concurrency": best_step["concurrency"] if best_step else None,
         "final_best_qps": best_step["qps"] if best_step else None,
-        "total_nodes": total_nodes,
+        "total_workers": total_workers,
         "is_aggregate": True,
     }
 
@@ -225,8 +343,7 @@ async def _fetch_warehouse_metrics(*, pool: Any, test_id: str) -> dict[str, Any]
     """
     Fetch test-level warehouse queueing + MCW metrics.
 
-    For parent runs (multi-node), aggregates from all child runs.
-    Backward compatible: callers should catch exceptions (e.g. missing view/columns).
+    For parent runs (multi-worker), aggregates from all child runs.
     """
     prefix = _prefix()
 
@@ -339,8 +456,7 @@ async def _fetch_cluster_breakdown(*, pool: Any, test_id: str) -> dict[str, Any]
     """
     Fetch per-cluster breakdown for MCW tests.
 
-    For parent runs (multi-node), aggregates from all child runs.
-    Backward compatible: callers should catch exceptions (e.g. missing view/columns).
+    For parent runs (multi-worker), aggregates from all child runs.
     """
     prefix = _prefix()
 
@@ -1074,107 +1190,89 @@ class RunTemplateResponse(BaseModel):
     status_code=status.HTTP_201_CREATED,
 )
 async def run_from_template(template_id: str) -> RunTemplateResponse:
-    try:
-        # Prepare only: do not start executing until explicitly started from the dashboard.
-        running = await registry.start_from_template(template_id, auto_start=False)
-        return RunTemplateResponse(
-            test_id=running.test_id, dashboard_url=f"/dashboard/{running.test_id}"
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Template not found")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise http_exception("start test", e)
+    """Create a new run from template via OrchestratorService.
 
+    This endpoint delegates to the orchestrator which properly creates both
+    RUN_STATUS and TEST_RESULTS entries. The run is created in PREPARED state.
 
-@router.post(
-    "/from-template/{template_id}/autoscale",
-    response_model=RunTemplateResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def run_from_template_autoscale(template_id: str) -> RunTemplateResponse:
+    All scaling modes (AUTO, BOUNDED, FIXED) use the same orchestrator path.
+    FIXED mode simply means no auto-scaling - the template runs with exactly
+    the specified workers/connections.
+    """
     try:
         template = await registry._load_template(template_id)
         template_config = dict(template.get("config") or {})
-        if not bool(template_config.get("autoscale_enabled")):
-            raise HTTPException(
-                status_code=400, detail="Autoscale is not enabled for this template."
-            )
+        template_name = str(template.get("template_name") or "")
 
-        spec = autoscale.AutoscaleSpec(
-            template_id=template_id,
-            max_cpu_percent=float(
-                template_config.get("autoscale_max_cpu_percent") or 85
-            ),
-            max_memory_percent=float(
-                template_config.get("autoscale_max_memory_percent") or 85
-            ),
+        # Create scenario from template config
+        scenario = registry._scenario_from_template_config(
+            template_name, template_config
         )
-        run = await autoscale.prepare_autoscale_from_template(
-            template_id=template_id,
-            spec=spec,
+
+        # Use OrchestratorService to create the run (creates RUN_STATUS + TEST_RESULTS)
+        run_id = await orchestrator.create_run(
+            template_id=str(template.get("template_id") or template_id),
+            template_config=template_config,
+            scenario=scenario,
         )
         return RunTemplateResponse(
-            test_id=run.parent_run_id,
-            dashboard_url=f"/dashboard/{run.parent_run_id}",
+            test_id=run_id,
+            dashboard_url=f"/dashboard/{run_id}",
         )
+    except HTTPException:
+        raise
     except KeyError:
         raise HTTPException(status_code=404, detail="Template not found")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise http_exception("start autoscale test", e)
+        raise http_exception("create run from template", e)
 
 
 @router.post("/{test_id}/start-autoscale", status_code=status.HTTP_202_ACCEPTED)
 async def start_autoscale_test(test_id: str) -> dict[str, Any]:
-    try:
-        rows = await snowflake_pool.get_default_pool().execute_query(
-            f"""
-            SELECT TEST_CONFIG
-            FROM {_prefix()}.TEST_RESULTS
-            WHERE TEST_ID = ?
-            """,
-            params=[test_id],
-        )
-        if not rows:
-            raise HTTPException(status_code=404, detail="Test not found")
-        cfg = rows[0][0]
-        if isinstance(cfg, str):
-            cfg = json.loads(cfg)
-        template_cfg = cfg.get("template_config") if isinstance(cfg, dict) else None
-        if not isinstance(template_cfg, dict) or not bool(
-            template_cfg.get("autoscale_enabled")
-        ):
-            raise HTTPException(
-                status_code=400, detail="Autoscale is not enabled for this test."
-            )
+    """Start a prepared run via OrchestratorService.
 
-        spec = autoscale.AutoscaleSpec(
-            template_id=str(cfg.get("template_id") or ""),
-            max_cpu_percent=float(template_cfg.get("autoscale_max_cpu_percent") or 85),
-            max_memory_percent=float(
-                template_cfg.get("autoscale_max_memory_percent") or 85
-            ),
+    This endpoint delegates to the orchestrator which properly updates RUN_STATUS,
+    emits START events, and spawns workers.
+    """
+    try:
+        # Start the run via orchestrator (handles RUN_STATUS, workers, etc.)
+        await orchestrator.start_run(run_id=test_id)
+
+        # Get the updated status
+        status_row = await orchestrator.get_run_status(test_id)
+        status_val = (
+            str(status_row.get("status") or "").upper()
+            if status_row is not None
+            else "RUNNING"
         )
-        run = await autoscale.start_autoscale_from_test(test_id=test_id, spec=spec)
-        return {"test_id": run.parent_run_id, "status": "RUNNING"}
-    except HTTPException:
-        raise
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return {"test_id": test_id, "status": status_val}
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Run not found")
     except Exception as e:
-        raise http_exception("start autoscale test", e)
+        raise http_exception("start run", e)
 
 
 @router.post("/{test_id}/start", status_code=status.HTTP_202_ACCEPTED)
 async def start_prepared_test(test_id: str) -> dict[str, Any]:
+    """Start a prepared run via OrchestratorService.
+
+    This endpoint delegates to the orchestrator which properly updates RUN_STATUS,
+    emits START events, and spawns workers.
+    """
     try:
-        running = await registry.start_prepared(test_id)
-        return {"test_id": running.test_id, "status": running.status}
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Test not found")
+        pool = snowflake_pool.get_default_pool()
+        run_status = await _fetch_run_status(pool, test_id)
+        if not run_status:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        await orchestrator.start_run(run_id=str(test_id))
+        updated = await _fetch_run_status(pool, test_id)
+        status_val = str((updated or run_status).get("status") or "RUNNING").upper()
+        return {"test_id": test_id, "status": status_val}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -1183,85 +1281,27 @@ async def start_prepared_test(test_id: str) -> dict[str, Any]:
 
 @router.post("/{test_id}/stop", status_code=status.HTTP_202_ACCEPTED)
 async def stop_test(test_id: str) -> dict[str, Any]:
+    """Stop a running test via OrchestratorService.
+
+    This endpoint delegates to the orchestrator which properly updates RUN_STATUS
+    and signals workers to stop.
+    """
     try:
-        running = await registry.stop(test_id)
-        return {"test_id": running.test_id, "status": running.status}
-    except KeyError:
-        pass
+        pool = snowflake_pool.get_default_pool()
+        run_status = await _fetch_run_status(pool, test_id)
+        if not run_status:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        await orchestrator.stop_run(run_id=str(test_id))
+        updated = await _fetch_run_status(pool, test_id)
+        status_val = str((updated or run_status).get("status") or "CANCELLING").upper()
+        return {"test_id": test_id, "status": status_val}
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise http_exception("stop test", e)
-
-    pool = snowflake_pool.get_default_pool()
-    db = settings.RESULTS_DATABASE
-    schema = settings.RESULTS_SCHEMA
-
-    check_sql = f"""
-        SELECT RUN_ID FROM {db}.{schema}.TEST_RESULTS
-        WHERE TEST_ID = ? LIMIT 1
-    """
-    rows = await pool.execute_query(check_sql, params=[test_id])
-    if not rows:
-        raise HTTPException(status_code=404, detail="Test not found")
-
-    run_id = rows[0][0]
-    is_parent = run_id == test_id
-
-    if is_parent:
-        children_sql = f"""
-            SELECT TEST_ID FROM {db}.{schema}.TEST_RESULTS
-            WHERE RUN_ID = ? AND TEST_ID <> ?
-        """
-        child_rows = await pool.execute_query(children_sql, params=[test_id, test_id])
-        children = [r[0] for r in child_rows]
-
-        stopped = []
-        for child_id in children:
-            try:
-                running = await registry.stop(child_id)
-                stopped.append({"test_id": running.test_id, "status": running.status})
-            except KeyError:
-                pass
-            except Exception:
-                pass
-
-        killed_pids = []
-        try:
-            import subprocess
-
-            result = subprocess.run(
-                ["pgrep", "-f", f"parent-run-id {test_id}"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                pids = [
-                    int(p.strip())
-                    for p in result.stdout.strip().split("\n")
-                    if p.strip()
-                ]
-                for pid in pids:
-                    try:
-                        import os
-                        import signal
-
-                        os.kill(pid, signal.SIGTERM)
-                        killed_pids.append(pid)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-        except Exception:
-            pass
-
-        return {
-            "test_id": test_id,
-            "status": "stopping",
-            "children_stopped": stopped,
-            "processes_killed": killed_pids,
-            "is_parent": True,
-        }
-    else:
-        raise HTTPException(status_code=404, detail="Test not found in registry")
 
 
 @router.get("")
@@ -1481,6 +1521,117 @@ async def search_tests(q: str) -> dict[str, Any]:
         raise http_exception("search tests", e)
 
 
+# ---------------------------------------------------------------------------
+# Helper functions for parallel query execution in get_test()
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_worker_find_max_results(
+    *, pool: Any, run_id: str, test_id: str
+) -> list[dict[str, Any]]:
+    """Fetch per-worker find_max_result for a parent run."""
+    prefix = _prefix()
+    rows = await pool.execute_query(
+        f"""
+        SELECT TEST_ID, FIND_MAX_RESULT
+        FROM {prefix}.TEST_RESULTS
+        WHERE RUN_ID = ?
+          AND TEST_ID <> ?
+          AND FIND_MAX_RESULT IS NOT NULL
+        ORDER BY START_TIME ASC
+        """,
+        params=[run_id, test_id],
+    )
+    results = []
+    for idx, (child_test_id, child_fmr_raw) in enumerate(rows):
+        if child_fmr_raw:
+            child_fmr = (
+                json.loads(child_fmr_raw)
+                if isinstance(child_fmr_raw, str)
+                else child_fmr_raw
+            )
+            results.append(
+                {
+                    "worker_index": idx + 1,
+                    "test_id": child_test_id,
+                    "find_max_result": child_fmr,
+                }
+            )
+    return results
+
+
+async def _fetch_error_rates(
+    *, pool: Any, run_id: str, test_id: str, is_parent_run: bool
+) -> dict[str, Any]:
+    """Fetch per-query-kind error rates and counts from QUERY_EXECUTIONS."""
+    prefix = _prefix()
+    result: dict[str, Any] = {
+        "point_lookup_error_rate_pct": None,
+        "range_scan_error_rate_pct": None,
+        "insert_error_rate_pct": None,
+        "update_error_rate_pct": None,
+        "point_lookup_count": 0,
+        "range_scan_count": 0,
+        "insert_count": 0,
+        "update_count": 0,
+    }
+
+    if is_parent_run:
+        err_rows = await pool.execute_query(
+            f"""
+            SELECT
+                qe.QUERY_KIND,
+                COUNT(*) AS N,
+                SUM(IFF(qe.SUCCESS, 0, 1)) AS ERR
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            JOIN {prefix}.TEST_RESULTS tr
+              ON tr.TEST_ID = qe.TEST_ID
+            WHERE tr.RUN_ID = ?
+              AND tr.TEST_ID <> ?
+              AND COALESCE(qe.WARMUP, FALSE) = FALSE
+            GROUP BY qe.QUERY_KIND
+            """,
+            params=[run_id, test_id],
+        )
+    else:
+        err_rows = await pool.execute_query(
+            f"""
+            SELECT QUERY_KIND, COUNT(*) AS N, SUM(IFF(SUCCESS, 0, 1)) AS ERR
+            FROM {prefix}.QUERY_EXECUTIONS
+            WHERE TEST_ID = ?
+              AND COALESCE(WARMUP, FALSE) = FALSE
+            GROUP BY QUERY_KIND
+            """,
+            params=[test_id],
+        )
+
+    err_key_map = {
+        "POINT_LOOKUP": "point_lookup_error_rate_pct",
+        "RANGE_SCAN": "range_scan_error_rate_pct",
+        "INSERT": "insert_error_rate_pct",
+        "UPDATE": "update_error_rate_pct",
+    }
+    count_key_map = {
+        "POINT_LOOKUP": "point_lookup_count",
+        "RANGE_SCAN": "range_scan_count",
+        "INSERT": "insert_count",
+        "UPDATE": "update_count",
+    }
+    for kind, n, err in err_rows:
+        k = str(kind or "").upper()
+        err_key = err_key_map.get(k)
+        count_key = count_key_map.get(k)
+        if not err_key:
+            continue
+        denom = float(n or 0)
+        numer = float(err or 0)
+        result[err_key] = (numer / denom * 100.0) if denom > 0 else 0.0
+        if count_key:
+            result[count_key] = int(n or 0)
+
+    return result
+
+
 @router.get("/{test_id}")
 async def get_test(test_id: str) -> dict[str, Any]:
     try:
@@ -1523,6 +1674,19 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     out[kind] = _coerce_pct(q.get("weight_pct") or 0)
             return out
 
+        def _coerce_optional_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            if isinstance(value, str) and not value.strip():
+                return None
+            try:
+                out = int(float(value))
+            except Exception:
+                return None
+            if out == -1:
+                return None
+            return out
+
         query = f"""
         SELECT
             TEST_ID,
@@ -1539,6 +1703,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
             DURATION_SECONDS,
             CONCURRENT_CONNECTIONS,
             TEST_CONFIG,
+            CUSTOM_METRICS,
             TOTAL_OPERATIONS,
             READ_OPERATIONS,
             WRITE_OPERATIONS,
@@ -1593,7 +1758,27 @@ async def get_test(test_id: str) -> dict[str, Any]:
         FROM {_prefix()}.TEST_RESULTS
         WHERE TEST_ID = ?
         """
-        rows = await pool.execute_query(query, params=[test_id])
+
+        # ---------------------------------------------------------------------------
+        # Phase 1: Initial parallel fetch - TEST_RESULTS + RUN_STATUS + enrichment
+        # These queries are independent and can run concurrently to reduce latency.
+        # Previously these were sequential, adding ~1.5-3s of round-trip time.
+        # ---------------------------------------------------------------------------
+        initial_results = await asyncio.gather(
+            pool.execute_query(query, params=[test_id]),
+            _fetch_run_status(pool, str(test_id)),
+            _aggregate_parent_enrichment_status(pool=pool, run_id=str(test_id)),
+            return_exceptions=True,
+        )
+
+        rows = initial_results[0] if not isinstance(initial_results[0], Exception) else []
+        prefetched_run_status = (
+            initial_results[1] if not isinstance(initial_results[1], Exception) else None
+        )
+        prefetched_enrichment = (
+            initial_results[2] if not isinstance(initial_results[2], Exception) else (None, None)
+        )
+
         if rows:
             row = rows[0]
             status_db = row[8]
@@ -1605,8 +1790,10 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 and end_time is not None
                 and str(status_db or "").upper() == "RUNNING"
             ):
-                await update_parent_run_aggregate(parent_run_id=str(test_id))
-                rows = await pool.execute_query(query, params=[test_id])
+                # Fire-and-forget: schedule aggregate update without blocking response
+                asyncio.create_task(
+                    update_parent_run_aggregate(parent_run_id=str(test_id))
+                )
         if not rows:
             # Fallback to in-memory registry for freshly prepared tests that
             # haven't been persisted to results tables yet.
@@ -1627,6 +1814,35 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 )
                 if load_mode not in {"CONCURRENCY", "QPS", "FIND_MAX_CONCURRENCY"}:
                     load_mode = "CONCURRENCY"
+                scaling_cfg = cfg.get("scaling") if isinstance(cfg, dict) else None
+                scaling_payload = None
+                if isinstance(scaling_cfg, dict):
+                    scaling_mode = (
+                        str(scaling_cfg.get("mode") or "AUTO").strip().upper() or "AUTO"
+                    )
+                    if scaling_mode not in {"AUTO", "BOUNDED", "FIXED"}:
+                        scaling_mode = "AUTO"
+                    min_workers = (
+                        _coerce_optional_int(scaling_cfg.get("min_workers")) or 1
+                    )
+                    max_workers = _coerce_optional_int(scaling_cfg.get("max_workers"))
+                    min_connections = (
+                        _coerce_optional_int(scaling_cfg.get("min_connections")) or 1
+                    )
+                    max_connections = _coerce_optional_int(
+                        scaling_cfg.get("max_connections")
+                    )
+                    scaling_payload = {
+                        "mode": scaling_mode,
+                        "min_workers": int(min_workers),
+                        "max_workers": int(max_workers)
+                        if max_workers is not None
+                        else None,
+                        "min_connections": int(min_connections),
+                        "max_connections": int(max_connections)
+                        if max_connections is not None
+                        else None,
+                    }
                 table_type_u = (
                     str(
                         getattr(running.scenario.table_configs[0], "table_type", "")
@@ -1669,29 +1885,49 @@ async def get_test(test_id: str) -> dict[str, Any]:
                         (running.scenario.duration_seconds or 0)
                         + (running.scenario.warmup_seconds or 0)
                     ),
-                    "concurrent_connections": int(
-                        running.scenario.concurrent_connections or 0
+                    "duration": None
+                    if load_mode == "FIND_MAX_CONCURRENCY"
+                    else float(
+                        (running.scenario.duration_seconds or 0)
+                        + (running.scenario.warmup_seconds or 0)
                     ),
+                    "created_at": running.created_at.isoformat(),
+                    "concurrent_connections": int(
+                        running.scenario.total_threads or 0
+                    ),
+                    "ops_per_sec": 0.0,
+                    "p50_latency": 0.0,
+                    "p95_latency": 0.0,
+                    "p99_latency": 0.0,
+                    "error_rate": 0.0,
+                    "latency_aggregation_method": None,
                     "load_mode": load_mode,
+                    "scaling": scaling_payload,
                     "target_qps": (
                         float(getattr(running.scenario, "target_qps", 0.0) or 0.0)
                         if load_mode == "QPS"
                         else None
                     ),
-                    "min_concurrency": int(
-                        getattr(running.scenario, "min_concurrency", 1) or 1
+                    "min_connections": int(
+                        getattr(running.scenario, "min_threads_per_worker", 1) or 1
                     )
                     if load_mode == "QPS"
                     else None,
                     "qps_target_mode": "QPS" if load_mode == "QPS" else None,
                     "workload_type": str(running.scenario.workload_type),
-                    "autoscale_enabled": bool(cfg.get("autoscale_enabled")),
+                    # Derive autoscale_enabled from scaling.mode for backward compatibility
+                    "autoscale_enabled": str(
+                        (cfg.get("scaling") or {}).get("mode") or "AUTO"
+                    ).upper()
+                    != "FIXED",
                     "autoscale_max_cpu_percent": _num_from_dict(
-                        cfg, "autoscale_max_cpu_percent"
-                    ),
+                        cfg.get("guardrails") or cfg, "max_cpu_percent"
+                    )
+                    or _num_from_dict(cfg, "autoscale_max_cpu_percent"),
                     "autoscale_max_memory_percent": _num_from_dict(
-                        cfg, "autoscale_max_memory_percent"
-                    ),
+                        cfg.get("guardrails") or cfg, "max_memory_percent"
+                    )
+                    or _num_from_dict(cfg, "autoscale_max_memory_percent"),
                     "custom_point_lookup_pct": _pct_from_dict(
                         cfg, "custom_point_lookup_pct"
                     )
@@ -1790,6 +2026,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
             duration_seconds,
             concurrency,
             test_config,
+            custom_metrics,
             total_operations,
             read_operations,
             write_operations,
@@ -1844,10 +2081,50 @@ async def get_test(test_id: str) -> dict[str, Any]:
         ) = rows[0]
 
         is_parent_run = bool(run_id) and str(run_id) == str(test_id)
+        latency_aggregation_method = (
+            LATENCY_AGGREGATION_METHOD if is_parent_run else None
+        )
+
+        # Use prefetched run_status and enrichment from Phase 1 parallel fetch
+        run_status = prefetched_run_status if is_parent_run else None
+        status_live = status_db
+        phase_live: str | None = None
+        cancellation_reason_live: str | None = None
+        start_time_live = start_time
+        end_time_live = end_time
+        if is_parent_run and run_status:
+            status_live = run_status.get("status") or status_live
+            phase_live = run_status.get("phase") or phase_live
+            cancellation_reason_live = run_status.get("cancellation_reason")
+            start_time_live = run_status.get("start_time") or start_time_live
+            end_time_live = run_status.get("end_time") or end_time_live
+
+        enrichment_status_live = enrichment_status
+        enrichment_error_live = enrichment_error
+        if is_parent_run and run_id:
+            agg_status, agg_error = prefetched_enrichment
+            if agg_status:
+                enrichment_status_live = agg_status
+                enrichment_error_live = agg_error
 
         cfg = test_config
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
+
+        custom_metrics_raw: Any = custom_metrics
+        if isinstance(custom_metrics_raw, str):
+            try:
+                custom_metrics_raw = json.loads(custom_metrics_raw)
+            except Exception:
+                custom_metrics_raw = None
+        bounds_state = None
+        if isinstance(custom_metrics_raw, dict):
+            bounds_state = custom_metrics_raw.get("bounds_state")
+            if isinstance(bounds_state, str):
+                try:
+                    bounds_state = json.loads(bounds_state)
+                except Exception:
+                    bounds_state = None
 
         find_max_result = None
         if find_max_result_raw:
@@ -1855,6 +2132,12 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 find_max_result = json.loads(find_max_result_raw)
             else:
                 find_max_result = find_max_result_raw
+        if is_parent_run and run_status and run_status.get("find_max_state"):
+            find_max_state = run_status.get("find_max_state")
+            if isinstance(find_max_state, str):
+                find_max_state = json.loads(find_max_state)
+            if isinstance(find_max_state, dict):
+                find_max_result = find_max_state
 
         template_name = cfg.get("template_name") if isinstance(cfg, dict) else None
         template_id = cfg.get("template_id") if isinstance(cfg, dict) else None
@@ -1877,14 +2160,43 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 target_qps = float(v) if v is not None else None
             except Exception:
                 target_qps = None
-        min_concurrency = None
-        if load_mode == "QPS" and isinstance(template_cfg, dict):
-            try:
-                min_concurrency = int(float(template_cfg.get("min_concurrency") or 1))
-            except Exception:
-                min_concurrency = 1
+        min_connections = None
+        scaling_cfg = (
+            template_cfg.get("scaling") if isinstance(template_cfg, dict) else None
+        )
+        scaling_payload = None
+        if isinstance(scaling_cfg, dict):
+            scaling_mode = (
+                str(scaling_cfg.get("mode") or "AUTO").strip().upper() or "AUTO"
+            )
+            if scaling_mode not in {"AUTO", "BOUNDED", "FIXED"}:
+                scaling_mode = "AUTO"
+            min_workers = _coerce_optional_int(scaling_cfg.get("min_workers")) or 1
+            max_workers = _coerce_optional_int(scaling_cfg.get("max_workers"))
+            min_connections_val = (
+                _coerce_optional_int(scaling_cfg.get("min_connections")) or 1
+            )
+            max_connections = _coerce_optional_int(scaling_cfg.get("max_connections"))
+            scaling_payload = {
+                "mode": scaling_mode,
+                "min_workers": int(min_workers),
+                "max_workers": int(max_workers) if max_workers is not None else None,
+                "min_connections": int(min_connections_val),
+                "max_connections": int(max_connections)
+                if max_connections is not None
+                else None,
+            }
+            if load_mode == "QPS":
+                min_connections = int(min_connections_val)
+        if load_mode == "QPS" and min_connections is None:
+            min_connections = 1
         table_type_u = str(table_type or "").strip().upper()
         is_postgres = table_type_u in {"POSTGRES", "SNOWFLAKE_POSTGRES"}
+        error_rate_pct = 0.0
+        if total_operations:
+            error_rate_pct = (
+                float(failed_operations or 0) / float(total_operations or 0)
+            ) * 100.0
 
         payload: dict[str, Any] = {
             "test_id": test_id,
@@ -1903,31 +2215,47 @@ async def get_test(test_id: str) -> dict[str, Any]:
             ),
             "warehouse": warehouse,
             "warehouse_size": warehouse_size,
-            "status": status_db,
-            "start_time": start_time.isoformat()
-            if hasattr(start_time, "isoformat")
-            else str(start_time),
-            "end_time": end_time.isoformat()
-            if end_time and hasattr(end_time, "isoformat")
+            "status": status_live,
+            "start_time": start_time_live.isoformat()
+            if hasattr(start_time_live, "isoformat")
+            else str(start_time_live),
+            "created_at": start_time_live.isoformat()
+            if hasattr(start_time_live, "isoformat")
+            else str(start_time_live),
+            "end_time": end_time_live.isoformat()
+            if end_time_live and hasattr(end_time_live, "isoformat")
             else None,
             "duration_seconds": float(duration_seconds or 0),
+            "duration": float(duration_seconds or 0),
             "concurrent_connections": int(concurrency or 0),
             "load_mode": load_mode,
             "target_qps": target_qps if load_mode == "QPS" else None,
-            "min_concurrency": min_concurrency if load_mode == "QPS" else None,
+            "min_connections": min_connections if load_mode == "QPS" else None,
+            "scaling": scaling_payload,
+            "bounds_state": bounds_state,
             "qps_target_mode": "QPS" if load_mode == "QPS" else None,
             "workload_type": workload_type,
-            "autoscale_enabled": bool(
-                template_cfg.get("autoscale_enabled")
-                if isinstance(template_cfg, dict)
-                else False
-            ),
-            "autoscale_max_cpu_percent": _num_from_dict(
-                template_cfg, "autoscale_max_cpu_percent"
-            ),
-            "autoscale_max_memory_percent": _num_from_dict(
-                template_cfg, "autoscale_max_memory_percent"
-            ),
+            # Derive autoscale_enabled from scaling.mode for backward compatibility
+            "autoscale_enabled": str(
+                (template_cfg.get("scaling") or {}).get("mode") or "AUTO"
+            ).upper()
+            != "FIXED"
+            if isinstance(template_cfg, dict)
+            else True,
+            "autoscale_max_cpu_percent": (
+                _num_from_dict(template_cfg.get("guardrails") or {}, "max_cpu_percent")
+                or _num_from_dict(template_cfg, "autoscale_max_cpu_percent")
+            )
+            if isinstance(template_cfg, dict)
+            else None,
+            "autoscale_max_memory_percent": (
+                _num_from_dict(
+                    template_cfg.get("guardrails") or {}, "max_memory_percent"
+                )
+                or _num_from_dict(template_cfg, "autoscale_max_memory_percent")
+            )
+            if isinstance(template_cfg, dict)
+            else None,
             "custom_point_lookup_pct": _pct_from_dict(
                 template_cfg, "custom_point_lookup_pct"
             ),
@@ -1978,6 +2306,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "write_operations": int(write_operations or 0),
             "failed_operations": int(failed_operations or 0),
             "qps": float(qps or 0),
+            "ops_per_sec": float(qps or 0),
             "reads_per_second": float(reads_per_second or 0),
             "writes_per_second": float(writes_per_second or 0),
             "rows_read": int(rows_read or 0),
@@ -1987,6 +2316,11 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "p90_latency_ms": float(p90_latency_ms or 0),
             "p95_latency_ms": float(p95_latency_ms or 0),
             "p99_latency_ms": float(p99_latency_ms or 0),
+            "p50_latency": float(p50_latency_ms or 0),
+            "p95_latency": float(p95_latency_ms or 0),
+            "p99_latency": float(p99_latency_ms or 0),
+            "latency_aggregation_method": latency_aggregation_method,
+            "error_rate": error_rate_pct,
             "min_latency_ms": float(min_latency_ms or 0),
             "max_latency_ms": float(max_latency_ms or 0),
             "read_p50_latency_ms": float(read_p50_latency_ms or 0),
@@ -2022,228 +2356,300 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "find_max_result": find_max_result,
             "failure_reason": failure_reason,
             # Enrichment status (post-processing)
-            "enrichment_status": enrichment_status,
-            "enrichment_error": enrichment_error,
+            "enrichment_status": enrichment_status_live,
+            "enrichment_error": enrichment_error_live,
             "can_retry_enrichment": (
-                str(status_db or "").upper() == "COMPLETED"
-                and str(enrichment_status or "").upper() == "FAILED"
+                not is_parent_run
+                and str(status_db or "").upper() == "COMPLETED"
+                and str(enrichment_status_live or "").upper() == "FAILED"
             ),
         }
 
+        if phase_live:
+            payload["phase"] = phase_live
+        if cancellation_reason_live:
+            payload["cancellation_reason"] = cancellation_reason_live
+
+        # ---------------------------------------------------------------------------
+        # Parallel query execution for performance optimization
+        # These queries are independent and can run concurrently via asyncio.gather
+        # ---------------------------------------------------------------------------
+        status_upper = str(status_db or "").upper()
+        is_terminal = status_upper in {"COMPLETED", "FAILED", "STOPPED", "CANCELLED"}
+
+        # Build list of coroutines to run in parallel
+        parallel_tasks: list[tuple[str, Any]] = []
+
+        # 1. Worker find_max_results (parent runs only)
         if is_parent_run:
-            try:
-                node_fmr_rows = await pool.execute_query(
-                    f"""
-                    SELECT
-                        TEST_ID,
-                        FIND_MAX_RESULT
-                    FROM {_prefix()}.TEST_RESULTS
-                    WHERE RUN_ID = ?
-                      AND TEST_ID <> ?
-                      AND FIND_MAX_RESULT IS NOT NULL
-                    ORDER BY START_TIME ASC
-                    """,
-                    params=[run_id, test_id],
+            parallel_tasks.append(
+                (
+                    "worker_fmr",
+                    _fetch_worker_find_max_results(
+                        pool=pool, run_id=str(run_id), test_id=test_id
+                    ),
                 )
-                node_find_max_results = []
-                for idx, (child_test_id, child_fmr_raw) in enumerate(node_fmr_rows):
-                    if child_fmr_raw:
-                        child_fmr = (
-                            json.loads(child_fmr_raw)
-                            if isinstance(child_fmr_raw, str)
-                            else child_fmr_raw
-                        )
-                        node_find_max_results.append(
-                            {
-                                "node_index": idx + 1,
-                                "test_id": child_test_id,
-                                "find_max_result": child_fmr,
-                            }
-                        )
-                payload["node_find_max_results"] = node_find_max_results
+            )
 
-                if len(node_find_max_results) > 1:
-                    payload["aggregated_find_max_result"] = (
-                        _compute_aggregated_find_max(node_find_max_results)
-                    )
-            except Exception as e:
-                logger.debug(
-                    "Failed to fetch per-node find_max_results for %s: %s",
-                    test_id,
-                    e,
+        # 2. Error rates (terminal states only)
+        if is_terminal:
+            parallel_tasks.append(
+                (
+                    "error_rates",
+                    _fetch_error_rates(
+                        pool=pool,
+                        run_id=str(run_id) if run_id else test_id,
+                        test_id=test_id,
+                        is_parent_run=is_parent_run,
+                    ),
                 )
-                payload["node_find_max_results"] = []
+            )
 
-        # Per-query-type error rates and counts (best-effort; derived from QUERY_EXECUTIONS).
-        payload.update(
-            {
-                "point_lookup_error_rate_pct": None,
-                "range_scan_error_rate_pct": None,
-                "insert_error_rate_pct": None,
-                "update_error_rate_pct": None,
-                "point_lookup_count": 0,
-                "range_scan_count": 0,
-                "insert_count": 0,
-                "update_count": 0,
-            }
+        # 3. SF execution latency summary
+        if is_parent_run:
+            parallel_tasks.append(
+                (
+                    "sf_latency",
+                    _fetch_sf_execution_latency_summary_for_run(
+                        pool=pool,
+                        parent_run_id=str(run_id),
+                        parent_test_id=str(test_id),
+                    ),
+                )
+            )
+        else:
+            parallel_tasks.append(
+                (
+                    "sf_latency",
+                    _fetch_sf_execution_latency_summary(pool=pool, test_id=test_id),
+                )
+            )
+
+        # 4. App latency summary (parent runs only)
+        if is_parent_run:
+            parallel_tasks.append(
+                (
+                    "app_latency",
+                    _fetch_app_latency_summary_for_run(
+                        pool=pool,
+                        parent_run_id=str(run_id),
+                        parent_test_id=str(test_id),
+                    ),
+                )
+            )
+
+        # 5. Warehouse metrics
+        parallel_tasks.append(
+            (
+                "warehouse_metrics",
+                _fetch_warehouse_metrics(pool=pool, test_id=test_id),
+            )
         )
-        try:
-            status_upper = str(status_db or "").upper()
-            if status_upper in {"COMPLETED", "FAILED", "STOPPED", "CANCELLED"}:
-                if is_parent_run:
-                    err_rows = await pool.execute_query(
-                        f"""
-                        SELECT
-                            qe.QUERY_KIND,
-                            COUNT(*) AS N,
-                            SUM(IFF(qe.SUCCESS, 0, 1)) AS ERR
-                        FROM {_prefix()}.QUERY_EXECUTIONS qe
-                        JOIN {_prefix()}.TEST_RESULTS tr
-                          ON tr.TEST_ID = qe.TEST_ID
-                        WHERE tr.RUN_ID = ?
-                          AND tr.TEST_ID <> ?
-                          AND COALESCE(qe.WARMUP, FALSE) = FALSE
-                        GROUP BY qe.QUERY_KIND
-                        """,
-                        params=[run_id, test_id],
-                    )
-                else:
-                    err_rows = await pool.execute_query(
-                        f"""
-                        SELECT QUERY_KIND, COUNT(*) AS N, SUM(IFF(SUCCESS, 0, 1)) AS ERR
-                        FROM {_prefix()}.QUERY_EXECUTIONS
-                        WHERE TEST_ID = ?
-                          AND COALESCE(WARMUP, FALSE) = FALSE
-                        GROUP BY QUERY_KIND
-                        """,
-                        params=[test_id],
-                    )
-                err_key_map = {
-                    "POINT_LOOKUP": "point_lookup_error_rate_pct",
-                    "RANGE_SCAN": "range_scan_error_rate_pct",
-                    "INSERT": "insert_error_rate_pct",
-                    "UPDATE": "update_error_rate_pct",
-                }
-                count_key_map = {
-                    "POINT_LOOKUP": "point_lookup_count",
-                    "RANGE_SCAN": "range_scan_count",
-                    "INSERT": "insert_count",
-                    "UPDATE": "update_count",
-                }
-                for kind, n, err in err_rows:
-                    k = str(kind or "").upper()
-                    err_key = err_key_map.get(k)
-                    count_key = count_key_map.get(k)
-                    if not err_key:
-                        continue
-                    denom = float(n or 0)
-                    numer = float(err or 0)
-                    payload[err_key] = (numer / denom * 100.0) if denom > 0 else 0.0
-                    if count_key:
-                        payload[count_key] = int(n or 0)
-        except Exception as e:
-            logger.debug(
-                "Failed to compute per-kind error rates for %s: %s", test_id, e
-            )
 
-        # Best-effort SQL-execution latency summaries (may be missing for running tests,
-        # cancelled runs, or older schemas without SF_* columns).
-        try:
-            if is_parent_run:
-                payload.update(
-                    await _fetch_sf_execution_latency_summary_for_run(
-                        pool=pool,
-                        parent_run_id=str(run_id),
-                        parent_test_id=str(test_id),
-                    )
-                )
-            else:
-                payload.update(
-                    await _fetch_sf_execution_latency_summary(
-                        pool=pool, test_id=test_id
-                    )
-                )
-        except Exception as e:
-            logger.debug(
-                "Failed to compute SF execution latency summary for test %s: %s",
-                test_id,
-                e,
+        # 6. Cluster breakdown
+        parallel_tasks.append(
+            (
+                "cluster_breakdown",
+                _fetch_cluster_breakdown(pool=pool, test_id=test_id),
             )
-            payload.update(
-                {"sf_latency_available": False, "sf_latency_sample_count": 0}
-            )
+        )
 
-        # For parent runs, backfill detailed end-to-end latency from child query logs.
-        if is_parent_run:
-            try:
-                payload.update(
-                    await _fetch_app_latency_summary_for_run(
-                        pool=pool,
-                        parent_run_id=str(run_id),
-                        parent_test_id=str(test_id),
-                    )
-                )
-            except Exception as e:
-                logger.debug(
-                    "Failed to compute parent app latency summary for %s: %s",
-                    test_id,
-                    e,
-                )
-
-        # Best-effort: warehouse queueing + MCW breakdown (requires query-history enrichment).
-        try:
-            payload.update(await _fetch_warehouse_metrics(pool=pool, test_id=test_id))
-        except Exception as e:
-            logger.debug(
-                "Failed to fetch warehouse metrics for test %s: %s", test_id, e
-            )
-            payload.update({"warehouse_metrics_available": False})
-
-        try:
-            payload.update(await _fetch_cluster_breakdown(pool=pool, test_id=test_id))
-        except Exception as e:
-            logger.debug(
-                "Failed to fetch cluster breakdown for test %s: %s", test_id, e
-            )
-            payload.update(
-                {"cluster_breakdown_available": False, "cluster_breakdown": []}
-            )
-
+        # 7. Postgres stats (postgres tables only)
         if is_postgres:
-            try:
-                payload.update(
-                    await _fetch_postgres_stats(
+            parallel_tasks.append(
+                (
+                    "postgres_stats",
+                    _fetch_postgres_stats(
                         table_type=table_type,
                         database=template_cfg.get("database")
                         if isinstance(template_cfg, dict)
                         else None,
-                    )
+                    ),
                 )
-            except Exception as e:
-                logger.debug("Postgres stats unavailable for %s: %s", test_id, e)
+            )
 
-        # If this test is still tracked in-memory, expose the latest execution phase
-        # so the history dashboard can stay consistent with the live dashboard
-        # (e.g., show PROCESSING until post-processing completes).
+        # Execute all queries in parallel
+        task_names = [name for name, _ in parallel_tasks]
+        task_coros = [coro for _, coro in parallel_tasks]
+
+        # Use return_exceptions=True to handle individual failures gracefully
+        results = await asyncio.gather(*task_coros, return_exceptions=True)
+
+        # Process results
+        for task_name, result in zip(task_names, results):
+            if isinstance(result, Exception):
+                logger.debug(
+                    "Parallel query '%s' failed for test %s: %s",
+                    task_name,
+                    test_id,
+                    result,
+                )
+                # Apply default values for failed queries
+                if task_name == "worker_fmr":
+                    payload["worker_find_max_results"] = []
+                elif task_name == "error_rates":
+                    payload.update(
+                        {
+                            "point_lookup_error_rate_pct": None,
+                            "range_scan_error_rate_pct": None,
+                            "insert_error_rate_pct": None,
+                            "update_error_rate_pct": None,
+                            "point_lookup_count": 0,
+                            "range_scan_count": 0,
+                            "insert_count": 0,
+                            "update_count": 0,
+                        }
+                    )
+                elif task_name == "sf_latency":
+                    payload.update(
+                        {"sf_latency_available": False, "sf_latency_sample_count": 0}
+                    )
+                elif task_name == "warehouse_metrics":
+                    payload.update({"warehouse_metrics_available": False})
+                elif task_name == "cluster_breakdown":
+                    payload.update(
+                        {"cluster_breakdown_available": False, "cluster_breakdown": []}
+                    )
+                # postgres_stats and app_latency failures are silent (no defaults needed)
+            else:
+                # Apply successful results
+                if task_name == "worker_fmr":
+                    payload["worker_find_max_results"] = result
+                    if len(result) > 1:
+                        payload["aggregated_find_max_result"] = (
+                            _compute_aggregated_find_max(result)
+                        )
+                elif task_name == "error_rates":
+                    # Initialize defaults first, then update with results
+                    payload.update(
+                        {
+                            "point_lookup_error_rate_pct": None,
+                            "range_scan_error_rate_pct": None,
+                            "insert_error_rate_pct": None,
+                            "update_error_rate_pct": None,
+                            "point_lookup_count": 0,
+                            "range_scan_count": 0,
+                            "insert_count": 0,
+                            "update_count": 0,
+                        }
+                    )
+                    payload.update(result)
+                elif task_name in (
+                    "sf_latency",
+                    "app_latency",
+                    "warehouse_metrics",
+                    "cluster_breakdown",
+                    "postgres_stats",
+                ):
+                    payload.update(result)
+
+        # Set defaults for error_rates if not fetched (non-terminal states)
+        if not is_terminal:
+            payload.update(
+                {
+                    "point_lookup_error_rate_pct": None,
+                    "range_scan_error_rate_pct": None,
+                    "insert_error_rate_pct": None,
+                    "update_error_rate_pct": None,
+                    "point_lookup_count": 0,
+                    "range_scan_count": 0,
+                    "insert_count": 0,
+                    "update_count": 0,
+                }
+            )
+
+        if not is_parent_run:
+            # If this test is still tracked in-memory, expose the latest execution phase
+            # so the history dashboard can stay consistent with the live dashboard
+            # (e.g., show PROCESSING until post-processing completes).
+            try:
+                running = await registry.get(test_id)
+                if running is not None and isinstance(running.last_payload, dict):
+                    phase = running.last_payload.get("phase")
+                    if phase:
+                        payload["phase"] = phase
+                # Also prefer in-memory status for in-progress cancellation. The DB row
+                # can remain RUNNING until the runner finalizes, but the UI needs to show
+                # CANCELLING immediately after the user clicks Stop.
+                if running is not None:
+                    status_live = str(getattr(running, "status", "") or "").upper()
+                    if status_live:
+                        payload["status"] = status_live
+            except Exception:
+                # Best-effort only; never fail the API response due to registry issues.
+                pass
+
+        # Add timing info for all tests (needed for phase progress display)
+        # All tests use the worker-based architecture (even with min_workers=1)
         try:
-            running = await registry.get(test_id)
-            if running is not None and isinstance(running.last_payload, dict):
-                phase = running.last_payload.get("phase")
-                if phase:
-                    payload["phase"] = phase
-            # Also prefer in-memory status for in-progress cancellation. The DB row
-            # can remain RUNNING until the runner finalizes, but the UI needs to show
-            # CANCELLING immediately after the user clicks Stop.
-            if running is not None:
-                status_live = str(getattr(running, "status", "") or "").upper()
-                if status_live:
-                    payload["status"] = status_live
-        except Exception:
-            # Best-effort only; never fail the API response due to registry issues.
-            pass
+            scenario_cfg = cfg.get("scenario", {}) if isinstance(cfg, dict) else {}
+            if not isinstance(scenario_cfg, dict):
+                scenario_cfg = {}
+            # Try scenario config first, then top-level config
+            warmup_secs = int(
+                float(scenario_cfg.get("warmup_seconds") or cfg.get("warmup") or 0)
+            )
+            run_secs = int(
+                float(scenario_cfg.get("duration_seconds") or cfg.get("duration") or 0)
+            )
+            load_mode_upper = str(load_mode or "").strip().upper()
+            if load_mode_upper == "FIND_MAX_CONCURRENCY":
+                run_secs = 0
+                total_expected_secs = 0
+            else:
+                total_expected_secs = warmup_secs + run_secs
 
-        # For multi-node tests, derive phase and timing from elapsed time and config
-        if is_parent_run and str(status_db or "").upper() == "RUNNING":
+            # Calculate elapsed time based on test state
+            elapsed_secs = 0.0
+            status_upper = str(status_live or "").upper()
+
+            # For completed tests, prefer end_time - start_time (full run, includes warmup)
+            if status_upper in {"COMPLETED", "FAILED", "CANCELLED", "STOPPED"}:
+                if start_time_live and end_time_live:
+                    try:
+                        st = start_time_live
+                        et = end_time_live
+                        if hasattr(st, "timestamp") and hasattr(et, "timestamp"):
+                            calc = et.timestamp() - st.timestamp()
+                            if calc > 0:
+                                elapsed_secs = calc
+                    except Exception:
+                        pass
+                if (
+                    elapsed_secs <= 0
+                    and duration_seconds
+                    and float(duration_seconds or 0) > 0
+                ):
+                    # Fallback to stored duration if timestamps unavailable
+                    elapsed_secs = float(duration_seconds)
+            elif (
+                is_parent_run
+                and run_status
+                and run_status.get("elapsed_seconds") is not None
+            ):
+                # For running/stopping tests: use run_status elapsed (calculated server-side)
+                elapsed_raw = run_status.get("elapsed_seconds")
+                if isinstance(elapsed_raw, (int, float)):
+                    elapsed_secs = max(0.0, float(elapsed_raw))
+            elif duration_seconds and float(duration_seconds or 0) > 0:
+                # Fallback to stored duration
+                elapsed_secs = float(duration_seconds)
+
+            # Only set timing if we don't already have it (in-memory tests set it earlier)
+            if not payload.get("timing"):
+                payload["timing"] = {
+                    "warmup_seconds": warmup_secs,
+                    "run_seconds": run_secs,
+                    "total_expected_seconds": total_expected_secs,
+                    "elapsed_display_seconds": round(elapsed_secs, 1),
+                }
+        except Exception as e:
+            logger.debug("Failed to derive timing for test %s: %s", test_id, e)
+
+        # For worker-based tests, derive phase from elapsed time when RUNNING or STOPPING
+        # All tests now use the worker architecture (even with min_workers=1)
+        status_for_timing = str(status_live or "").upper()
+        if is_parent_run and status_for_timing in ("RUNNING", "STOPPING"):
             try:
                 # Extract warmup and run seconds from the scenario config
                 scenario_cfg = cfg.get("scenario", {}) if isinstance(cfg, dict) else {}
@@ -2258,19 +2664,15 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 else:
                     total_expected_secs = warmup_secs + run_secs
 
-                # Calculate elapsed time
-                from datetime import datetime, timezone
-
+                # Use elapsed_seconds from run_status (calculated via TIMESTAMPDIFF in SQL)
+                # IMPORTANT: Do NOT calculate elapsed time in Python - Snowflake returns
+                # naive datetimes in session timezone (Pacific), while Python uses UTC,
+                # causing an 8-hour discrepancy (~28800s displayed instead of actual time)
                 elapsed_secs = 0.0
-                if start_time:
-                    st = start_time
-                    now = datetime.now(timezone.utc)
-                    if not hasattr(st, "tzinfo") or st.tzinfo is None:
-                        st = st.replace(tzinfo=timezone.utc)
-                    else:
-                        st = st.astimezone(timezone.utc)
-                    elapsed_secs = (now - st).total_seconds()
-                    elapsed_secs = max(0.0, elapsed_secs)
+                if run_status and run_status.get("elapsed_seconds") is not None:
+                    elapsed_raw = run_status.get("elapsed_seconds")
+                    if isinstance(elapsed_raw, (int, float)):
+                        elapsed_secs = max(0.0, float(elapsed_raw))
 
                 # Derive phase from elapsed time
                 derived_phase = "PREPARING"
@@ -2285,11 +2687,13 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 ):
                     derived_phase = "PROCESSING"
 
-                # Only set phase if not already set by registry
-                if not payload.get("phase"):
+                # Apply derived phase:
+                # - Always override if derived_phase is PROCESSING (post-run period)
+                # - Otherwise only set if no phase from run_status
+                if derived_phase == "PROCESSING" or not payload.get("phase"):
                     payload["phase"] = derived_phase
 
-                # Add timing info
+                # Update timing with accurate elapsed
                 payload["timing"] = {
                     "warmup_seconds": warmup_secs,
                     "run_seconds": run_secs,
@@ -2298,8 +2702,15 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 }
             except Exception as e:
                 logger.debug(
-                    "Failed to derive timing for multi-node test %s: %s", test_id, e
+                    "Failed to derive timing for worker-based test %s: %s", test_id, e
                 )
+
+        # For completed runs with pending enrichment, show PROCESSING phase
+        # This applies to both single-worker and multi-worker tests
+        final_status = str(payload.get("status") or "").upper()
+        final_enrichment = str(enrichment_status_live or "").upper()
+        if final_status == "COMPLETED" and final_enrichment == "PENDING":
+            payload["phase"] = "PROCESSING"
 
         return payload
     except HTTPException:
@@ -2373,52 +2784,32 @@ async def list_query_executions(
         where_sql = "WHERE " + " AND ".join(where_clauses)
         offset = max(page - 1, 0) * page_size
 
-        async def _run_query(*, extended: bool) -> list[Any]:
-            cols_sql = """
-                EXECUTION_ID,
-                QUERY_ID,
-                QUERY_KIND,
-                START_TIME,
-                END_TIME,
-                DURATION_MS,
-                APP_ELAPSED_MS,
-                SF_EXECUTION_MS,
-                ROWS_AFFECTED,
-                WAREHOUSE
-            """
-            if extended:
-                cols_sql += """,
-                SF_CLUSTER_NUMBER,
-                SF_QUEUED_OVERLOAD_MS,
-                SF_QUEUED_PROVISIONING_MS,
-                SF_PCT_SCANNED_FROM_CACHE
-                """
+        cols_sql = """
+            EXECUTION_ID,
+            QUERY_ID,
+            QUERY_KIND,
+            START_TIME,
+            END_TIME,
+            DURATION_MS,
+            APP_ELAPSED_MS,
+            SF_EXECUTION_MS,
+            ROWS_AFFECTED,
+            WAREHOUSE,
+            SF_CLUSTER_NUMBER,
+            SF_QUEUED_OVERLOAD_MS,
+            SF_QUEUED_PROVISIONING_MS,
+            SF_PCT_SCANNED_FROM_CACHE
+        """
 
-            query = f"""
-            SELECT
-                {cols_sql}
-            FROM {prefix}.QUERY_EXECUTIONS
-            {where_sql}
-            ORDER BY {sort_col} {dir_sql} NULLS LAST, START_TIME DESC
-            LIMIT ? OFFSET ?
-            """
-            return await pool.execute_query(query, params=[*params, page_size, offset])
-
-        try:
-            rows = await _run_query(extended=True)
-            extended = True
-        except Exception as e:
-            # Backward-compat: older schemas won't have SF_* columns.
-            msg = str(e).lower()
-            if (
-                "invalid identifier" in msg
-                or "unknown column" in msg
-                or "does not exist" in msg
-            ):
-                rows = await _run_query(extended=False)
-                extended = False
-            else:
-                raise
+        query = f"""
+        SELECT
+            {cols_sql}
+        FROM {prefix}.QUERY_EXECUTIONS
+        {where_sql}
+        ORDER BY {sort_col} {dir_sql} NULLS LAST, START_TIME DESC
+        LIMIT ? OFFSET ?
+        """
+        rows = await pool.execute_query(query, params=[*params, page_size, offset])
 
         count_query = f"SELECT COUNT(*) FROM {prefix}.QUERY_EXECUTIONS {where_sql}"
         count_rows = await pool.execute_query(count_query, params=params)
@@ -2427,40 +2818,22 @@ async def list_query_executions(
 
         results: list[dict[str, Any]] = []
         for row in rows:
-            if extended:
-                (
-                    execution_id,
-                    query_id,
-                    query_kind,
-                    start_time,
-                    end_time,
-                    duration_ms,
-                    app_elapsed_ms,
-                    sf_execution_ms,
-                    rows_affected,
-                    warehouse,
-                    sf_cluster_number,
-                    sf_queued_overload_ms,
-                    sf_queued_provisioning_ms,
-                    sf_pct_scanned_from_cache,
-                ) = row
-            else:
-                (
-                    execution_id,
-                    query_id,
-                    query_kind,
-                    start_time,
-                    end_time,
-                    duration_ms,
-                    app_elapsed_ms,
-                    sf_execution_ms,
-                    rows_affected,
-                    warehouse,
-                ) = row
-                sf_cluster_number = None
-                sf_queued_overload_ms = None
-                sf_queued_provisioning_ms = None
-                sf_pct_scanned_from_cache = None
+            (
+                execution_id,
+                query_id,
+                query_kind,
+                start_time,
+                end_time,
+                duration_ms,
+                app_elapsed_ms,
+                sf_execution_ms,
+                rows_affected,
+                warehouse,
+                sf_cluster_number,
+                sf_queued_overload_ms,
+                sf_queued_provisioning_ms,
+                sf_pct_scanned_from_cache,
+            ) = row
 
             results.append(
                 {
@@ -2742,7 +3115,7 @@ async def get_test_logs(
         run_id = run_rows[0][0] if run_rows else None
         is_parent = bool(run_id) and str(run_id) == str(test_id)
 
-        nodes: list[dict[str, Any]] = []
+        workers: list[dict[str, Any]] = []
         selected_test_id = test_id
         if is_parent:
             child_rows = await pool.execute_query(
@@ -2765,7 +3138,7 @@ async def get_test_logs(
                         cfg = {}
                 return cfg if isinstance(cfg, dict) else {}
 
-            def _extract_node_context(cfg: dict[str, Any]) -> dict[str, Any]:
+            def _extract_worker_context(cfg: dict[str, Any]) -> dict[str, Any]:
                 template_cfg = cfg.get("template_config", {})
                 if not isinstance(template_cfg, dict):
                     template_cfg = {}
@@ -2773,7 +3146,7 @@ async def get_test_logs(
                 if not isinstance(scenario_cfg, dict):
                     scenario_cfg = {}
                 return {
-                    "node_id": template_cfg.get("node_id"),
+                    "worker_id": template_cfg.get("worker_id"),
                     "worker_group_id": int(scenario_cfg.get("worker_group_id") or 0),
                     "worker_group_count": int(
                         scenario_cfg.get("worker_group_count") or 1
@@ -2781,27 +3154,27 @@ async def get_test_logs(
                 }
 
             for child_id, child_cfg in child_rows:
-                ctx = _extract_node_context(_parse_test_config(child_cfg))
-                node_id = ctx.get("node_id")
+                ctx = _extract_worker_context(_parse_test_config(child_cfg))
+                worker_id = ctx.get("worker_id")
                 group_id = int(ctx.get("worker_group_id") or 0)
                 group_count = int(ctx.get("worker_group_count") or 1)
-                label = node_id or str(child_id)
+                label = worker_id or str(child_id)
                 if group_count > 1:
                     label = f"{label} (group {group_id + 1}/{group_count})"
-                nodes.append(
+                workers.append(
                     {
                         "test_id": str(child_id),
-                        "node_id": node_id,
+                        "worker_id": worker_id,
                         "worker_group_id": group_id,
                         "worker_group_count": group_count,
                         "label": label,
                     }
                 )
 
-            if child_test_id and any(n["test_id"] == child_test_id for n in nodes):
+            if child_test_id and any(w["test_id"] == child_test_id for w in workers):
                 selected_test_id = child_test_id
-            elif nodes:
-                selected_test_id = nodes[0]["test_id"]
+            elif workers:
+                selected_test_id = workers[0]["test_id"]
             else:
                 selected_test_id = test_id
 
@@ -2813,7 +3186,7 @@ async def get_test_logs(
             return {
                 "test_id": test_id,
                 "selected_test_id": selected_test_id,
-                "nodes": nodes,
+                "workers": workers,
                 "logs": logs[offset : offset + limit],
             }
         query = f"""
@@ -2864,7 +3237,7 @@ async def get_test_logs(
         return {
             "test_id": test_id,
             "selected_test_id": selected_test_id,
-            "nodes": nodes,
+            "workers": workers,
             "logs": logs,
         }
     except Exception as e:
@@ -2884,6 +3257,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
     """
     try:
         pool = snowflake_pool.get_default_pool()
+        latency_aggregation_method = None
         query = f"""
         SELECT
             TIMESTAMP,
@@ -2907,7 +3281,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
             )
             run_id = run_rows[0][0] if run_rows else None
             if run_id and str(run_id) == str(test_id):
-                node_query = f"""
+                worker_query = f"""
                 SELECT
                     TIMESTAMP,
                     ELAPSED_SECONDS,
@@ -2916,23 +3290,27 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     P95_LATENCY_MS,
                     P99_LATENCY_MS,
                     ACTIVE_CONNECTIONS,
-                    TARGET_WORKERS,
-                    CUSTOM_METRICS
-                FROM {_prefix()}.NODE_METRICS_SNAPSHOTS
-                WHERE PARENT_RUN_ID = ?
+                    TARGET_CONNECTIONS,
+                    CUSTOM_METRICS,
+                    PHASE
+                FROM {_prefix()}.WORKER_METRICS_SNAPSHOTS
+                WHERE RUN_ID = ?
                 ORDER BY TIMESTAMP ASC
                 """
-                node_rows = await pool.execute_query(node_query, params=[str(run_id)])
-                if node_rows:
+                worker_rows = await pool.execute_query(
+                    worker_query, params=[str(run_id)]
+                )
+                if worker_rows:
+                    latency_aggregation_method = LATENCY_AGGREGATION_METHOD
 
                     @dataclass
                     class _Bucket:
                         timestamp: Any
                         elapsed_seconds: float
                         ops_per_sec: float
-                        p50_latency_ms: list[tuple[float, float]]
-                        p95_latency_ms: list[tuple[float, float]]
-                        p99_latency_ms: list[tuple[float, float]]
+                        p50_latency_ms: list[float]
+                        p95_latency_ms: list[float]
+                        p99_latency_ms: list[float]
                         active_connections: int
                         target_workers: int
                         custom_metrics: list[Any]
@@ -2946,9 +3324,13 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                         p95,
                         p99,
                         active_connections,
-                        target_workers,
+                        target_connections,
                         custom_metrics,
-                    ) in node_rows:
+                        phase,
+                    ) in worker_rows:
+                        phase_value = str(phase or "").strip().upper()
+                        if phase_value and phase_value != "MEASUREMENT":
+                            continue
                         try:
                             # Aggregate to whole-second buckets for history charts.
                             bucket = round(float(elapsed or 0), 0)
@@ -2974,27 +3356,23 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                             float(elapsed or 0), agg.elapsed_seconds
                         )
                         agg.ops_per_sec += float(ops_per_sec or 0)
-                        agg.p50_latency_ms.append(
-                            (float(p50 or 0), float(ops_per_sec or 0))
-                        )
-                        agg.p95_latency_ms.append(
-                            (float(p95 or 0), float(ops_per_sec or 0))
-                        )
-                        agg.p99_latency_ms.append(
-                            (float(p99 or 0), float(ops_per_sec or 0))
-                        )
+                        agg.p50_latency_ms.append(float(p50 or 0))
+                        agg.p95_latency_ms.append(float(p95 or 0))
+                        agg.p99_latency_ms.append(float(p99 or 0))
                         agg.active_connections += int(active_connections or 0)
-                        agg.target_workers += int(target_workers or 0)
+                        agg.target_workers += int(target_connections or 0)
                         if custom_metrics:
                             agg.custom_metrics.append(custom_metrics)
 
-                    def _weighted_avg(values: list[tuple[float, float]]) -> float:
-                        total_w = sum(w for _, w in values)
-                        if total_w <= 0:
-                            if not values:
-                                return 0.0
-                            return float(sum(v for v, _ in values) / len(values))
-                        return float(sum(v * w for v, w in values) / total_w)
+                    def _avg(values: list[float]) -> float:
+                        if not values:
+                            return 0.0
+                        return float(sum(values) / len(values))
+
+                    def _max(values: list[float]) -> float:
+                        if not values:
+                            return 0.0
+                        return float(max(values))
 
                     def _sum_dicts(
                         dicts: list[dict[str, Any]],
@@ -3062,9 +3440,9 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                                 agg.timestamp,
                                 agg.elapsed_seconds,
                                 agg.ops_per_sec,
-                                _weighted_avg(agg.p50_latency_ms),
-                                _weighted_avg(agg.p95_latency_ms),
-                                _weighted_avg(agg.p99_latency_ms),
+                                _avg(agg.p50_latency_ms),
+                                _max(agg.p95_latency_ms),
+                                _max(agg.p99_latency_ms),
                                 agg.active_connections,
                                 agg.target_workers,
                                 custom_agg,
@@ -3218,15 +3596,20 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 }
             )
 
-        return {"test_id": test_id, "snapshots": snapshots, "count": len(snapshots)}
+        return {
+            "test_id": test_id,
+            "snapshots": snapshots,
+            "count": len(snapshots),
+            "latency_aggregation_method": latency_aggregation_method,
+        }
     except Exception as e:
         raise http_exception("get test metrics", e)
 
 
-@router.get("/{test_id}/node-metrics")
-async def get_node_metrics(test_id: str) -> dict[str, Any]:
+@router.get("/{test_id}/worker-metrics")
+async def get_worker_metrics(test_id: str) -> dict[str, Any]:
     """
-    Fetch per-node time-series metrics snapshots for multi-node runs.
+    Fetch per-worker time-series metrics snapshots for multi-worker runs.
     """
     try:
         pool = snowflake_pool.get_default_pool()
@@ -3241,7 +3624,7 @@ async def get_node_metrics(test_id: str) -> dict[str, Any]:
 
         query = f"""
         SELECT
-            NODE_ID,
+            WORKER_ID,
             WORKER_GROUP_ID,
             WORKER_GROUP_COUNT,
             TIMESTAMP,
@@ -3251,83 +3634,21 @@ async def get_node_metrics(test_id: str) -> dict[str, Any]:
             P95_LATENCY_MS,
             P99_LATENCY_MS,
             ACTIVE_CONNECTIONS,
-            TARGET_WORKERS,
-            CUSTOM_METRICS
-        FROM {prefix}.NODE_METRICS_SNAPSHOTS
-        WHERE PARENT_RUN_ID = ?
-        ORDER BY WORKER_GROUP_ID ASC, TIMESTAMP ASC
+            TARGET_CONNECTIONS,
+            CUSTOM_METRICS,
+            PHASE
+        FROM {prefix}.WORKER_METRICS_SNAPSHOTS
+        WHERE RUN_ID = ?
+        ORDER BY WORKER_GROUP_ID ASC, WORKER_ID ASC, TIMESTAMP ASC
         """
         rows = await pool.execute_query(query, params=[parent_run_id])
-        using_fallback = False
         if not rows:
-            if not run_id:
-                return {
-                    "test_id": test_id,
-                    "parent_run_id": parent_run_id,
-                    "available": False,
-                    "nodes": [],
-                }
-
-            fallback_rows = await pool.execute_query(
-                f"""
-                SELECT
-                    tr.TEST_ID,
-                    tr.TEST_CONFIG,
-                    ms.TIMESTAMP,
-                    ms.ELAPSED_SECONDS,
-                    ms.QPS,
-                    ms.P50_LATENCY_MS,
-                    ms.P95_LATENCY_MS,
-                    ms.P99_LATENCY_MS,
-                    ms.ACTIVE_CONNECTIONS,
-                    ms.TARGET_WORKERS,
-                    ms.CUSTOM_METRICS
-                FROM {prefix}.TEST_RESULTS tr
-                JOIN {prefix}.METRICS_SNAPSHOTS ms
-                  ON ms.TEST_ID = tr.TEST_ID
-                WHERE tr.RUN_ID = ?
-                  AND tr.TEST_ID <> ?
-                ORDER BY tr.TEST_ID ASC, ms.TIMESTAMP ASC
-                """,
-                params=[parent_run_id, parent_run_id],
-            )
-            if not fallback_rows:
-                return {
-                    "test_id": test_id,
-                    "parent_run_id": parent_run_id,
-                    "available": False,
-                    "nodes": [],
-                }
-            rows = fallback_rows
-            using_fallback = True
-
-            def _parse_test_config(raw: Any) -> dict[str, Any]:
-                cfg: Any = raw
-                if isinstance(cfg, str):
-                    try:
-                        cfg = json.loads(cfg)
-                    except Exception:
-                        cfg = {}
-                if not isinstance(cfg, dict):
-                    return {}
-                return cfg
-
-            def _extract_node_context(cfg: dict[str, Any]) -> dict[str, Any]:
-                template_cfg = (
-                    cfg.get("template_config") if isinstance(cfg, dict) else {}
-                )
-                if not isinstance(template_cfg, dict):
-                    template_cfg = {}
-                scenario_cfg = cfg.get("scenario") if isinstance(cfg, dict) else {}
-                if not isinstance(scenario_cfg, dict):
-                    scenario_cfg = {}
-                return {
-                    "node_id": template_cfg.get("node_id"),
-                    "worker_group_id": int(scenario_cfg.get("worker_group_id") or 0),
-                    "worker_group_count": int(
-                        scenario_cfg.get("worker_group_count") or 1
-                    ),
-                }
+            return {
+                "test_id": test_id,
+                "parent_run_id": parent_run_id,
+                "available": False,
+                "workers": [],
+            }
 
         def _to_int(v: Any) -> int:
             try:
@@ -3341,46 +3662,24 @@ async def get_node_metrics(test_id: str) -> dict[str, Any]:
             except Exception:
                 return 0.0
 
-        nodes: dict[str, dict[str, Any]] = {}
-        node_context_cache: dict[str, dict[str, Any]] = {}
+        workers: dict[str, dict[str, Any]] = {}
         for row in rows:
-            if using_fallback:
-                (
-                    test_id_row,
-                    test_config,
-                    timestamp,
-                    elapsed_seconds,
-                    qps,
-                    p50,
-                    p95,
-                    p99,
-                    active_connections,
-                    target_workers,
-                    custom_metrics,
-                ) = row
-                ctx = node_context_cache.get(str(test_id_row))
-                if ctx is None:
-                    cfg = _parse_test_config(test_config)
-                    ctx = _extract_node_context(cfg)
-                    node_context_cache[str(test_id_row)] = ctx
-                node_id = ctx.get("node_id")
-                worker_group_id = int(ctx.get("worker_group_id") or 0)
-                worker_group_count = int(ctx.get("worker_group_count") or 1)
-            else:
-                (
-                    node_id,
-                    worker_group_id,
-                    worker_group_count,
-                    timestamp,
-                    elapsed_seconds,
-                    qps,
-                    p50,
-                    p95,
-                    p99,
-                    active_connections,
-                    target_workers,
-                    custom_metrics,
-                ) = row
+            (
+                worker_id_from_row,
+                worker_group_id,
+                worker_group_count,
+                timestamp,
+                elapsed_seconds,
+                qps,
+                p50,
+                p95,
+                p99,
+                active_connections,
+                target_connections,
+                custom_metrics,
+                _phase,
+            ) = row
+            worker_id_val = worker_id_from_row
 
             cm: Any = custom_metrics
             if isinstance(cm, str):
@@ -3396,22 +3695,22 @@ async def get_node_metrics(test_id: str) -> dict[str, Any]:
                 if isinstance(maybe_res, dict):
                     resources = maybe_res
 
-            key = f"{node_id or 'node'}:{int(worker_group_id or 0)}"
-            node = nodes.get(key)
-            if node is None:
-                node = {
+            key = f"{worker_id_val or 'worker'}:{int(worker_group_id or 0)}"
+            worker = workers.get(key)
+            if worker is None:
+                worker = {
                     "key": key,
-                    "node_id": node_id,
+                    "worker_id": worker_id_val,
                     "worker_group_id": int(worker_group_id or 0),
                     "worker_group_count": int(worker_group_count or 0),
                     "snapshots": [],
                 }
-                nodes[key] = node
+                workers[key] = worker
 
-            snapshots = node.get("snapshots")
+            snapshots = worker.get("snapshots")
             if not isinstance(snapshots, list):
                 snapshots = []
-                node["snapshots"] = snapshots
+                worker["snapshots"] = snapshots
             snapshots_list = cast(list[dict[str, Any]], snapshots)
             snapshots_list.append(
                 {
@@ -3424,7 +3723,7 @@ async def get_node_metrics(test_id: str) -> dict[str, Any]:
                     "p95_latency": float(p95 or 0),
                     "p99_latency": float(p99 or 0),
                     "active_connections": _to_int(active_connections),
-                    "target_workers": _to_int(target_workers),
+                    "target_workers": _to_int(target_connections),
                     "resources_cpu_percent": _to_float(resources.get("cpu_percent")),
                     "resources_memory_mb": _to_float(resources.get("memory_mb")),
                     "resources_host_cpu_percent": _to_float(
@@ -3446,10 +3745,68 @@ async def get_node_metrics(test_id: str) -> dict[str, Any]:
             "test_id": test_id,
             "parent_run_id": parent_run_id,
             "available": True,
-            "nodes": list(nodes.values()),
+            "workers": list(workers.values()),
         }
     except Exception as e:
-        raise http_exception("get node metrics", e)
+        raise http_exception("get worker metrics", e)
+
+
+@router.get("/{test_id}/warehouse-details")
+async def get_warehouse_details(test_id: str) -> dict[str, Any]:
+    """
+    Fetch current warehouse configuration for a test.
+
+    Returns MCW settings, scaling policy, query acceleration config, and current
+    cluster state (started, running, queued) via SHOW WAREHOUSES.
+
+    Used by the dashboard for real-time MCW status display during active tests.
+    """
+    from backend.core.results_store import fetch_warehouse_config_snapshot
+
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        # Get the warehouse name from the test record
+        rows = await pool.execute_query(
+            f"""
+            SELECT WAREHOUSE
+            FROM {prefix}.TEST_RESULTS
+            WHERE TEST_ID = ?
+            """,
+            params=[test_id],
+        )
+
+        if not rows or not rows[0] or not rows[0][0]:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"message": "Test not found or no warehouse configured"},
+            )
+
+        warehouse_name = str(rows[0][0]).strip()
+        if not warehouse_name:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"message": "No warehouse configured for this test"},
+            )
+
+        # Fetch current warehouse config via SHOW WAREHOUSES
+        config = await fetch_warehouse_config_snapshot(warehouse_name)
+
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"message": f"Warehouse '{warehouse_name}' not found"},
+            )
+
+        return {
+            "test_id": test_id,
+            "warehouse": config,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise http_exception("get warehouse details", e)
 
 
 @router.get("/{test_id}/warehouse-timeseries")
@@ -3460,10 +3817,10 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
     This is derived from QUERY_EXECUTIONS (post-processed) and expanded to a
     per-second timeline based on TEST_RESULTS.START_TIME + TEST_RESULTS.DURATION_SECONDS.
 
-    For parent runs (multi-node), aggregates data from all child runs.
+    For parent runs (multi-worker), aggregates data from all child runs.
 
-    Falls back to real-time METRICS_SNAPSHOTS cluster data when QUERY_HISTORY
-    enrichment is incomplete (which happens due to ~45s latency in QUERY_HISTORY).
+    Falls back to WAREHOUSE_POLL_SNAPSHOTS when QUERY_HISTORY enrichment is
+    incomplete (which happens due to ~45s latency in QUERY_HISTORY).
     """
     try:
         pool = snowflake_pool.get_default_pool()
@@ -3514,19 +3871,24 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
                 JOIN child_ids ci ON ci.TEST_ID = wt.TEST_ID
                 GROUP BY wt.SECOND
             ),
-            realtime_clusters AS (
+            poller_clusters AS (
                 SELECT
-                    DATE_TRUNC('second', ms.TIMESTAMP) AS SECOND,
-                    MAX(COALESCE(ms.CUSTOM_METRICS:warehouse:started_clusters::INTEGER, 0)) AS STARTED_CLUSTERS
-                FROM {prefix}.METRICS_SNAPSHOTS ms
-                JOIN child_ids ci ON ci.TEST_ID = ms.TEST_ID
-                GROUP BY DATE_TRUNC('second', ms.TIMESTAMP)
+                    DATE_TRUNC('second', TIMESTAMP) AS SECOND,
+                    MAX(COALESCE(STARTED_CLUSTERS, 0)) AS STARTED_CLUSTERS
+                FROM {prefix}.WAREHOUSE_POLL_SNAPSHOTS
+                WHERE RUN_ID = ?
+                GROUP BY DATE_TRUNC('second', TIMESTAMP)
             )
             SELECT
                 s.SECOND AS TS,
                 s.ELAPSED_SECONDS,
                 COALESCE(wh.ACTIVE_CLUSTERS, 0) AS ACTIVE_CLUSTERS,
-                COALESCE(rt.STARTED_CLUSTERS, 0) AS REALTIME_CLUSTERS,
+                -- Forward-fill: use last known poller value for gaps between ~5s polls
+                COALESCE(
+                    pc.STARTED_CLUSTERS,
+                    LAST_VALUE(pc.STARTED_CLUSTERS IGNORE NULLS) OVER (ORDER BY s.SECOND ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                    0
+                ) AS REALTIME_CLUSTERS,
                 COALESCE(wh.QUERIES_STARTED, 0) AS QUERIES_STARTED,
                 COALESCE(wh.TOTAL_QUEUE_OVERLOAD_MS, 0) AS TOTAL_QUEUE_OVERLOAD_MS,
                 COALESCE(wh.TOTAL_QUEUE_PROVISIONING_MS, 0) AS TOTAL_QUEUE_PROVISIONING_MS,
@@ -3540,11 +3902,11 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
                 ) AS AVG_QUEUE_PROVISIONING_MS
             FROM seconds s
             LEFT JOIN wh_data wh ON wh.SECOND = s.SECOND
-            LEFT JOIN realtime_clusters rt ON rt.SECOND = s.SECOND
+            LEFT JOIN poller_clusters pc ON pc.SECOND = s.SECOND
             ORDER BY s.SECOND ASC
             """
             rows = await pool.execute_query(
-                query, params=[test_id, test_id, test_id, test_id]
+                query, params=[test_id, test_id, test_id, test_id, test_id]
             )
         else:
             query = f"""
@@ -3579,7 +3941,12 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
                 s.SECOND AS TS,
                 s.ELAPSED_SECONDS,
                 COALESCE(wt.ACTIVE_CLUSTERS, 0) AS ACTIVE_CLUSTERS,
-                COALESCE(rt.STARTED_CLUSTERS, 0) AS REALTIME_CLUSTERS,
+                -- Forward-fill: use last known poller value for gaps between ~5s polls
+                COALESCE(
+                    rt.STARTED_CLUSTERS,
+                    LAST_VALUE(rt.STARTED_CLUSTERS IGNORE NULLS) OVER (ORDER BY s.SECOND ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                    0
+                ) AS REALTIME_CLUSTERS,
                 COALESCE(wt.QUERIES_STARTED, 0) AS QUERIES_STARTED,
                 COALESCE(wt.TOTAL_QUEUE_OVERLOAD_MS, 0) AS TOTAL_QUEUE_OVERLOAD_MS,
                 COALESCE(wt.TOTAL_QUEUE_PROVISIONING_MS, 0) AS TOTAL_QUEUE_PROVISIONING_MS,
@@ -3618,7 +3985,9 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
 
             active_clusters_i = int(active_clusters or 0)
             realtime_clusters_i = int(realtime_clusters or 0)
-            best_clusters = max(active_clusters_i, realtime_clusters_i)
+            # Prefer poller data (realtime_clusters) when available - it's from SHOW WAREHOUSES
+            # and is accurate. Fall back to query-derived active_clusters only if no poller data.
+            best_clusters = realtime_clusters_i if realtime_clusters_i > 0 else active_clusters_i
             queries_started_i = int(queries_started or 0)
             total_overload_f = _to_float_or_none(total_overload_ms) or 0.0
             total_provisioning_f = _to_float_or_none(total_provisioning_ms) or 0.0
@@ -3918,6 +4287,10 @@ async def delete_test(test_id: str) -> None:
 
 @router.post("/{test_id}/rerun")
 async def rerun_test(test_id: str) -> dict[str, Any]:
+    """Re-run a test with the same configuration via OrchestratorService.
+
+    This endpoint creates a new run from the original test's template.
+    """
     try:
         pool = snowflake_pool.get_default_pool()
         rows = await pool.execute_query(
@@ -3931,18 +4304,31 @@ async def rerun_test(test_id: str) -> dict[str, Any]:
         if isinstance(test_config, str):
             test_config = json.loads(test_config)
 
-        template_id = test_config.get("template_id") or test_config.get(
-            "template", {}
-        ).get("template_id")
+        template_id = test_config.get("template_id")
         if not template_id:
             raise HTTPException(
                 status_code=400, detail="Cannot rerun: missing template_id"
             )
 
-        running = await registry.start_from_template(str(template_id), auto_start=False)
-        return {"new_test_id": running.test_id}
+        # Load template and create run via orchestrator
+        template = await registry._load_template(str(template_id))
+        template_config = dict(template.get("config") or {})
+        template_name = str(template.get("template_name") or "")
+
+        scenario = registry._scenario_from_template_config(
+            template_name, template_config
+        )
+
+        run_id = await orchestrator.create_run(
+            template_id=str(template.get("template_id") or template_id),
+            template_config=template_config,
+            scenario=scenario,
+        )
+        return {"new_test_id": run_id}
     except HTTPException:
         raise
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Template not found")
     except Exception as e:
         raise http_exception("rerun test", e)
 
@@ -4004,9 +4390,9 @@ async def retry_enrichment(test_id: str) -> dict[str, Any]:
         if isinstance(test_config, str):
             test_config = json.loads(test_config)
 
-        scenario_config = test_config.get("scenario") or test_config.get(
-            "template_config", {}
-        )
+        scenario_config = test_config.get("scenario")
+        if not isinstance(scenario_config, dict):
+            scenario_config = {}
         collect_query_history = bool(
             scenario_config.get("collect_query_history", False)
         )
@@ -4063,15 +4449,43 @@ async def get_test_enrichment_status(test_id: str) -> dict[str, Any]:
     from backend.core.results_store import get_enrichment_status
 
     try:
-        status_info = await get_enrichment_status(test_id=test_id)
-        if status_info is None:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+        rows = await pool.execute_query(
+            f"""
+            SELECT RUN_ID, STATUS, ENRICHMENT_STATUS, ENRICHMENT_ERROR
+            FROM {prefix}.TEST_RESULTS
+            WHERE TEST_ID = ?
+            """,
+            params=[test_id],
+        )
+        if not rows:
             raise HTTPException(status_code=404, detail="Test not found")
 
-        enrichment_status = str(status_info.get("enrichment_status") or "").upper()
-        test_status = str(status_info["test_status"]).upper()
-        total_queries = status_info.get("total_queries", 0)
-        enriched_queries = status_info.get("enriched_queries", 0)
-        enrichment_ratio = status_info.get("enrichment_ratio", 0.0)
+        run_id, status_db, enrichment_status_db, enrichment_error_db = rows[0]
+        test_status = str(status_db or "").upper()
+        is_parent_run = bool(run_id) and str(run_id) == str(test_id)
+
+        if is_parent_run and run_id:
+            agg_status, agg_error = await _aggregate_parent_enrichment_status(
+                pool=pool, run_id=str(run_id)
+            )
+            (
+                total_queries,
+                enriched_queries,
+                enrichment_ratio,
+            ) = await _aggregate_parent_enrichment_stats(pool=pool, run_id=str(run_id))
+            enrichment_status = agg_status or str(enrichment_status_db or "").upper()
+            enrichment_error = agg_error or enrichment_error_db
+        else:
+            status_info = await get_enrichment_status(test_id=test_id)
+            if status_info is None:
+                raise HTTPException(status_code=404, detail="Test not found")
+            enrichment_status = str(status_info.get("enrichment_status") or "").upper()
+            enrichment_error = status_info.get("enrichment_error")
+            total_queries = status_info.get("total_queries", 0)
+            enriched_queries = status_info.get("enriched_queries", 0)
+            enrichment_ratio = status_info.get("enrichment_ratio", 0.0)
 
         is_complete = enrichment_status in ("COMPLETED", "SKIPPED") or (
             enrichment_ratio >= 0.90 and total_queries > 0
@@ -4079,11 +4493,11 @@ async def get_test_enrichment_status(test_id: str) -> dict[str, Any]:
 
         return {
             "test_id": test_id,
-            "test_status": status_info["test_status"],
-            "enrichment_status": status_info["enrichment_status"],
-            "enrichment_error": status_info["enrichment_error"],
-            "total_queries": total_queries,
-            "enriched_queries": enriched_queries,
+            "test_status": test_status,
+            "enrichment_status": enrichment_status or None,
+            "enrichment_error": enrichment_error,
+            "total_queries": int(total_queries or 0),
+            "enriched_queries": int(enriched_queries or 0),
             "enrichment_ratio_pct": round(enrichment_ratio * 100, 1),
             "is_complete": is_complete,
             "can_retry": (test_status == "COMPLETED" and enrichment_status == "FAILED"),
@@ -4300,7 +4714,7 @@ def _build_qps_prompt(
     warehouse: str,
     warehouse_size: str,
     target_qps: int,
-    min_concurrency: int,
+    min_connections: int,
     max_concurrency: int,
     duration: int,
     total_ops: int,
@@ -4331,7 +4745,7 @@ AUTO-SCALER LOGS (showing controller decisions):
     return f"""You are analyzing a Snowflake QPS mode benchmark test.
 
 **Mode: QPS (Auto-Scale to Target Throughput)**
-This test dynamically scaled workers between {min_concurrency}-{max_concurrency} to achieve a target throughput of {target_qps} ops/sec. The controller adjusts concurrency based on achieved vs target QPS.
+This test dynamically scaled connections between {min_connections}-{max_concurrency} to achieve a target throughput of {target_qps} ops/sec. The controller adjusts concurrency based on achieved vs target QPS.
 
 TEST SUMMARY:
 - Test Name: {test_name}
@@ -4340,7 +4754,7 @@ TEST SUMMARY:
 - Warehouse: {warehouse} ({warehouse_size})
 - Target QPS: {target_qps} ops/sec
 - Achieved QPS: {ops_per_sec:.1f} ops/sec ({target_achieved_pct:.1f}% of target)
-- Worker Range: {min_concurrency}-{max_concurrency}
+- Connection Range: {min_connections}-{max_concurrency}
 - Duration: {duration}s
 - Total Operations: {total_ops} (Reads: {read_ops}, Writes: {write_ops})
 - Failed Operations: {failed_ops} ({error_pct:.2f}%)
@@ -4599,7 +5013,7 @@ async def ai_analysis(
         is_postgres = table_type_u in {"POSTGRES", "SNOWFLAKE_POSTGRES"}
         load_mode = "CONCURRENCY"
         target_qps = None
-        min_concurrency = 1
+        min_connections = 1
         start_concurrency = 5
         concurrency_increment = 10
         step_duration_seconds = 30
@@ -4610,7 +5024,10 @@ async def ai_analysis(
         if isinstance(test_config, dict):
             load_mode = str(test_config.get("load_mode", "CONCURRENCY")).upper()
             target_qps = test_config.get("target_qps")
-            min_concurrency = int(test_config.get("min_concurrency", 1) or 1)
+            scaling_cfg = test_config.get("scaling")
+            if not isinstance(scaling_cfg, dict):
+                scaling_cfg = {}
+            min_connections = int(scaling_cfg.get("min_connections", 1) or 1)
             start_concurrency = int(test_config.get("start_concurrency", 5) or 5)
             concurrency_increment = int(
                 test_config.get("concurrency_increment", 10) or 10
@@ -4788,7 +5205,7 @@ async def ai_analysis(
                 warehouse=warehouse,
                 warehouse_size=warehouse_size,
                 target_qps=target_qps or 100,
-                min_concurrency=min_concurrency,
+                min_connections=min_connections,
                 max_concurrency=concurrency,
                 duration=duration,
                 total_ops=total_ops,

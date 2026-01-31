@@ -9,12 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- feat(orchestrator): persist run creation in `RUN_STATUS` and parent
+  `TEST_RESULTS` with scenario config snapshots.
+- feat(api): add `/api/runs` endpoints for orchestrator run creation/start/stop.
 - UI-driven autoscale option to launch multi-node runs with a total concurrency target.
 - Autoscale controller for scale-out only with host CPU/memory guardrails.
 - History list grouping for multi-node runs with parent/child expand toggle.
-- `NODE_METRICS_SNAPSHOTS` table for per-node metrics in multi-node runs.
+- `WORKER_METRICS_SNAPSHOTS` table for per-node metrics in multi-node runs.
 - Headless worker CLI (`scripts/run_worker.py`) to run template-based workers.
-- Local multi-node orchestrator CLI (`scripts/run_multi_node.py`).
+- feat(worker): control-plane worker mode with RUN_STATUS config, control-event
+  polling, and `WORKER_HEARTBEATS`/`WORKER_METRICS_SNAPSHOTS` persistence.
+- feat(orchestrator): poll loop with heartbeat staleness, guardrail STOP,
+  measurement rollups, and duration-based STOP scheduling.
+- feat(orchestrator): stop_run STOP events with drain timeout, local SIGTERM
+  fallback, and CANCELLED status finalization.
+- feat(orchestrator): persist warehouse poller samples and parent rollups during
+  control-plane polling.
+- feat(orchestrator): controller-owned Find Max steps with per-worker
+  `SET_WORKER_TARGET` events, `RUN_STATUS.FIND_MAX_STATE`, and step history
+  persistence.
+- test(orchestrator): unit coverage for poll loop, stop semantics, and parent
+  rollups.
 - Worker CLI overrides for concurrency/QPS parameters.
 - Per-node metrics snapshots persisted during multi-node runs.
 - Aggregated parent-run metrics stored in `TEST_RESULTS` for multi-node runs.
@@ -38,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   STOPPED, CANCELLED, ERROR) instead of only COMPLETED.
 - QPS load mode to dynamically scale worker tasks to hit a target ops/sec, with
   warmup ramping to reduce lag at the start of the measurement window.
+- feat(orchestrator): add fail-fast checks for results store connectivity,
+  required control tables, and template presence on run create/start.
+- feat(ui): show scaling mode summary and bounds status on live + history dashboards.
 - FIND_MAX_CONCURRENCY live dashboard card: baseline vs current p95 (with % delta
   and max threshold), current → next worker target (with countdown), and a
   plain-text conclusion reason on completion.
@@ -47,6 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SLO status (when targets are configured).
 - Configure page + dashboard SLO table now support optional per-query-type P99
   latency targets (in addition to existing P95 + error-rate targets).
+- Live dashboard worker grid with per-worker health and on-demand snapshot
+  drilldowns.
 - Live dashboard counter for in-flight queries (concurrent DB operations).
 - Live, per-test Snowflake query state telemetry (RUNNING/QUEUED/BLOCKED) derived
   from `INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE` using a per-test `QUERY_TAG`.
@@ -70,8 +90,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- perf(api): parallelize initial queries in `GET /api/tests/{test_id}` endpoint.
+  TEST_RESULTS, RUN_STATUS, and enrichment status now fetch concurrently in Phase 1
+  (previously sequential, adding ~1.5-3s latency). Also made `update_parent_run_aggregate()`
+  fire-and-forget to avoid blocking the API response.
+- fix(ws): derive WebSocket elapsed timing in Snowflake (TIMESTAMPDIFF +
+  duration_seconds) to avoid timezone drift and post-completion growth.
+- fix(ui): gate live WebSocket to measurement/STOPPING and prefer
+  `timing.elapsed_display_seconds` for timer sync.
+- fix(orchestrator): reset parent START_TIME on run start to avoid stale elapsed
+  baselines.
+- fix(api): treat zero duration_seconds as missing and cast CURRENT_TIMESTAMP
+  to TIMESTAMP_NTZ for elapsed calculations.
 - Live multi-node dashboard now streams parent metrics with correct payload shape,
   so phases and real-time charts update during autoscale runs.
+- fix(ui): show PROCESSING for parent runs while post-run enrichment is pending.
+- fix(api): keep final elapsed time from start/end timestamps instead of the
+  configured duration on completion.
+- fix(ui): keep Total Time stable during PROCESSING instead of resetting to 0.
+- fix(ui): prevent phase regression from PROCESSING back to RUNNING on late payloads.
+- fix(orchestrator): prevent find-max step tracking from failing in the poll loop.
+- test(orchestrator): align poll loop tests with server-side elapsed timing.
 - Parent multi-node timing now interprets TIMESTAMP_NTZ start times as UTC so
   warmup progresses to RUNNING instead of resetting at 0s.
 - Parent multi-node dashboards now derive phase progression from per-node snapshots
@@ -82,15 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and starting only when the user clicks Start.
 - Autoscale worker launch now uses async subprocesses to avoid blocking the
   FastAPI event loop under load.
-- Node metrics history now falls back to `METRICS_SNAPSHOTS` when per-node
-  snapshots are missing, and the multi-node section is hidden for single-node
-  runs.
 - Multi-node parent aggregation no longer counts the parent row as a child,
   allowing parent status and metrics to finalize correctly.
 - Multi-node parent runs now refresh aggregation when a completed parent is
   viewed or when the orchestrator finishes, preventing stale RUNNING status.
 - History metrics endpoint now aggregates parent time-series data from
-  `NODE_METRICS_SNAPSHOTS` when `METRICS_SNAPSHOTS` is empty.
+  `WORKER_METRICS_SNAPSHOTS` when `METRICS_SNAPSHOTS` is empty.
+- Multi-worker live aggregation now uses slowest-worker P95/P99 and averages P50,
+  with warehouse queueing fallback sourced from `WAREHOUSE_POLL_SNAPSHOTS`.
 - Test status incorrectly set to CANCELLED when post-processing (enrichment) was
   interrupted. Now saves COMPLETED status immediately after test execution succeeds,
   before starting long-running enrichment. Enrichment failures no longer affect
@@ -116,11 +154,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- refactor(terminology): rename "node" to "worker" across API, UI, and docs to
+  align with project nomenclature decision. Changes include:
+  - API endpoint `/api/tests/{test_id}/node-metrics` → `/worker-metrics`
+  - API response fields: `nodes` → `workers`, `node_id` → `worker_id`
+  - API response fields: `node_find_max_results` → `worker_find_max_results`,
+    `node_index` → `worker_index`, `total_nodes` → `total_workers`,
+    `active_nodes` → `active_workers`
+  - UI labels "Node Metrics", "Node Logs" → "Worker Metrics", "Worker Logs"
+  - UI labels "All N Nodes" → "All N Workers", "Node X" → "Worker X"
+  - JavaScript state variables and functions renamed (`nodeMetrics*` → `workerMetrics*`)
+  - `docs/next-*.md` headers updated from "Multi-Node" to "Multi-Worker"
+  - Internal autoscale code: `target_node_count` → `target_worker_count`,
+    `started_nodes` → `started_workers`, `per_node_*` → `per_worker_*`
+  - Autoscale state fields: `node_count` → `worker_count`,
+    `target_qps_per_node` → `target_qps_per_worker`
+  - CLI argument `--node-id` renamed to `--worker-id`
+- refactor(api): parent run status/phase/timing now sourced from `RUN_STATUS`.
+- chore(schema): remove legacy per-node snapshot DDL; consolidate on
+  `WORKER_METRICS_SNAPSHOTS`.
+- docs(plan): mark OrchestratorService create/prepare tasks complete.
 - Autoscale total target now derives from the load mode's max worker settings
   instead of a separate autoscale target field.
+- config: rename `min_concurrency` to `scaling.min_connections` for QPS per-worker
+  floors, with updated UI bindings and CLI flag (`--min-connections`).
+- docs(runbooks): document manual multi-worker acceptance flow and current
+  template store for fail-fast checks.
 - QPS auto-scale controller now ramps more gradually (lower gains, 5s control
   interval, tighter step caps, and a short under-target streak before scale-up)
   to reduce overshoot.
+- feat(orchestrator): persist bounds completion reason when bounded QPS hits the
+  max ceiling and throughput remains under target.
 - History search now matches test name, table/database/schema, and warehouse fields.
 - History page headers are compact and filters are collapsible with icons in results.
 - FIND_MAX_CONCURRENCY no longer stops/backoffs on a step-over-step P95 spike when
@@ -139,6 +203,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Template list hides duration for FIND_MAX_CONCURRENCY templates.
 - Postgres dashboards now show a Postgres database label and connection stats
   instead of Snowflake warehouse sizing.
+- WebSocket streaming now emits `RUN_UPDATE` with `run` + `workers` payloads,
+  mirroring aggregate metrics for existing charts and surfacing controller
+  warehouse poller snapshots at the top level.
 - AI analysis now renders Postgres stats (and uses N/A for missing queue
   metrics) instead of failing on null warehouse metrics.
 - Compare Results page is now folded into History; `/comparison` redirects to `/history`.
@@ -151,6 +218,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - Removed unused `sql/schema/migrations` folder and files.
+- chore(cli): remove deprecated local multi-worker script (`scripts/run_multi_worker.py`).
+- refactor(api): drop legacy compatibility branches in results/worker-metrics payloads.
+- refactor(ui): remove legacy template card view and edit fallback paths.
 
 ### Performance
 

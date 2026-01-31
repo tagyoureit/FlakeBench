@@ -198,49 +198,53 @@ CREATE OR ALTER TABLE METRICS_SNAPSHOTS (
 );
 
 -- =============================================================================
--- NODE_METRICS_SNAPSHOTS: Per-node time-series metrics (multi-node runs)
+-- WORKER_METRICS_SNAPSHOTS: Per-worker time-series metrics (multi-worker runs)
 -- =============================================================================
-CREATE OR ALTER TABLE NODE_METRICS_SNAPSHOTS (
-    snapshot_id VARCHAR(36),
-    parent_run_id VARCHAR(36) NOT NULL,
-    test_id VARCHAR(36),
+CREATE OR ALTER TABLE WORKER_METRICS_SNAPSHOTS (
+    snapshot_id VARCHAR(36) NOT NULL,
+    
+    -- Identity
+    run_id VARCHAR(36) NOT NULL,
+    test_id VARCHAR(36) NOT NULL,
+    worker_id VARCHAR(100) NOT NULL,
     worker_group_id INTEGER NOT NULL,
     worker_group_count INTEGER NOT NULL,
-    node_id VARCHAR(200),
-
+    
     -- Timing
     timestamp TIMESTAMP_NTZ NOT NULL,
-    elapsed_seconds FLOAT NOT NULL,
-
-    -- Core metrics
-    total_queries INTEGER NOT NULL,
-    qps FLOAT NOT NULL,
-
-    -- Latency metrics (milliseconds)
-    p50_latency_ms FLOAT NOT NULL,
-    p95_latency_ms FLOAT NOT NULL,
-    p99_latency_ms FLOAT NOT NULL,
-    avg_latency_ms FLOAT NOT NULL,
-
-    -- Operation breakdown
+    elapsed_seconds FLOAT,
+    
+    -- Phase (for aggregation filtering)
+    phase VARCHAR(50),
+    
+    -- Counts (cumulative since MEASUREMENT start; 0 during WARMUP)
+    total_queries INTEGER DEFAULT 0,
     read_count INTEGER DEFAULT 0,
     write_count INTEGER DEFAULT 0,
     error_count INTEGER DEFAULT 0,
-
-    -- Throughput
-    bytes_per_second FLOAT DEFAULT 0.0,
-    rows_per_second FLOAT DEFAULT 0.0,
-
-    -- Connection pool
-    active_connections INTEGER DEFAULT 0,
-    target_workers INTEGER DEFAULT 0,
     
-    -- Phase tracking (WARMUP, MEASUREMENT, COOLDOWN)
-    phase VARCHAR(50),
-
-    -- Additional metrics (JSON)
+    -- Throughput (queries per second in the last interval)
+    qps FLOAT DEFAULT 0,
+    
+    -- Latency (milliseconds, computed over last interval)
+    p50_latency_ms FLOAT,
+    p95_latency_ms FLOAT,
+    p99_latency_ms FLOAT,
+    avg_latency_ms FLOAT,
+    min_latency_ms FLOAT,
+    max_latency_ms FLOAT,
+    
+    -- Connections
+    active_connections INTEGER DEFAULT 0,
+    target_connections INTEGER DEFAULT 0,
+    
+    -- Resources (optional)
+    cpu_percent FLOAT,
+    memory_percent FLOAT,
+    
+    -- Custom metrics (VARIANT for extensibility)
     custom_metrics VARIANT,
-
+    
     -- Audit
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
@@ -347,7 +351,7 @@ CREATE OR ALTER TABLE FIND_MAX_STEP_HISTORY (
     step_end_time TIMESTAMP_NTZ,
     step_duration_seconds FLOAT,
     
-    -- Aggregate Metrics (worst-node for P95/P99)
+    -- Aggregate Metrics (worst-worker for P95/P99)
     total_queries INTEGER,
     qps FLOAT,
     p50_latency_ms FLOAT,

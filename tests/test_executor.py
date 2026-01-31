@@ -296,6 +296,55 @@ def test_metrics_callback():
         return False
 
 
+def test_worker_group_sharding_offsets_pool_indices():
+    table = TableConfig(
+        name="test_table",
+        table_type=TableType.STANDARD,
+        columns={"id": "NUMBER"},
+    )
+    scenario0 = TestScenario(
+        name="sharding_test",
+        description="Worker group sharding offset test",
+        duration_seconds=5,
+        warmup_seconds=1,
+        concurrent_connections=2,
+        workload_type=WorkloadType.READ_HEAVY,
+        read_batch_size=10,
+        write_batch_size=1,
+        metrics_interval_seconds=1.0,
+        table_configs=[table],
+        worker_group_id=0,
+        worker_group_count=2,
+    )
+    scenario1 = TestScenario(
+        name="sharding_test",
+        description="Worker group sharding offset test",
+        duration_seconds=5,
+        warmup_seconds=1,
+        concurrent_connections=2,
+        workload_type=WorkloadType.READ_HEAVY,
+        read_batch_size=10,
+        write_batch_size=1,
+        metrics_interval_seconds=1.0,
+        table_configs=[table],
+        worker_group_id=1,
+        worker_group_count=2,
+    )
+
+    executor0 = TestExecutor(scenario0)
+    executor1 = TestExecutor(scenario1)
+
+    pool = list(range(10))
+    executor0._value_pools = {"POINT_LOOKUP": {"ID": pool}}
+    executor1._value_pools = {"POINT_LOOKUP": {"ID": pool}}
+
+    first0 = executor0._next_from_pool(0, "POINT_LOOKUP", "ID")
+    first1 = executor1._next_from_pool(0, "POINT_LOOKUP", "ID")
+
+    assert first0 == pool[0]
+    assert first1 == pool[2]
+
+
 def main():
     """Run all test executor tests."""
     print("=" * 60)

@@ -1,12 +1,13 @@
 # Worker Implementation Specification
 
 This document provides **complete implementation details** for workers in the
-multi-node architecture. It consolidates and resolves ambiguities from other
+multi-worker architecture. It consolidates and resolves ambiguities from other
 `next-*` docs.
 
 ## Overview
 
 A worker is an independent process that:
+
 1. Connects to Snowflake
 2. Registers with the control plane
 3. Waits for START signal
@@ -71,7 +72,7 @@ workers start.
 
 ## 2. Worker State Machine
 
-```
+```text
 ┌─────────────┐
 │  STARTING   │ ← Initial state after process launch
 └──────┬──────┘
@@ -132,8 +133,8 @@ CREATE HYBRID TABLE IF NOT EXISTS WORKER_HEARTBEATS (
     WORKER_GROUP_ID INTEGER NOT NULL,
     
     -- Status tracking
-    STATUS VARCHAR(50) NOT NULL,        -- STARTING, WAITING, RUNNING, DRAINING, COMPLETED, DEAD
-    PHASE VARCHAR(50),                  -- WARMUP, MEASUREMENT, COOLDOWN (mirrors worker's current phase)
+    STATUS VARCHAR(50) NOT NULL,   -- STARTING, WAITING, RUNNING, DRAINING, etc.
+    PHASE VARCHAR(50),             -- WARMUP, MEASUREMENT, COOLDOWN
     
     -- Liveness
     LAST_HEARTBEAT TIMESTAMP_NTZ NOT NULL,
@@ -271,7 +272,6 @@ CREATE TABLE IF NOT EXISTS TEST_LOGS (
     CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 ```
-```
 
 ---
 
@@ -283,8 +283,8 @@ Workers write to **BOTH** tables with different purposes:
 
 | Table | Purpose | Frequency | Content |
 |-------|---------|-----------|---------|
-| `WORKER_HEARTBEATS` | Control-plane liveness | Every 1s | Status, connections, last error |
-| `WORKER_METRICS_SNAPSHOTS` | Aggregation data | Every 1s | Full metrics for that interval |
+| `WORKER_HEARTBEATS` | Liveness detection | 1s | Status, connections |
+| `WORKER_METRICS_SNAPSHOTS` | Aggregation | 1s | Full interval metrics |
 
 **Rationale**: `WORKER_HEARTBEATS` is a Hybrid Table optimized for point updates
 (status changes). `WORKER_METRICS_SNAPSHOTS` is a Standard Table for append-only
@@ -337,9 +337,9 @@ INSERT INTO WORKER_METRICS_SNAPSHOTS (
     SNAPSHOT_ID,
     RUN_ID, TEST_ID, WORKER_ID, WORKER_GROUP_ID, WORKER_GROUP_COUNT,
     TIMESTAMP, ELAPSED_SECONDS, PHASE,
-    TOTAL_QUERIES, READ_COUNT, WRITE_COUNT, ERROR_COUNT,
-    QPS,
-    P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS, AVG_LATENCY_MS, MIN_LATENCY_MS, MAX_LATENCY_MS,
+    TOTAL_QUERIES, READ_COUNT, WRITE_COUNT, ERROR_COUNT, QPS,
+    P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS,
+    AVG_LATENCY_MS, MIN_LATENCY_MS, MAX_LATENCY_MS,
     ACTIVE_CONNECTIONS, TARGET_CONNECTIONS,
     CPU_PERCENT, MEMORY_PERCENT,
     CUSTOM_METRICS
@@ -347,9 +347,9 @@ INSERT INTO WORKER_METRICS_SNAPSHOTS (
     :snapshot_id,
     :run_id, :test_id, :worker_id, :worker_group_id, :worker_group_count,
     CURRENT_TIMESTAMP(), :elapsed_seconds, :phase,
-    :total_queries, :read_count, :write_count, :error_count,
-    :qps,
-    :p50_latency_ms, :p95_latency_ms, :p99_latency_ms, :avg_latency_ms, :min_latency_ms, :max_latency_ms,
+    :total_queries, :read_count, :write_count, :error_count, :qps,
+    :p50_latency_ms, :p95_latency_ms, :p99_latency_ms,
+    :avg_latency_ms, :min_latency_ms, :max_latency_ms,
     :active_connections, :target_connections,
     :cpu_percent, :memory_percent,
     PARSE_JSON(:custom_metrics_json)
@@ -569,13 +569,17 @@ target for each worker. The orchestrator updates this column whenever it emits
 
 | Phase | Description | Metrics Counted? |
 |-------|-------------|------------------|
+| "" (empty) | Test is PREPARED but not yet started | No |
+| PREPARING | Test started; spawning workers | No |
 | WARMUP | Run-level phase to prime Snowflake compute | No |
 | MEASUREMENT | Main test period | Yes |
 | COOLDOWN | Draining before finalization | No |
 
-**Important**: Warmup is a **run-level** concept, not per-worker. The orchestrator
-controls when warmup ends for the entire run. Workers that start after warmup has
-ended (e.g., during QPS scale-out) begin directly in MEASUREMENT phase.
+**Important**: When a test is first created (STATUS=PREPARED), PHASE is empty string
+(column is NOT NULL). The PREPARING phase is only set after the user clicks Start.
+Warmup is a **run-level** concept, not per-worker. The orchestrator controls when
+warmup ends for the entire run. Workers that start after warmup has ended (e.g.,
+during QPS scale-out) begin directly in MEASUREMENT phase.
 
 ### 6.2 Initial Phase on Worker Start
 
@@ -595,6 +599,7 @@ def determine_initial_phase() -> str:
         return 'MEASUREMENT'
     else:
         # PREPARING, COOLDOWN, PROCESSING - shouldn't happen at worker start
+        # (PREPARING means orchestrator is still spawning workers)
         log.warning(f"Unexpected run phase at worker start: {run_phase}")
         return run_phase
 ```

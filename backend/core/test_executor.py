@@ -890,8 +890,8 @@ class TestExecutor:
         # produced massive Snowflake result-cache hit rates (artificially low
         # P95 latencies).
         #
-        # For multi-process/multi-node runs, we shard the pool space across
-        # worker groups to reduce cross-node overlap. This assumes each group
+        # For multi-process/multi-worker runs, we shard the pool space across
+        # worker groups to reduce cross-worker overlap. This assumes each group
         # runs the same local concurrency.
         if not hasattr(self, "_worker_pool_seq"):
             self._worker_pool_seq = {}
@@ -899,7 +899,7 @@ class TestExecutor:
         n = int(getattr(self, "_worker_pool_seq", {}).get(key, 0))
         getattr(self, "_worker_pool_seq")[key] = n + 1
         local_concurrency = int(
-            getattr(self.scenario, "concurrent_connections", 1) or 1
+            getattr(self.scenario, "total_threads", 1) or 1
         )
         local_concurrency = max(1, local_concurrency)
         group_id = int(getattr(self.scenario, "worker_group_id", 0) or 0)
@@ -946,7 +946,7 @@ class TestExecutor:
                 step_dur = int(
                     getattr(self.scenario, "step_duration_seconds", 30) or 30
                 )
-                max_cc = int(self.scenario.concurrent_connections or 100)
+                max_cc = int(self.scenario.total_threads or 100)
                 logger.info(
                     "📋 Workload: %s, Mode: FIND_MAX_CONCURRENCY, Start: %d, Increment: %d, Step: %ds, Max: %d",
                     self.scenario.workload_type,
@@ -959,24 +959,24 @@ class TestExecutor:
                 # In "QPS" mode we dynamically scale workers to target throughput (ops/sec).
                 # Snowflake RUNNING/queued are sampled for observability/safety, but are not the target.
                 logger.info(
-                    "📋 Workload: %s, Mode: QPS (auto-scale), Target QPS: %s, Warmup: %ss, Run: %ss, Min workers: %s, Max workers: %s",
+                    "📋 Workload: %s, Mode: QPS (auto-scale), Target QPS: %s, Warmup: %ss, Run: %ss, Min threads: %s, Max threads: %s",
                     self.scenario.workload_type,
                     getattr(self.scenario, "target_qps", None),
                     self.scenario.warmup_seconds,
                     self.scenario.duration_seconds,
-                    getattr(self.scenario, "min_concurrency", None),
-                    self.scenario.concurrent_connections,
+                    getattr(self.scenario, "min_threads_per_worker", None),
+                    self.scenario.total_threads,
                 )
             else:
                 logger.info(
                     "📋 Workload: %s, Mode: CONCURRENCY, Duration: %ss, Workers: %s",
                     self.scenario.workload_type,
                     self.scenario.duration_seconds,
-                    self.scenario.concurrent_connections,
+                    self.scenario.total_threads,
                 )
 
             self.status = TestStatus.RUNNING
-            self.start_time = datetime.now()
+            self.start_time = datetime.now(UTC)
             self.metrics.timestamp = self.start_time
             # Reset measurement state for this run.
             self._metrics_epoch = 0
@@ -1007,14 +1007,17 @@ class TestExecutor:
                 autoscale_parent_run_id: str | None = None
                 autoscale_enabled = False
                 if isinstance(tpl_cfg, dict):
-                    autoscale_enabled = bool(tpl_cfg.get("autoscale_enabled"))
+                    # Derive autoscale_enabled from scaling.mode (AUTO/BOUNDED = enabled)
+                    scaling_cfg = tpl_cfg.get("scaling") or {}
+                    scaling_mode = str(scaling_cfg.get("mode") or "AUTO").upper()
+                    autoscale_enabled = scaling_mode != "FIXED"
                     parent_run_id = tpl_cfg.get("parent_run_id")
                     if parent_run_id:
                         autoscale_parent_run_id = str(parent_run_id)
 
-                min_workers = int(getattr(self.scenario, "min_concurrency", 1) or 1)
+                min_workers = int(getattr(self.scenario, "min_threads_per_worker", 1) or 1)
                 max_workers = int(
-                    getattr(self.scenario, "concurrent_connections", 1) or 1
+                    getattr(self.scenario, "total_threads", 1) or 1
                 )
                 min_workers = max(1, min_workers)
                 max_workers = max(1, max_workers)
@@ -1084,9 +1087,9 @@ class TestExecutor:
                     if not isinstance(autoscale_state, dict):
                         return (None, None)
                     try:
-                        node_count = int(autoscale_state.get("node_count") or 0)
+                        worker_count = int(autoscale_state.get("worker_count") or 0)
                     except Exception:
-                        node_count = 0
+                        worker_count = 0
                     try:
                         target_total = float(
                             autoscale_state.get("target_qps_total") or 0.0
@@ -1094,13 +1097,13 @@ class TestExecutor:
                     except Exception:
                         target_total = 0.0
                     if (
-                        node_count <= 0
+                        worker_count <= 0
                         or not math.isfinite(target_total)
                         or target_total <= 0
                     ):
                         return (None, None)
-                    per_node_target = target_total / float(node_count)
-                    return (float(per_node_target), int(node_count))
+                    per_worker_target = target_total / float(worker_count)
+                    return (float(per_worker_target), int(worker_count))
 
                 async def _spawn_one(*, warmup: bool) -> None:
                     nonlocal next_worker_id
@@ -1283,7 +1286,7 @@ class TestExecutor:
                     under_target_streak = 0
                     autoscale_last_poll = 0.0
                     autoscale_target_qps: float | None = None
-                    autoscale_node_count: int | None = None
+                    autoscale_worker_count: int | None = None
                     autoscale_poll_interval = max(5.0, float(control_interval))
 
                     while not self._stop_event.is_set():
@@ -1304,14 +1307,14 @@ class TestExecutor:
                                 autoscale_poll_interval
                             ):
                                 (
-                                    per_node_target,
-                                    node_count,
+                                    per_worker_target,
+                                    worker_count,
                                 ) = await _fetch_autoscale_target_qps()
-                                if per_node_target is not None:
-                                    autoscale_target_qps = float(per_node_target)
-                                    autoscale_node_count = (
-                                        int(node_count)
-                                        if node_count is not None
+                                if per_worker_target is not None:
+                                    autoscale_target_qps = float(per_worker_target)
+                                    autoscale_worker_count = (
+                                        int(worker_count)
+                                        if worker_count is not None
                                         else None
                                     )
                                 autoscale_last_poll = float(now_mono)
@@ -1573,7 +1576,7 @@ class TestExecutor:
                                     "control_interval_seconds": float(control_interval),
                                     "above_target_streak": int(above_target_streak),
                                     "under_target_streak": int(under_target_streak),
-                                    "autoscale_node_count": autoscale_node_count,
+                                    "autoscale_worker_count": autoscale_worker_count,
                                 }
                             else:
                                 self._qps_controller_state = {
@@ -1591,7 +1594,7 @@ class TestExecutor:
                                     "control_interval_seconds": float(control_interval),
                                     "above_target_streak": int(above_target_streak),
                                     "under_target_streak": int(under_target_streak),
-                                    "autoscale_node_count": autoscale_node_count,
+                                    "autoscale_worker_count": autoscale_worker_count,
                                 }
 
                 # Warmup period (ramp workers so the measurement phase starts close to target).
@@ -1654,7 +1657,7 @@ class TestExecutor:
                     self._metrics_epoch += 1
                     self._measurement_active = True
                     self.metrics = Metrics()
-                    self.metrics.timestamp = datetime.now()
+                    self.metrics.timestamp = datetime.now(UTC)
                     self._last_snapshot_time = None
                     self._last_snapshot_mono = None
                     self._last_snapshot_ops = 0
@@ -1666,7 +1669,7 @@ class TestExecutor:
                     self._sql_error_categories.clear()
                     self._latency_sf_execution_ms.clear()
                     self._latency_network_overhead_ms.clear()
-                self._measurement_start_time = datetime.now()
+                self._measurement_start_time = datetime.now(UTC)
 
                 # Start measurement with the warmup-derived estimate.
                 start_workers = int(
@@ -1716,7 +1719,7 @@ class TestExecutor:
                 step_dur = int(
                     getattr(self.scenario, "step_duration_seconds", 30) or 30
                 )
-                max_cc = int(self.scenario.concurrent_connections or 100)
+                max_cc = int(self.scenario.total_threads or 100)
                 qps_stability_pct = float(
                     getattr(self.scenario, "qps_stability_pct", 5.0) or 5.0
                 )
@@ -1915,8 +1918,8 @@ class TestExecutor:
                     self._metrics_epoch += 1
                     self._measurement_active = True
                     self.metrics = Metrics()
-                    self.metrics.timestamp = datetime.now()
-                    self._measurement_start_time = datetime.now()
+                    self.metrics.timestamp = datetime.now(UTC)
+                    self._measurement_start_time = datetime.now(UTC)
                     self._last_snapshot_time = None
                     self._last_snapshot_mono = None
                     self._last_snapshot_ops = 0
@@ -2481,9 +2484,9 @@ class TestExecutor:
                     self._metrics_epoch += 1
                     self._measurement_active = True
                     self.metrics = Metrics()
-                    self.metrics.timestamp = datetime.now()
+                    self.metrics.timestamp = datetime.now(UTC)
                     # From this point forward we consider the measurement window started.
-                    self._measurement_start_time = datetime.now()
+                    self._measurement_start_time = datetime.now(UTC)
                     # Reset snapshot state so current QPS doesn't get skewed by warmup counters.
                     self._last_snapshot_time = None
                     self._last_snapshot_mono = None
@@ -2499,15 +2502,15 @@ class TestExecutor:
 
                 # Spawn workers
                 self._target_workers = int(
-                    self.scenario.concurrent_connections
+                    self.scenario.total_threads
                 )  # Track target for metrics
                 logger.info(
                     "Spawning %d worker tasks...",
-                    int(self.scenario.concurrent_connections),
+                    int(self.scenario.total_threads),
                 )
                 self.workers = [
                     asyncio.create_task(self._worker(worker_id))
-                    for worker_id in range(self.scenario.concurrent_connections)
+                    for worker_id in range(self.scenario.total_threads)
                 ]
 
                 # Run for duration
@@ -2528,7 +2531,7 @@ class TestExecutor:
                 pass
 
             # Finalize
-            self.end_time = datetime.now()
+            self.end_time = datetime.now(UTC)
             self.status = TestStatus.COMPLETED
 
             # Build result
@@ -2605,7 +2608,7 @@ class TestExecutor:
             self._setup_error = f"Error during test execution: {e}"
             logger.error(self._setup_error)
             self.status = TestStatus.FAILED
-            self.end_time = datetime.now()
+            self.end_time = datetime.now(UTC)
 
             # Stop metrics collector immediately to stop WebSocket streaming
             if metrics_task is not None:
@@ -2663,7 +2666,7 @@ class TestExecutor:
         """Execute warmup period."""
         warmup_workers = [
             asyncio.create_task(self._worker(i, warmup=True))
-            for i in range(min(5, self.scenario.concurrent_connections))
+            for i in range(min(5, self.scenario.total_threads))
         ]
         try:
             await asyncio.sleep(self.scenario.warmup_seconds)
@@ -2695,17 +2698,31 @@ class TestExecutor:
 
         # Update QUERY_TAG on all pool connections.
         pool = getattr(self, "_snowflake_pool_override", None)
-        if pool is not None and hasattr(pool, "update_query_tag"):
-            try:
-                updated = await pool.update_query_tag(str(running_tag))
+        if pool is None:
+            logger.warning(
+                "No pool available for QUERY_TAG update during phase transition"
+            )
+            return
+        if not hasattr(pool, "update_query_tag"):
+            logger.warning(
+                "Pool does not support update_query_tag method; QUERY_TAG not updated"
+            )
+            return
+        try:
+            updated = await pool.update_query_tag(str(running_tag))
+            if updated == 0:
+                logger.warning(
+                    "QUERY_TAG update returned 0 connections; pool may have no active connections"
+                )
+            else:
                 logger.info(
                     "Transitioned to measurement phase: QUERY_TAG updated on %d connections",
                     int(updated),
                 )
-            except Exception as e:
-                logger.warning(
-                    "Failed to update QUERY_TAG on pool connections: %s", str(e)
-                )
+        except Exception as e:
+            logger.warning(
+                "Failed to update QUERY_TAG on pool connections: %s", str(e)
+            )
 
     async def _controlled_worker(
         self,
@@ -4158,11 +4175,15 @@ class TestExecutor:
         # QPS EWMA smoothing (seconds). Larger => smoother, less reactive.
         qps_tau_seconds = 5.0
 
+        first_iteration = True
         try:
             while True:
-                await asyncio.sleep(interval)
+                if first_iteration:
+                    first_iteration = False
+                else:
+                    await asyncio.sleep(interval)
 
-                now = datetime.now()
+                now = datetime.now(UTC)
                 now_mono = float(loop.time())
                 self.metrics.timestamp = now
 
@@ -4683,10 +4704,10 @@ class TestExecutor:
             table_name=table_config.name if table_config else "unknown",
             table_type=table_config.table_type if table_config else "unknown",
             status=self.status,
-            start_time=self.start_time or datetime.now(),
+            start_time=self.start_time or datetime.now(UTC),
             end_time=self.end_time,
             duration_seconds=duration,
-            concurrent_connections=self.scenario.concurrent_connections,
+            total_threads=self.scenario.total_threads,
             total_operations=self.metrics.total_operations,
             read_operations=self.metrics.read_metrics.count,
             write_operations=self.metrics.write_metrics.count,

@@ -67,6 +67,34 @@ def test_templates_normalize_custom_requires_sql_when_pct_gt_0():
         templates_api._normalize_template_config(cfg)
 
 
+def test_templates_normalize_qps_scaling_min_connections():
+    from backend.api.routes import templates as templates_api
+
+    cfg = {
+        "workload_type": "MIXED",
+        "load_mode": "QPS",
+        "target_qps": 100,
+        "concurrent_connections": 10,
+        "scaling": {"min_connections": 2},
+    }
+    out = templates_api._normalize_template_config(cfg)
+    assert out["scaling"]["min_connections"] == 2
+    assert out["concurrent_connections"] == 10
+
+
+def test_templates_rejects_min_concurrency():
+    from backend.api.routes import templates as templates_api
+
+    cfg = {
+        "workload_type": "MIXED",
+        "load_mode": "QPS",
+        "target_qps": 10,
+        "min_concurrency": 2,
+    }
+    with pytest.raises(ValueError, match="min_concurrency was renamed"):
+        templates_api._normalize_template_config(cfg)
+
+
 def test_custom_schedule_exact_counts():
     from backend.core.test_executor import TestExecutor
 

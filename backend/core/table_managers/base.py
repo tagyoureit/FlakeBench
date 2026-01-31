@@ -87,12 +87,10 @@ class TableManager(ABC):
 
             logger.info("Using existing table/view: %s", self.get_full_table_name())
 
-            # Validate
             if not await self.validate_schema():
                 logger.error(f"Schema validation failed: {self.table_name}")
                 return False
 
-            # Get stats
             self._stats = await self.get_table_stats()
             logger.info(f"Table setup complete: {self.table_name}, stats={self._stats}")
 

@@ -1,23 +1,29 @@
-# Unistore Rules Index
+# Unistore Benchmark Documentation
 
-This folder is the authoritative documentation for the current, implemented
-architecture and behavior of Unistore Benchmark.
+This is the human landing page for project docs. For agent-specific guidance,
+see `SKILL.md`.
 
-## Core Docs
+## Start Here
 
-- `SKILL.md` - entrypoint for agents; complete index of this docs folder
-- `project-plan.md` - current architecture and status (not a roadmap)
-- `operations-and-runbooks.md` - how to run, validate, and use headless entrypoints
-- `Refined Metrics.md` - what the app captures and persists
+- `architecture-overview.md` — system purpose, topology, and components
+- `operations-and-runbooks.md` — how to run, validate, and troubleshoot
+- `data-flow-and-lifecycle.md` — lifecycle, control-plane state, metrics flow
+- `metrics-streaming-debug.md` — debugging guide for metrics streaming and phase transitions
+- `log-streaming-architecture.md` — log flow from workers to UI, current limitations
+- `ui-architecture.md` — UI contracts and dashboard behavior
+- `scaling.md` — scaling model, guardrails, and sharding
+- `specifications.md` — schemas, payloads, and implementation details
 
-## Architecture (Granular)
+## Implementation Plan
 
-- `architecture-overview.md` - system context and runtime topology
-- `backend-architecture.md` - FastAPI, registry, executor, connectors
-- `data-flow-and-lifecycle.md` - test lifecycle and metrics flow
-- `persistence-and-schema.md` - Snowflake results storage schema
-- `templates-and-workloads.md` - template storage and workload normalization
-- `scaling.md` - concurrency model and why/when to scale out
-- `ui-architecture.md` - pages, JS modules, and routing
-- `testing-and-validation.md` - tests location and scope
-- `constraints-and-non-goals.md` - explicit constraints (no DDL/migrations)
+- `project-plan.md` — plan index (start here)
+- `plan/overview.md` — phases, terminology, migration strategy
+- `plan/phase-2-checklist.md` — detailed implementation tasks
+- `plan/decisions.md` — recorded decisions
+- `plan/traceability.md` — docs-to-task mapping
+
+## Quick Facts
+
+- Results are stored in Snowflake (`UNISTORE_BENCHMARK.TEST_RESULTS`).
+- Templates are stored in `TEST_TEMPLATES` with `CONFIG` as the canonical payload.
+- Runs are prepared from templates, then started from the dashboard.

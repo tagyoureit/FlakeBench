@@ -5,7 +5,7 @@ Defines Pydantic models for real-time performance metrics.
 """
 
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -81,7 +81,7 @@ class Metrics(BaseModel):
 
     # Timestamp
     timestamp: datetime = Field(
-        default_factory=datetime.now, description="Metrics timestamp"
+        default_factory=lambda: datetime.now(UTC), description="Metrics timestamp (UTC)"
     )
     elapsed_seconds: float = Field(0.0, description="Elapsed time since test start")
 

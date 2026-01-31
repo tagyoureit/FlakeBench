@@ -22,24 +22,6 @@
             </div>
             
             <div class="btn-group" style="margin-bottom: 0; align-items: center;">
-                <button
-                    type="button"
-                    class="btn btn-sm"
-                    :class="viewMode === 'table' ? 'btn-primary' : 'btn-secondary'"
-                    @click="setViewMode('table')"
-                    title="Table view"
-                >
-                    Table
-                </button>
-                <button
-                    type="button"
-                    class="btn btn-sm"
-                    :class="viewMode === 'cards' ? 'btn-primary' : 'btn-secondary'"
-                    @click="setViewMode('cards')"
-                    title="Card view"
-                >
-                    Cards
-                </button>
                 <button class="btn btn-primary" @click="createNewTemplate">
                     <span>+ New Template</span>
                 </button>
@@ -86,7 +68,7 @@
     <!-- Templates List -->
     <div x-show="!loading && !error && filteredTemplates.length > 0">
         <!-- Table view (dense) -->
-        <div x-show="viewMode === 'table'" class="card templates-table-card">
+        <div class="card templates-table-card">
             <div class="table templates-table">
                 <table>
                     <thead>
@@ -169,9 +151,11 @@
                                         <button
                                             type="button"
                                             class="btn btn-primary btn-sm"
+                                            :disabled="preparingTemplateId === template.template_id"
                                             @click="prepareTest(template)"
                                         >
-                                            Prepare
+                                            <span class="loading-spinner" x-show="preparingTemplateId === template.template_id"></span>
+                                            <span x-text="preparingTemplateId === template.template_id ? 'Preparing…' : 'Prepare'"></span>
                                         </button>
                                         <button
                                             type="button"
@@ -190,111 +174,6 @@
             </div>
         </div>
 
-        <!-- Card view (legacy) -->
-        <div
-            x-show="viewMode === 'cards'"
-            class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4"
-        >
-            <template x-for="template in filteredTemplates" :key="template.template_id">
-                <div class="card hover:shadow-lg transition-shadow">
-                    <div class="flex justify-between items-start mb-3">
-                        <div>
-                            <div class="templates-card-title">
-                                <img
-                                    x-show="tableTypeIconSrc(template)"
-                                    class="template-type-icon"
-                                    :src="tableTypeIconSrc(template)"
-                                    :alt="tableTypeLabel(template)"
-                                    :title="tableTypeLabel(template)"
-                                >
-                                <h3 class="text-lg font-semibold" x-text="template.template_name"></h3>
-                            </div>
-                            <span x-show="template.usage_count > 0" class="text-xs text-gray-500">
-                                Used <span x-text="template.usage_count"></span> time(s)
-                            </span>
-                        </div>
-                        <div class="flex gap-2">
-                            <button class="btn btn-secondary btn-sm" 
-                                    x-show="template.usage_count === 0"
-                                    @click="editTemplate(template)"
-                                    title="Edit template">
-                                Edit
-                            </button>
-                            <button class="btn btn-secondary btn-sm"
-                                    x-show="template.usage_count > 0"
-                                    @click="viewTemplateDetails(template)"
-                                    title="View template details (read-only)">
-                                View details
-                            </button>
-                            <button class="btn btn-danger btn-sm" 
-                                    @click="deleteTemplate(template)"
-                                    title="Delete template and all results">
-                                Delete
-                            </button>
-                        </div>
-                    </div>
-                    
-                    <p class="text-sm text-gray-600 mb-3" x-text="template.description || 'No description'"></p>
-                    
-                    <div class="text-xs text-gray-500 space-y-1">
-                        <div>
-                            <strong>Table:</strong> 
-                            <span x-text="tableFqn(template)"></span>
-                        </div>
-                        <div>
-                            <strong>Workload:</strong> 
-                            <span x-text="deriveWorkloadLabel(template.config)"></span>
-                        </div>
-                        <div>
-                            <strong>Duration:</strong>
-                            <span
-                                x-text="template.config?.load_mode === 'FIND_MAX_CONCURRENCY' ? '—' : (template.config?.duration + 's')"
-                            ></span>
-                        </div>
-                        <div>
-                            <strong>Load Mode:</strong> 
-                            <span x-text="(template.config?.load_mode === 'QPS') ? 'Target throughput (QPS)' : ((template.config?.load_mode === 'FIND_MAX_CONCURRENCY') ? 'Find max (step-load)' : 'Fixed workers (closed model)')"></span>
-                        </div>
-                        <div x-show="(template.config?.load_mode || 'CONCURRENCY') === 'CONCURRENCY'">
-                        <strong>Workers:</strong> 
-                            <span x-text="template.config?.concurrent_connections"></span>
-                        </div>
-                        <div x-show="template.config?.load_mode === 'QPS'">
-                        <strong>Target:</strong>
-                        <span x-text="'QPS (ops/sec)'"></span>
-                        = <span x-text="template.config?.target_qps"></span>
-                        <div class="mt-1">
-                            <strong>Workers:</strong>
-                            <span x-text="(template.config?.min_concurrency ?? '') + '-' + (template.config?.concurrent_connections ?? '')"></span>
-                        </div>
-                        </div>
-                        <div x-show="template.config?.load_mode === 'FIND_MAX_CONCURRENCY'">
-                        <strong>Find Max (step-load):</strong>
-                        <div class="mt-1">
-                            Start: <span x-text="template.config?.start_concurrency ?? 5"></span>,
-                            Increment: +<span x-text="template.config?.concurrency_increment ?? 10"></span>,
-                            Step: <span x-text="template.config?.step_duration_seconds ?? 30"></span>s
-                        </div>
-                        <div class="mt-1">
-                            Max workers: <span x-text="template.config?.concurrent_connections"></span>
-                        </div>
-                        </div>
-                    </div>
-                    
-                    <div class="flex gap-2 mt-4 pt-3 border-t border-gray-200">
-                        <button class="btn btn-primary flex-1" 
-                                @click="prepareTest(template)">
-                            Prepare Test
-                        </button>
-                        <button class="btn btn-secondary" 
-                                @click="duplicateTemplate(template)"
-                                title="Copy this template">
-                            Copy
-                        </button>
-                    </div>
-                </div>
-            </template>
-        </div>
     </div>
 </div>
 {% endblock %}

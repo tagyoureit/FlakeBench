@@ -60,6 +60,7 @@ class SnowflakeConnectionPool:
         connect_network_timeout: int | None = None,
         connect_socket_timeout: int | None = None,
         session_parameters: Optional[Dict[str, Any]] = None,
+        pool_name: str = "default",
     ):
         """
         Initialize Snowflake connection pool.
@@ -130,12 +131,13 @@ class SnowflakeConnectionPool:
             else settings.SNOWFLAKE_CONNECT_SOCKET_TIMEOUT
         )
         self._session_parameters: Dict[str, Any] = dict(session_parameters or {})
+        self._pool_name: str = pool_name
         # Minimum interval between health checks per connection.
         # (We still recycle connections via `self.recycle`.)
         self._health_check_interval_seconds: float = 30.0
 
         logger.info(
-            f"Initialized Snowflake pool: {user}@{account}, "
+            f"[{pool_name}] Initialized Snowflake pool: {user}@{account}, "
             f"pool_size={pool_size}, max_overflow={max_overflow}"
         )
 
@@ -157,7 +159,8 @@ class SnowflakeConnectionPool:
 
             total = int(self.pool_size)
             logger.info(
-                "Creating %d initial Snowflake connections (max_parallel_creates=%d)...",
+                "[%s] Creating %d initial Snowflake connections (max_parallel_creates=%d)...",
+                self._pool_name,
                 total,
                 int(self._max_parallel_creates),
             )
@@ -227,7 +230,8 @@ class SnowflakeConnectionPool:
                     errors = attempted - created_ok
                     elapsed = asyncio.get_running_loop().time() - t0
                     logger.info(
-                        "Snowflake pool init progress: %d/%d attempted, %d created, %d errors (%.1fs elapsed)",
+                        "[%s] Pool init progress: %d/%d attempted, %d created, %d errors (%.1fs elapsed)",
+                        self._pool_name,
                         attempted,
                         total,
                         created_ok,
@@ -250,7 +254,7 @@ class SnowflakeConnectionPool:
 
             self._initialized = True
             logger.info(
-                f"Connection pool initialized with {len(self._pool)} connections"
+                f"[{self._pool_name}] Connection pool initialized with {len(self._pool)} connections"
             )
 
             # If we have connection errors, raise with details so callers can handle
@@ -798,6 +802,7 @@ def get_default_pool() -> SnowflakeConnectionPool:
             executor=_default_executor,
             owns_executor=False,
             max_parallel_creates=settings.SNOWFLAKE_POOL_MAX_PARALLEL_CREATES,
+            pool_name="control",
         )
 
     return _default_pool
@@ -850,6 +855,7 @@ def get_telemetry_pool() -> SnowflakeConnectionPool:
             executor=_telemetry_executor,
             owns_executor=True,
             max_parallel_creates=1,
+            pool_name="telemetry",
         )
 
     return _telemetry_pool

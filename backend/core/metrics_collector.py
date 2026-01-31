@@ -7,7 +7,7 @@ Real-time metrics collection, aggregation, and percentile calculation.
 import asyncio
 import logging
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import UTC, datetime
 from collections import deque
 from enum import Enum
 
@@ -48,7 +48,7 @@ class OperationResult:
         self.latency_ms = latency_ms
         self.rows_affected = rows_affected
         self.bytes_transferred = bytes_transferred
-        self.timestamp = timestamp or datetime.now()
+        self.timestamp = timestamp or datetime.now(UTC)
 
 
 class MetricsCollector:
@@ -115,7 +115,7 @@ class MetricsCollector:
 
     def start(self):
         """Start metrics collection."""
-        self.start_time = datetime.now()
+        self.start_time = datetime.now(UTC)
         self.metrics.timestamp = self.start_time
         logger.info("✅ Metrics collection started")
 
@@ -188,7 +188,7 @@ class MetricsCollector:
         """
         async with self._metrics_lock:
             # Update timestamp and elapsed time
-            self.metrics.timestamp = datetime.now()
+            self.metrics.timestamp = datetime.now(UTC)
             if self.start_time:
                 self.metrics.elapsed_seconds = (
                     self.metrics.timestamp - self.start_time
@@ -405,14 +405,14 @@ class MetricsCollector:
         """Reset all metrics (useful for warmup)."""
         async with self._metrics_lock:
             self.metrics = Metrics()
-            self.metrics.timestamp = datetime.now()
+            self.metrics.timestamp = datetime.now(UTC)
             self._operation_history.clear()
             self._read_latencies.clear()
             self._write_latencies.clear()
             self._update_latencies.clear()
             self._delete_latencies.clear()
             self.snapshots.clear()
-            self.start_time = datetime.now()
+            self.start_time = datetime.now(UTC)
             self._last_snapshot_time = None
             self._last_snapshot_ops = 0
 

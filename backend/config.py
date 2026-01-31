@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     SNOWFLAKE_POOL_TIMEOUT: int = 30
     SNOWFLAKE_POOL_RECYCLE: int = 3600
     # Limit how many blocking Snowflake connect() calls we run concurrently.
-    SNOWFLAKE_POOL_MAX_PARALLEL_CREATES: int = 8
+    SNOWFLAKE_POOL_MAX_PARALLEL_CREATES: int = 32
 
     # Thread executors:
     # - Results pool: persistence + UI reads from results tables
@@ -141,6 +141,7 @@ class Settings(BaseSettings):
         if v:
             if isinstance(v, str):
                 import json
+
                 return json.loads(v)
             return v
         host = info.data.get("APP_HOST", "127.0.0.1")

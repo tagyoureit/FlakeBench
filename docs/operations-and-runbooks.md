@@ -1,11 +1,9 @@
 # Operations and Runbooks (Current)
 
-Last updated: 2026-01-21
+Last updated: 2026-01-27
 
-This document is a practical map of the **entrypoints, scripts, and commands**
-used to run and validate Unistore Benchmark.
-
-It is intentionally factual (not a roadmap).
+This document is a practical map of entrypoints, scripts, and commands used to
+run and validate Unistore Benchmark.
 
 ## Common entrypoints
 
@@ -26,26 +24,61 @@ The app does **not** run DDL at runtime. Schema setup is performed out-of-band:
   - `templates_table.sql`
   - `template_value_pools_table.sql`
   - `test_logs_table.sql`
+  - `control_tables.sql` (hybrid control-plane tables)
 
-## Smoke checks (API-driven)
+## Local runbook
 
-Use the Taskfile entrypoints to run short end-to-end checks through the running
+1. Start the controller (FastAPI app).
+2. Prepare a run from a template: `POST /api/tests/from-template/{id}`
+   (or programmatic `POST /api/runs`).
+3. Open `/dashboard/{test_id}`.
+4. Start the run: `POST /api/tests/{test_id}/start`
+   (or `POST /api/runs/{run_id}/start`).
+5. Live metrics stream over `/ws/test/{test_id}` once status is RUNNING.
+6. Stop via UI or `POST /api/runs/{run_id}/stop` / `POST /api/tests/{test_id}/stop`.
+
+## Smoke checks (Taskfile)
+
+Use Taskfile entrypoints to run short end-to-end checks through the running
 server:
 
-- `task test:variations:smoke` (short)
-- `task test:variations:smoke:long` (long)
-- `task test:variations:setup` (setup only)
-- `task test:variations:cleanup` (cleanup only)
+| Task | Description |
+|------|-------------|
+| `task test:variations:smoke` | Short smoke test (default 45s per test) |
+| `task test:variations:smoke:long` | Long smoke test (5min, 10s warmup) |
+| `task test:variations:setup` | Setup only (create tables + templates) |
+| `task test:variations:cleanup` | Cleanup only (drop tables + templates) |
 
-Notes:
+### Quick validation (fastest)
 
-- These tasks assume the app server is already running (default `BASE_URL` is
-  `http://127.0.0.1:8000`).
+For a quick ~1-minute validation that everything works:
+
+```bash
+SKIP_POSTGRES=true DURATION_SECONDS=5 METRICS_WAIT_SECONDS=10 task test:variations:smoke
+```
+
+### Environment variable overrides
+
+All smoke test parameters can be overridden via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DURATION_SECONDS` | 45 | Test duration per table type |
+| `WARMUP_SECONDS` | 0 | Warmup period before measurement |
+| `METRICS_WAIT_SECONDS` | 60 | Max wait for metrics after completion |
+| `SMOKE_CONCURRENCY` | 5 | Concurrent connections |
+| `SMOKE_ROWS` | 300 | Rows in smoke tables |
+| `SKIP_POSTGRES` | false | Skip Postgres variation |
+| `BASE_URL` | `http://127.0.0.1:8000` | API server URL |
+
+### Notes
+
+- These tasks assume the app server is already running.
 - Smoke setup uses SnowCLI (`snow sql`) for DDL/DML in a dedicated smoke schema.
+- Smoke tests use `tags.smoke=true` to bypass the warehouse isolation check
+  (allowing the same warehouse for both smoke tests and results storage).
 
-## Headless multi-worker (local orchestration)
-
-There are two supported “headless” entrypoints for multi-process local runs:
+## Headless worker / orchestration scripts
 
 ### Worker (single worker)
 
@@ -54,22 +87,12 @@ There are two supported “headless” entrypoints for multi-process local runs:
 - Key flags:
   - `--template-id <id>` (required)
   - `--worker-group-id <n>` / `--worker-group-count <N>` for deterministic sharding
-  - `--parent-run-id <uuid>` and `--node-id <name>` for multi-worker attribution
+  - `--parent-run-id <uuid>` and `--worker-id <name>` for multi-worker attribution
   - `--concurrency`, `--min-concurrency`, `--start-concurrency`, `--target-qps` overrides
 
-### Orchestrator (N local worker processes)
+### Orchestrator (multi-worker runs)
 
-- Script: `scripts/run_multi_node.py`
-- Launches N worker processes and (best-effort) updates the parent aggregate at
-  the end of the run.
-- Key flags:
-  - `--template-id <id>` (required)
-  - `--node-count <N>` (required; worker count)
-  - Optional overrides:
-    - `--concurrency`
-    - `--min-concurrency`
-    - `--start-concurrency`
-    - `--target-qps`
+- Runs are started via the UI or `POST /api/runs`; the orchestrator launches workers.
 
 ### Refresh parent aggregation (manual)
 
@@ -77,14 +100,92 @@ There are two supported “headless” entrypoints for multi-process local runs:
 - Use when you need to recompute the parent run’s aggregate after-the-fact:
   - `uv run python scripts/refresh_parent_aggregate.py <parent_run_id>`
 
-## Where to look for behavior
+## Validation (multi-worker acceptance)
 
-- **Routes (FastAPI)**: `backend/api/routes/` and `backend/main.py`
-- **Test lifecycle + enrichment**: `backend/core/test_registry.py`
-- **Workload execution**: `backend/core/test_executor.py`
-- **Autoscale orchestration (UI-driven, scale-out only)**: `backend/core/autoscale.py`
-- **Persistence to Snowflake**: `backend/core/results_store.py`
-- **Table setup / validation (no DDL on customer objects)**:
-  `backend/core/table_managers/`
+1. Start controller and orchestrator.
+2. Create a multi-worker run via `POST /api/tests/from-template/{id}/autoscale`
+   or `POST /api/runs`.
+3. Start via `POST /api/tests/{test_id}/start-autoscale` or `POST /api/runs/{run_id}/start`.
+4. Issue STOP and confirm:
+   - STOP event appears in `RUN_CONTROL_EVENTS`.
+   - `RUN_STATUS` transitions to `CANCELLING` and then `CANCELLED`.
+5. Verify all worker processes exit and the parent `TEST_RESULTS` rollup updates.
 
-See also: `docs/index.md`.
+## Python tests
+
+- Tests live under `tests/`.
+- Key coverage:
+  - `test_connection_pools.py`, `test_table_managers.py`, `test_metrics_collector.py`
+  - `test_executor.py`, `test_orchestrator_control_plane.py`, `test_runs_api.py`
+  - `test_scaling_sharding.py`, `test_template_custom_workloads.py`
+  - `test_ui_contract.py`, `test_dashboard_redirect.py`
+- Most tests validate logic without requiring Snowflake credentials.
+- Connection pool tests skip when credentials are not configured.
+
+## Troubleshooting
+
+### Tests Complete Immediately / Dashboard Shows 28800s (Timezone Bug)
+
+**Symptom**: Tests configured for 10s warmup + 10s measurement complete in
+2-4 seconds with `duration_elapsed` reason. OR the dashboard shows "Total Time:
+28809s" (~8 hours) for a test that just started.
+
+**Cause**: Python calculates elapsed time incorrectly due to timezone mismatch.
+Snowflake returns `START_TIME` as a naive datetime in the **session timezone**
+(often Pacific), but Python's `datetime.now(UTC)` returns UTC. The 8-hour
+difference makes elapsed time appear much larger than actual.
+
+**Solution**: Always calculate elapsed time in Snowflake SQL using `TIMESTAMPDIFF`:
+
+```sql
+SELECT TIMESTAMPDIFF(SECOND, START_TIME, CURRENT_TIMESTAMP()) AS ELAPSED_SECONDS
+FROM RUN_STATUS WHERE RUN_ID = ?
+```
+
+### Workers Exit Immediately (Hot Reload)
+
+**Symptom**: Workers spawn, run for 1-2 seconds, then "All workers exited" appears.
+Status shows CANCELLING with 0 operations.
+
+**Cause**: `APP_RELOAD=true` (default in development) causes Uvicorn's `watchfiles`
+to restart the server when Python files change. This kills spawned worker subprocesses.
+
+**Solution**: Run without hot-reload for test execution:
+
+```bash
+APP_RELOAD=false uv run python -m backend.main
+```
+
+### Workers Show COMPLETED but Test Shows FAILED
+
+**Symptom**: Worker heartbeat shows `STATUS=COMPLETED`, but parent test shows
+`STATUS=FAILED` with low operation count.
+
+**Cause**: The orchestrator's poll loop detected all workers exited before the
+expected duration. Usually tied to the timezone bug above.
+
+**Diagnosis**: Check `RUN_CONTROL_EVENTS` for STOP reason:
+
+```sql
+SELECT EVENT_TYPE, EVENT_DATA, CREATED_AT
+FROM RUN_CONTROL_EVENTS
+WHERE RUN_ID = '<run_id>'
+ORDER BY CREATED_AT;
+```
+
+If `STOP` has `reason: "duration_elapsed"` but timestamps are only seconds apart,
+the timezone bug is the cause.
+
+## SPCS runbook (future)
+
+- Controller runs as a long-running SPCS service.
+- Orchestrator runs as a separate service (or job controller).
+- Workers run as job services or short-lived services per run.
+- Prefer container parity between local and SPCS environments.
+
+## Reiterated constraints
+
+- No DDL is executed at runtime.
+- Schema changes are rerunnable DDL in `sql/schema/`.
+- Templates are stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES` with
+  `CONFIG` as the authoritative JSON payload.

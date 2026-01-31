@@ -1,11 +1,11 @@
 -- =============================================================================
 -- Unistore Benchmark - Control Plane Schema (Hybrid Tables)
 -- =============================================================================
--- This schema defines the coordination tables for multi-node benchmarking.
+-- This schema defines the coordination tables for multi-worker benchmarking.
 -- These tables MUST be Hybrid Tables (Unistore) to support:
 -- 1. Row-level locking for concurrent heartbeats
 -- 2. ACID transactions for phase transitions
--- 3. High-frequency updates (up to ~20 nodes at 5s intervals)
+-- 3. High-frequency updates (up to ~20 workers at 5s intervals)
 --
 -- REQUIREMENTS:
 -- - Snowflake Enterprise Edition or higher
@@ -36,8 +36,8 @@ CREATE HYBRID TABLE IF NOT EXISTS RUN_STATUS (
     scenario_config VARIANT, -- JSON blob of the full run config
     
     -- Lifecycle State
-    status VARCHAR(50) NOT NULL, -- PREPARED, RUNNING, STOPPING, COMPLETED, FAILED
-    phase VARCHAR(50) NOT NULL,  -- WARMUP, MEASUREMENT, COOLDOWN
+    status VARCHAR(50) NOT NULL, -- PREPARED, RUNNING, CANCELLING, COMPLETED, FAILED, CANCELLED
+    phase VARCHAR(50) NOT NULL,  -- PREPARING, WARMUP, MEASUREMENT, COOLDOWN, PROCESSING
     
     -- Timing (Authoritative)
     start_time TIMESTAMP_NTZ,
@@ -58,6 +58,15 @@ CREATE HYBRID TABLE IF NOT EXISTS RUN_STATUS (
     -- Find Max State (Live)
     find_max_state VARIANT, -- { current_step, target_workers, status, ... }
 
+    -- Worker Targets (fallback for missed events)
+    worker_targets VARIANT,
+
+    -- Event ordering (monotonic per RUN_ID)
+    next_sequence_id INTEGER DEFAULT 1,
+
+    -- Cancellation/Failure reason (populated when test ends abnormally)
+    cancellation_reason TEXT,
+
     -- Audit
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
@@ -68,7 +77,7 @@ CREATE HYBRID TABLE IF NOT EXISTS RUN_STATUS (
 -- =============================================================================
 -- RUN_CONTROL_EVENTS: Command channel for workers
 -- =============================================================================
--- Append-only log of control signals (STOP, PAUSE, PHASE_CHANGE).
+-- Append-only log of control signals (START, STOP, SET_PHASE, SET_WORKER_TARGET).
 -- Workers poll this table to know when to exit or change behavior.
 -- =============================================================================
 CREATE HYBRID TABLE IF NOT EXISTS RUN_CONTROL_EVENTS (
@@ -76,11 +85,11 @@ CREATE HYBRID TABLE IF NOT EXISTS RUN_CONTROL_EVENTS (
     run_id VARCHAR(36) NOT NULL,
     
     -- Event Payload
-    event_type VARCHAR(50) NOT NULL, -- STOP, PAUSE, RESUME, SET_PHASE
-    event_data VARIANT,              -- JSON payload (e.g. { "phase": "MEASUREMENT" })
+    event_type VARCHAR(50) NOT NULL, -- START, STOP, SET_PHASE, SET_WORKER_TARGET
+    event_data VARIANT NOT NULL,     -- JSON payload (scope + event fields)
     
     -- Ordering
-    sequence_id INTEGER,             -- Monotonic counter for this run
+    sequence_id INTEGER NOT NULL,    -- Monotonic counter for this run
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
     
     CONSTRAINT PK_RUN_CONTROL_EVENTS PRIMARY KEY (event_id),
@@ -138,3 +147,19 @@ CREATE HYBRID TABLE IF NOT EXISTS WORKER_HEARTBEATS (
 -- Hybrid Tables use primary keys for clustering, but secondary indexes 
 -- can help with specific lookups if needed.
 -- For now, we rely on point lookups by RUN_ID which are efficient.
+
+-- =============================================================================
+-- Schema Migrations (Idempotent Alterations)
+-- =============================================================================
+-- Hybrid Tables don't support CREATE OR ALTER, so we use explicit ALTERs
+-- wrapped in exception handlers for idempotent deployments.
+
+-- Add CANCELLATION_REASON column to RUN_STATUS (if not exists)
+-- This column stores the reason when a test is cancelled or fails abnormally.
+BEGIN
+    ALTER TABLE RUN_STATUS ADD COLUMN cancellation_reason TEXT;
+EXCEPTION
+    WHEN OTHER THEN
+        -- Column already exists, ignore error
+        NULL;
+END;

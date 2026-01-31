@@ -347,6 +347,75 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
         raise ValueError("load_mode must be CONCURRENCY, QPS, or FIND_MAX_CONCURRENCY")
     out["load_mode"] = load_mode
 
+    if "min_concurrency" in out:
+        raise ValueError("min_concurrency was renamed to scaling.min_connections")
+
+    scaling_cfg = out.get("scaling")
+    if not isinstance(scaling_cfg, dict):
+        scaling_cfg = {}
+    out["scaling"] = scaling_cfg
+
+    scaling_mode_raw = str(scaling_cfg.get("mode") or "AUTO").strip()
+    scaling_mode = scaling_mode_raw.upper() if scaling_mode_raw else "AUTO"
+    if scaling_mode not in {"AUTO", "BOUNDED", "FIXED"}:
+        raise ValueError("scaling.mode must be AUTO, BOUNDED, or FIXED")
+    scaling_cfg["mode"] = scaling_mode
+
+    def _coerce_optional_int(
+        value: Any, *, label: str, allow_unbounded: bool = False
+    ) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        coerced = _coerce_int(value, label=label)
+        if allow_unbounded and coerced == -1:
+            return None
+        return coerced
+
+    min_workers = _coerce_optional_int(
+        scaling_cfg.get("min_workers"), label="min_workers"
+    )
+    max_workers = _coerce_optional_int(
+        scaling_cfg.get("max_workers"), label="max_workers", allow_unbounded=True
+    )
+    min_connections = _coerce_optional_int(
+        scaling_cfg.get("min_connections"), label="min_connections"
+    )
+    max_connections = _coerce_optional_int(
+        scaling_cfg.get("max_connections"),
+        label="max_connections",
+        allow_unbounded=True,
+    )
+
+    if scaling_mode == "FIXED":
+        if "min_workers" not in scaling_cfg or min_workers is None:
+            raise ValueError("FIXED mode requires scaling.min_workers to be set")
+        if "min_connections" not in scaling_cfg or min_connections is None:
+            raise ValueError("FIXED mode requires scaling.min_connections to be set")
+
+    min_workers = int(min_workers or 1)
+    min_connections = int(min_connections or 1)
+    if min_workers < 1:
+        raise ValueError("min_workers must be >= 1")
+    if min_connections < 1:
+        raise ValueError("min_connections must be >= 1")
+    if max_workers is not None and max_workers < 1:
+        raise ValueError("max_workers must be >= 1 or null")
+    if max_connections is not None and max_connections < 1:
+        raise ValueError("max_connections must be >= 1 or null")
+    if max_workers is not None and min_workers > max_workers:
+        raise ValueError("min_workers must be <= max_workers")
+    if max_connections is not None and min_connections > max_connections:
+        raise ValueError("min_connections must be <= max_connections")
+
+    scaling_cfg["min_workers"] = int(min_workers)
+    scaling_cfg["max_workers"] = int(max_workers) if max_workers is not None else None
+    scaling_cfg["min_connections"] = int(min_connections)
+    scaling_cfg["max_connections"] = (
+        int(max_connections) if max_connections is not None else None
+    )
+
     if load_mode == "QPS":
         try:
             target_qps = float(out.get("target_qps") or 0)
@@ -356,11 +425,7 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
             raise ValueError("target_qps must be > 0 when load_mode=QPS")
         out["target_qps"] = float(target_qps)
 
-        min_concurrency = _coerce_int(
-            out.get("min_concurrency") or 1, label="min_concurrency"
-        )
-        if min_concurrency < 1:
-            raise ValueError("min_concurrency must be >= 1")
+        min_connections = int(scaling_cfg.get("min_connections") or 1)
         # In QPS mode, concurrent_connections represents the MAX worker cap.
         # Allow -1 to mean "no user cap" (still bounded at runtime by engine caps).
         raw_max = out.get("concurrent_connections")
@@ -371,42 +436,88 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
             raise ValueError(
                 "concurrent_connections must be >= 1 or -1 (no user cap) in QPS mode"
             )
-        if max_concurrency != -1 and min_concurrency > max_concurrency:
+        if max_concurrency != -1 and min_connections > max_concurrency:
             raise ValueError(
-                "min_concurrency must be <= concurrent_connections (or set concurrent_connections=-1)"
+                "min_connections must be <= concurrent_connections (or set concurrent_connections=-1)"
             )
-        out["min_concurrency"] = int(min_concurrency)
         out["concurrent_connections"] = int(max_concurrency)
     else:
         # Keep keys stable but default to "disabled" values.
         out["target_qps"] = (
             out.get("target_qps") if out.get("target_qps") is not None else None
         )
-        out["min_concurrency"] = _coerce_int(
-            out.get("min_concurrency") or 1, label="min_concurrency"
-        )
+        scaling_cfg["min_connections"] = int(scaling_cfg.get("min_connections") or 1)
 
-    # Autoscale config (UI-driven orchestration).
-    autoscale_enabled = bool(out.get("autoscale_enabled"))
+    if scaling_mode == "FIXED" and load_mode == "CONCURRENCY":
+        out["concurrent_connections"] = int(min_workers) * int(min_connections)
+
+    def _resolve_effective_max_connections() -> int | None:
+        per_worker_cap = None
+        if load_mode == "QPS":
+            raw_cap = out.get("concurrent_connections")
+            if isinstance(raw_cap, (int, float)) and int(raw_cap) != -1:
+                per_worker_cap = int(raw_cap)
+        elif isinstance(out.get("concurrent_connections"), (int, float)):
+            per_worker_cap = int(out.get("concurrent_connections") or 0)
+        if max_connections is not None:
+            if per_worker_cap is None:
+                return int(max_connections)
+            return int(min(per_worker_cap, max_connections))
+        return per_worker_cap
+
+    effective_max_connections = _resolve_effective_max_connections()
+    if max_workers is not None and effective_max_connections is not None:
+        max_total = int(max_workers) * int(effective_max_connections)
+        if load_mode in {"CONCURRENCY", "FIND_MAX_CONCURRENCY"}:
+            target_total = int(out.get("concurrent_connections") or 0)
+            if target_total > max_total:
+                raise ValueError(
+                    f"Target concurrency {target_total} unreachable with max {max_workers} workers × {effective_max_connections} connections"
+                )
+        elif load_mode == "QPS":
+            target_total = float(out.get("target_qps") or 0.0)
+            if target_total > float(max_total):
+                raise ValueError(
+                    f"Target QPS {target_total} unreachable with max {max_workers} workers × {effective_max_connections} connections"
+                )
+
+    # Resource guardrails (for AUTO and BOUNDED modes).
+    # Derive autoscale_enabled from scaling_mode for backward compatibility.
+    autoscale_enabled = scaling_mode != "FIXED"
     out["autoscale_enabled"] = autoscale_enabled
-    autoscale_max_cpu = _coerce_int(
-        out.get("autoscale_max_cpu_percent") or 85, label="autoscale_max_cpu_percent"
-    )
-    autoscale_max_mem = _coerce_int(
-        out.get("autoscale_max_memory_percent") or 85,
-        label="autoscale_max_memory_percent",
-    )
+
+    # Initialize guardrails block, migrating from legacy fields if needed.
+    guardrails_cfg = out.get("guardrails") or {}
+    if not isinstance(guardrails_cfg, dict):
+        guardrails_cfg = {}
+
+    # Get max_cpu_percent from guardrails or legacy field
+    max_cpu_raw = guardrails_cfg.get("max_cpu_percent")
+    if max_cpu_raw is None:
+        max_cpu_raw = out.get("autoscale_max_cpu_percent")
+    max_cpu = _coerce_int(max_cpu_raw or 80, label="guardrails.max_cpu_percent")
+
+    # Get max_memory_percent from guardrails or legacy field
+    max_mem_raw = guardrails_cfg.get("max_memory_percent")
+    if max_mem_raw is None:
+        max_mem_raw = out.get("autoscale_max_memory_percent")
+    max_mem = _coerce_int(max_mem_raw or 85, label="guardrails.max_memory_percent")
+
+    # Validate guardrails for non-FIXED modes
     if autoscale_enabled:
-        if autoscale_max_cpu <= 0 or autoscale_max_cpu > 100:
-            raise ValueError("autoscale_max_cpu_percent must be within (0, 100]")
-        if autoscale_max_mem <= 0 or autoscale_max_mem > 100:
-            raise ValueError("autoscale_max_memory_percent must be within (0, 100]")
-        if load_mode == "QPS" and int(out.get("concurrent_connections") or 0) == -1:
-            raise ValueError(
-                "Autoscale requires concurrent_connections >= 1 (per-node cap) when load_mode=QPS"
-            )
-    out["autoscale_max_cpu_percent"] = int(autoscale_max_cpu)
-    out["autoscale_max_memory_percent"] = int(autoscale_max_mem)
+        if max_cpu <= 0 or max_cpu > 100:
+            raise ValueError("guardrails.max_cpu_percent must be within (0, 100]")
+        if max_mem <= 0 or max_mem > 100:
+            raise ValueError("guardrails.max_memory_percent must be within (0, 100]")
+
+    # Store both new and legacy formats for compatibility
+    out["guardrails"] = {
+        "max_cpu_percent": int(max_cpu),
+        "max_memory_percent": int(max_mem),
+    }
+    # Keep legacy fields for backward compatibility
+    out["autoscale_max_cpu_percent"] = int(max_cpu)
+    out["autoscale_max_memory_percent"] = int(max_mem)
 
     return out
 
@@ -414,9 +525,11 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
 class TemplateConfig(BaseModel):
     """Template configuration structure."""
 
+    model_config = {"populate_by_name": True}
+
     table_type: str
     database: str
-    schema: str
+    schema_name: str = Field(..., alias="schema")
     table_name: str
     workload_type: str
     duration: int

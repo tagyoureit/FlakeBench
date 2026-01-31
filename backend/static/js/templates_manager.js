@@ -3,38 +3,12 @@ function templatesManager() {
     templates: [],
     filteredTemplates: [],
     searchQuery: "",
-    viewMode: "table", // 'table' | 'cards'
     loading: true,
     error: null,
+    preparingTemplateId: null,
 
     async init() {
-      this.initViewMode();
       await this.loadTemplates();
-    },
-
-    initViewMode() {
-      try {
-        const raw = localStorage.getItem("templatesViewMode");
-        const mode = String(raw || "").toLowerCase();
-        if (mode === "cards" || mode === "table") {
-          this.viewMode = mode;
-        }
-      } catch {
-        // Ignore localStorage access issues (private mode, etc.)
-      }
-    },
-
-    setViewMode(mode) {
-      const v = String(mode || "").toLowerCase();
-      if (v !== "cards" && v !== "table") {
-        return;
-      }
-      this.viewMode = v;
-      try {
-        localStorage.setItem("templatesViewMode", v);
-      } catch {
-        // ignore
-      }
     },
 
     tableTypeKey(template) {
@@ -138,15 +112,18 @@ function templatesManager() {
       window.location.href = "/configure?mode=new";
     },
 
-    prepareTest(template) {
+    async prepareTest(template) {
+      if (this.preparingTemplateId) return; // Already preparing
+      
       const tableType = String(template?.config?.table_type || "").toUpperCase();
       const isPostgres =
         tableType === "POSTGRES" ||
         tableType === "SNOWFLAKE_POSTGRES";
 
-      // For Snowflake-executed templates, enforce that the execution warehouse
-      // isn't the same as the results warehouse (`SNOWFLAKE_WAREHOUSE`).
-      const checkAndRun = async () => {
+      this.preparingTemplateId = template.template_id;
+      try {
+        // For Snowflake-executed templates, enforce that the execution warehouse
+        // isn't the same as the results warehouse (`SNOWFLAKE_WAREHOUSE`).
         if (!isPostgres) {
           const infoResp = await fetch("/api/info");
           const info = infoResp.ok ? await infoResp.json() : {};
@@ -165,10 +142,8 @@ function templatesManager() {
           }
         }
 
-        const autoscaleEnabled = Boolean(template?.config?.autoscale_enabled);
-        const endpoint = autoscaleEnabled
-          ? `/api/tests/from-template/${template.template_id}/autoscale`
-          : `/api/tests/from-template/${template.template_id}`;
+        // Use unified endpoint for all scaling modes (AUTO, BOUNDED, FIXED)
+        const endpoint = `/api/tests/from-template/${template.template_id}`;
         const resp = await fetch(endpoint, { method: "POST" });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
@@ -176,20 +151,15 @@ function templatesManager() {
         }
         const data = await resp.json();
         window.location.href = data.dashboard_url || `/dashboard/${data.test_id}`;
-      };
-
-      checkAndRun().catch((e) => {
+      } catch (e) {
         console.error("Failed to prepare template:", e);
         window.toast.error(`Failed to prepare test: ${e.message || e}`);
-      });
-    },
-
-    useTemplate(template) {
-      localStorage.setItem("selectedTemplate", JSON.stringify(template));
+      } finally {
+        this.preparingTemplateId = null;
+      }
     },
 
     editTemplate(template) {
-      localStorage.setItem("selectedTemplate", JSON.stringify(template));
       const templateId = encodeURIComponent(String(template?.template_id || ""));
       window.location.href = templateId
         ? `/configure?template_id=${templateId}`

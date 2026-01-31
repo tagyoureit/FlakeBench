@@ -341,42 +341,28 @@ def test_test_run():
 
 
 def test_metrics():
-    """Test Metrics model."""
+    """Test Metrics and MetricsSnapshot models."""
     print("\n🔍 Testing Metrics")
     print("=" * 60)
 
     try:
         metrics = Metrics(
-            elapsed_seconds=30.5,
-            total_operations=3050,
-            successful_operations=3048,
-            failed_operations=2,
-            current_qps=102.3,
-            avg_qps=100.0,
-            peak_qps=125.6,
-            active_connections=50,
-            idle_connections=5,
+            total_queries=1000,
+            successful_queries=990,
+            failed_queries=10,
+            read_count=800,
+            write_count=200,
+            error_count=10,
+            total_latency_ms=50000.0,
+            percentiles=LatencyPercentiles(
+                p50_ms=40.0,
+                p95_ms=80.0,
+                p99_ms=150.0,
+            ),
         )
-
-        # Set latency
-        metrics.overall_latency = LatencyPercentiles(
-            p50=12.5,
-            p95=45.2,
-            p99=78.9,
-            avg=18.3,
-            min=2.1,
-            max=156.4,
-        )
-
-        print("✅ Metrics created")
-        print(f"   Operations: {metrics.total_operations}")
-        print(f"   QPS: {metrics.current_qps:.2f}")
-        print(f"   P95 latency: {metrics.overall_latency.p95:.2f}ms")
-        print(f"   Success rate: {metrics.success_rate:.4f}")
-
-        # Test WebSocket payload
-        payload = metrics.to_websocket_payload()
-        print(f"✅ WebSocket payload created ({len(str(payload))} bytes)")
+        print(f"✅ Metrics created: {metrics.total_queries} queries")
+        print(f"   Average latency: {metrics.avg_latency_ms:.2f}ms")
+        print(f"   Success rate: {metrics.success_rate * 100:.1f}%")
 
         # Test snapshot
         MetricsSnapshot.from_metrics(metrics)
@@ -388,6 +374,74 @@ def test_metrics():
         print(f"❌ Metrics test failed: {e}")
         import traceback
 
+        traceback.print_exc()
+        return False
+
+
+def test_scenario_total_threads_attribute():
+    """Test TestScenario total_threads attribute access (regression test for template creation)."""
+    print("\n🔍 Testing TestScenario total_threads attribute access")
+    print("=" * 60)
+
+    try:
+        table = TableConfig(
+            name="test_table",
+            table_type=TableType.STANDARD,
+            columns={"id": "NUMBER", "value": "VARCHAR"},
+        )
+
+        # Create scenario with new field name
+        scenario = TestScenario(
+            name="threads_test",
+            duration_seconds=60,
+            total_threads=25,
+            workload_type=WorkloadType.READ_HEAVY,
+            table_configs=[table],
+        )
+        assert scenario.total_threads == 25, "total_threads attribute access failed"
+        print(f"✅ scenario.total_threads = {scenario.total_threads}")
+
+        # Create scenario with alias (backward compatibility)
+        scenario_alias = TestScenario(
+            name="alias_test",
+            duration_seconds=60,
+            concurrent_connections=30,  # Using alias
+            workload_type=WorkloadType.READ_HEAVY,
+            table_configs=[table],
+        )
+        # Access via NEW field name (should work due to alias)
+        assert scenario_alias.total_threads == 30, "alias should map to total_threads"
+        print(f"✅ scenario (via alias) .total_threads = {scenario_alias.total_threads}")
+
+        # Test min_threads_per_worker attribute
+        scenario_min = TestScenario(
+            name="min_threads_test",
+            duration_seconds=60,
+            total_threads=50,
+            min_threads_per_worker=5,
+            workload_type=WorkloadType.READ_HEAVY,
+            table_configs=[table],
+        )
+        assert scenario_min.min_threads_per_worker == 5, "min_threads_per_worker access failed"
+        print(f"✅ scenario.min_threads_per_worker = {scenario_min.min_threads_per_worker}")
+
+        # Test min_threads_per_worker via alias
+        scenario_min_alias = TestScenario(
+            name="min_alias_test",
+            duration_seconds=60,
+            total_threads=50,
+            min_connections=8,  # Using alias
+            workload_type=WorkloadType.READ_HEAVY,
+            table_configs=[table],
+        )
+        assert scenario_min_alias.min_threads_per_worker == 8, "alias should map to min_threads_per_worker"
+        print(f"✅ scenario (via alias) .min_threads_per_worker = {scenario_min_alias.min_threads_per_worker}")
+
+        return True
+
+    except Exception as e:
+        print(f"❌ TestScenario total_threads test failed: {e}")
+        import traceback
         traceback.print_exc()
         return False
 
@@ -405,6 +459,7 @@ def main():
         ("TestResult", test_test_result),
         ("TestRun", test_test_run),
         ("Metrics", test_metrics),
+        ("TestScenario total_threads", test_scenario_total_threads_attribute),
     ]
 
     results = []

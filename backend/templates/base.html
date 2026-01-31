@@ -10,12 +10,34 @@
     <script src="/static/js/htmx.min.js"></script>
     <script src="/static/js/ws.js"></script>
     <script src="/static/js/toast.js"></script>
+    <script src="/static/js/chart.min.js"></script>
     <script defer src="/static/js/templates_manager.js"></script>
-    <script defer src="/static/js/dashboard.js?v=3"></script>
+    <!-- Dashboard modules (load before main dashboard.js) -->
+    <script defer src="/static/js/dashboard/state.js?v=2"></script>
+    <script defer src="/static/js/dashboard/formatters.js?v=2"></script>
+    <script defer src="/static/js/dashboard/test-actions.js?v=2"></script>
+    <script defer src="/static/js/dashboard/display.js?v=3"></script>
+    <script defer src="/static/js/dashboard/workers.js?v=2"></script>
+    <script defer src="/static/js/dashboard/find-max.js?v=2"></script>
+    <script defer src="/static/js/dashboard/slo.js?v=2"></script>
+    <script defer src="/static/js/dashboard/latency.js?v=2"></script>
+    <script defer src="/static/js/dashboard/phase.js?v=2"></script>
+    <script defer src="/static/js/dashboard/websocket.js?v=2"></script>
+    <script defer src="/static/js/dashboard/timers.js?v=2"></script>
+    <script defer src="/static/js/dashboard/logs.js?v=2"></script>
+    <script defer src="/static/js/dashboard/polling.js?v=2"></script>
+    <script defer src="/static/js/dashboard/timeseries.js?v=2"></script>
+    <script defer src="/static/js/dashboard/breakdown.js?v=2"></script>
+    <script defer src="/static/js/dashboard/step-history.js?v=2"></script>
+    <script defer src="/static/js/dashboard/ai.js?v=2"></script>
+    <script defer src="/static/js/dashboard/ui.js?v=2"></script>
+    <script defer src="/static/js/dashboard/data-loading.js?v=2"></script>
+    <script defer src="/static/js/dashboard/historical-metrics.js?v=2"></script>
+    <!-- Main dashboard (composes all modules) -->
+    <script defer src="/static/js/dashboard.js?v=5"></script>
     <script defer src="/static/js/history.js"></script>
     <script defer src="/static/js/compare_detail.js"></script>
     <script defer src="/static/js/alpine.min.js"></script>
-    <script src="/static/js/chart.min.js"></script>
     
     {% block extra_head %}{% endblock %}
 </head>

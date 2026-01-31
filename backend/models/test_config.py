@@ -10,7 +10,7 @@ Defines Pydantic models for test configurations including:
 from enum import Enum
 from typing import Optional, Dict, Any, List
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class TableType(str, Enum):
@@ -188,15 +188,16 @@ class TestScenario(BaseModel):
     )
 
     # Concurrency settings
-    concurrent_connections: int = Field(
-        10, ge=1, description="Number of concurrent connections"
+    # Note: "total_threads" is the new canonical name; "concurrent_connections" is kept as alias
+    total_threads: int = Field(
+        10, ge=1, alias="concurrent_connections", description="Number of concurrent threads"
     )
     # Load mode
     load_mode: str = Field(
         "CONCURRENCY",
         description=(
-            "Load mode: CONCURRENCY (fixed workers), QPS (auto-scale workers), "
-            "or FIND_MAX_CONCURRENCY (step-load to find max sustainable concurrency). "
+            "Load mode: CONCURRENCY (fixed threads), QPS (auto-scale workers), "
+            "or FIND_MAX_CONCURRENCY (step-load to find max sustainable throughput). "
             "In QPS mode, target_qps is an app-side throughput target (ops/sec), not Snowflake RUNNING."
         ),
     )
@@ -206,15 +207,16 @@ class TestScenario(BaseModel):
             "Target throughput (ops/sec) when load_mode=QPS (app-side QPS across the template mix)."
         ),
     )
-    min_concurrency: int = Field(
-        1, ge=1, description="Starting/min worker count when load_mode=QPS"
+    # Note: "min_threads_per_worker" is the new canonical name; "min_connections" is kept as alias
+    min_threads_per_worker: int = Field(
+        1, ge=1, alias="min_connections", description="Starting/min threads per worker when load_mode=QPS"
     )
 
-    # Worker group sharding (multi-process / multi-node)
+    # Worker group sharding (multi-process / multi-worker)
     worker_group_id: int = Field(
         0,
         ge=0,
-        description="Worker group index for sharding value pools across processes/nodes",
+        description="Worker group index for sharding value pools across processes/workers",
     )
     worker_group_count: int = Field(
         1,
@@ -338,5 +340,4 @@ class TestScenario(BaseModel):
             raise ValueError("CUSTOM workload requires custom_queries")
         return self
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True, populate_by_name=True)

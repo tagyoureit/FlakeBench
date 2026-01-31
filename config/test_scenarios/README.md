@@ -2,9 +2,10 @@
 
 This directory contains YAML templates for predefined test scenarios.
 
-**Important:** The app no longer creates tables. These templates assume the referenced table/view
-already exists. Any schema/index/clustering sections are informational only; runtime introspects
-the selected object schema from the database.
+**Important:** The app no longer creates tables. These templates assume the
+referenced table/view already exists. Any schema/index/clustering sections
+are informational only; runtime introspects the selected object schema from
+the database.
 
 ## Template Structure
 
@@ -42,7 +43,8 @@ test:
     ...
 ```
 
-### Key Sections:
+### Key Sections
+
 1. **Template Metadata** (at top) - name, description, version, category
 2. **Table selection** - Database/schema/table name (must already exist)
 3. **Workload specifications** - Operation types and distributions
@@ -60,8 +62,9 @@ test:
 
 ## Usage
 
-These YAML files are **reference examples**. The current app UI uses templates stored in
-Snowflake (`TEST_TEMPLATES`) via the `/templates` and `/configure` pages.
+These YAML files are **reference examples**. The current app UI uses templates
+stored in Snowflake (`TEST_TEMPLATES`) via the `/templates` and `/configure`
+pages.
 
 If you want to programmatically load YAML templates, use `backend.core.template_loader.TemplateLoader`
 directly in Python (note: it will still require the target table/view to exist).

@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TestStatus(str, Enum):
@@ -75,7 +75,10 @@ class TestResult(BaseModel):
     )
 
     # Workload summary
-    concurrent_connections: int = Field(..., description="Concurrent connections")
+    # Note: "total_threads" is the new canonical name; "concurrent_connections" is kept as alias
+    total_threads: int = Field(
+        ..., alias="concurrent_connections", description="Number of concurrent threads"
+    )
     total_operations: int = Field(0, description="Total operations executed")
     read_operations: int = Field(0, description="Read operations")
     write_operations: int = Field(0, description="Write operations")
@@ -209,12 +212,14 @@ class TestResult(BaseModel):
     tags: Optional[Dict[str, str]] = Field(None, description="Custom tags")
     notes: Optional[str] = Field(None, description="Additional notes")
 
-    class Config:
-        use_enum_values = True
-        json_encoders = {
+    model_config = ConfigDict(
+        use_enum_values=True,
+        populate_by_name=True,
+        json_encoders={
             datetime: lambda v: v.isoformat(),
             UUID: lambda v: str(v),
-        }
+        },
+    )
 
 
 class TestRun(BaseModel):
@@ -264,12 +269,13 @@ class TestRun(BaseModel):
     # User information
     created_by: Optional[str] = Field(None, description="User who created run")
 
-    class Config:
-        use_enum_values = True
-        json_encoders = {
+    model_config = ConfigDict(
+        use_enum_values=True,
+        json_encoders={
             datetime: lambda v: v.isoformat(),
             UUID: lambda v: str(v),
-        }
+        },
+    )
 
     def add_test_result(self, result: TestResult):
         """Add a test result to this run."""

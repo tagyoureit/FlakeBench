@@ -31,60 +31,20 @@ function testHistory() {
     const tableType = t.table_type != null ? String(t.table_type) : "";
     const warehouseSize = t.warehouse_size != null ? String(t.warehouse_size) : "";
 
-    // Prefer list/search payload fields; fall back to /api/tests/{id} fields.
-    const opsPerSec =
-      t.ops_per_sec != null
-        ? Number(t.ops_per_sec)
-        : t.qps != null
-          ? Number(t.qps)
-          : 0;
-    const p50Latency =
-      t.p50_latency != null
-        ? Number(t.p50_latency)
-        : t.p50_latency_ms != null
-          ? Number(t.p50_latency_ms)
-          : 0;
-    const p95Latency =
-      t.p95_latency != null
-        ? Number(t.p95_latency)
-        : t.p95_latency_ms != null
-          ? Number(t.p95_latency_ms)
-          : 0;
-    const p99Latency =
-      t.p99_latency != null
-        ? Number(t.p99_latency)
-        : t.p99_latency_ms != null
-          ? Number(t.p99_latency_ms)
-          : 0;
+    const opsPerSec = Number(t.ops_per_sec);
+    const p50Latency = Number(t.p50_latency);
+    const p95Latency = Number(t.p95_latency);
+    const p99Latency = Number(t.p99_latency);
 
     const status = t.status != null ? String(t.status) : "";
 
-    // In list/search we already return percent; in /api/tests/{id} compute from totals.
-    let errorRate = 0;
-    if (t.error_rate != null) {
-      errorRate = Number(t.error_rate);
-    } else if (t.failed_operations != null || t.total_operations != null) {
-      const failed = Number(t.failed_operations || 0);
-      const total = Number(t.total_operations || 0);
-      errorRate = total > 0 ? (failed / total) * 100.0 : 0;
-    }
+    const errorRate = Number(t.error_rate);
 
     const concurrentConnections =
       t.concurrent_connections != null ? Number(t.concurrent_connections) : 0;
-    const duration =
-      t.duration != null
-        ? Number(t.duration)
-        : t.duration_seconds != null
-          ? Number(t.duration_seconds)
-          : 0;
+    const duration = Number(t.duration);
 
-    // Prefer created_at (history/search); fall back to start_time (details endpoint).
-    const createdAt =
-      t.created_at != null
-        ? String(t.created_at)
-        : t.start_time != null
-          ? String(t.start_time)
-          : "";
+    const createdAt = t.created_at != null ? String(t.created_at) : "";
 
     return {
       test_id: testId,

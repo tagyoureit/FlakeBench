@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple, Optional
 from uuid import uuid4
@@ -82,6 +83,124 @@ async def fetch_warehouse_config_snapshot(
         return None
 
 
+async def insert_warehouse_poll_snapshot(
+    *,
+    run_id: str,
+    warehouse_name: str,
+    elapsed_seconds: float | None,
+    row: Sequence[Any],
+) -> None:
+    pool = snowflake_pool.get_default_pool()
+    snapshot_id = str(uuid4())
+    timestamp = datetime.now(UTC).isoformat()
+
+    def _to_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value) if value is not None else default
+        except Exception:
+            return default
+
+    def _row_to_json(values: Sequence[Any]) -> str:
+        try:
+            return json.dumps(values, default=str)
+        except Exception:
+            return json.dumps([str(v) for v in values])
+
+    min_cluster_count = _to_int(row[4] if len(row) > 4 else None, default=1)
+    max_cluster_count = _to_int(row[5] if len(row) > 5 else None, default=1)
+    started_clusters = _to_int(row[6] if len(row) > 6 else None)
+    running = _to_int(row[7] if len(row) > 7 else None)
+    queued = _to_int(row[8] if len(row) > 8 else None)
+    scaling_policy = row[31] if len(row) > 31 and row[31] else "STANDARD"
+
+    query = f"""
+    INSERT INTO {_results_prefix()}.WAREHOUSE_POLL_SNAPSHOTS (
+        SNAPSHOT_ID,
+        RUN_ID,
+        TIMESTAMP,
+        ELAPSED_SECONDS,
+        WAREHOUSE_NAME,
+        STARTED_CLUSTERS,
+        RUNNING,
+        QUEUED,
+        MIN_CLUSTER_COUNT,
+        MAX_CLUSTER_COUNT,
+        SCALING_POLICY,
+        RAW_RESULT
+    )
+    SELECT
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?)
+    """
+
+    params = [
+        snapshot_id,
+        run_id,
+        timestamp,
+        float(elapsed_seconds) if elapsed_seconds is not None else None,
+        str(warehouse_name),
+        started_clusters,
+        running,
+        queued,
+        min_cluster_count,
+        max_cluster_count,
+        str(scaling_policy),
+        _row_to_json(row),
+    ]
+
+    await pool.execute_query(query, params=params)
+
+
+async def fetch_latest_warehouse_poll_snapshot(*, run_id: str) -> dict[str, Any] | None:
+    pool = snowflake_pool.get_default_pool()
+    prefix = _results_prefix()
+    rows = await pool.execute_query(
+        f"""
+        SELECT
+            TIMESTAMP,
+            ELAPSED_SECONDS,
+            WAREHOUSE_NAME,
+            STARTED_CLUSTERS,
+            RUNNING,
+            QUEUED,
+            MIN_CLUSTER_COUNT,
+            MAX_CLUSTER_COUNT,
+            SCALING_POLICY
+        FROM {prefix}.WAREHOUSE_POLL_SNAPSHOTS
+        WHERE RUN_ID = ?
+        ORDER BY TIMESTAMP DESC
+        LIMIT 1
+        """,
+        params=[run_id],
+    )
+    if not rows:
+        return None
+
+    (
+        timestamp,
+        elapsed_seconds,
+        warehouse,
+        started_clusters,
+        running,
+        queued,
+        min_cluster_count,
+        max_cluster_count,
+        scaling_policy,
+    ) = rows[0]
+    return {
+        "warehouse": str(warehouse or ""),
+        "timestamp": timestamp.isoformat()
+        if hasattr(timestamp, "isoformat")
+        else str(timestamp),
+        "elapsed_seconds": float(elapsed_seconds or 0.0),
+        "started_clusters": int(started_clusters or 0),
+        "running": int(running or 0),
+        "queued": int(queued or 0),
+        "min_cluster_count": int(min_cluster_count or 0),
+        "max_cluster_count": int(max_cluster_count or 0),
+        "scaling_policy": str(scaling_policy or "STANDARD"),
+    }
+
+
 async def insert_test_start(
     *,
     test_id: str,
@@ -140,7 +259,7 @@ async def insert_test_start(
         warehouse_size,
         "RUNNING",
         now,
-        scenario.concurrent_connections,
+        scenario.total_threads,
         json.dumps(payload),
         json.dumps(warehouse_config_snapshot) if warehouse_config_snapshot else None,
         query_tag,
@@ -207,10 +326,115 @@ async def insert_test_prepare(
         warehouse_size,
         "PREPARED",
         now,
-        scenario.concurrent_connections,
+        scenario.total_threads,
         json.dumps(payload),
         json.dumps(warehouse_config_snapshot) if warehouse_config_snapshot else None,
         query_tag,
+    ]
+
+    await pool.execute_query(query, params=params)
+
+
+async def upsert_worker_heartbeat(
+    *,
+    run_id: str,
+    worker_id: str,
+    worker_group_id: int,
+    status: str,
+    phase: str | None,
+    active_connections: int,
+    target_connections: int,
+    cpu_percent: float | None,
+    memory_percent: float | None,
+    queries_processed: int,
+    error_count: int,
+    last_error: str | None,
+) -> None:
+    pool = snowflake_pool.get_default_pool()
+    now = datetime.now(UTC).isoformat()
+
+    query = f"""
+    MERGE INTO {_results_prefix()}.WORKER_HEARTBEATS AS target
+    USING (
+        SELECT
+            ? AS RUN_ID,
+            ? AS WORKER_ID,
+            ? AS WORKER_GROUP_ID,
+            ? AS STATUS,
+            ? AS PHASE,
+            ? AS LAST_HEARTBEAT,
+            ? AS ACTIVE_CONNECTIONS,
+            ? AS TARGET_CONNECTIONS,
+            ? AS CPU_PERCENT,
+            ? AS MEMORY_PERCENT,
+            ? AS QUERIES_PROCESSED,
+            ? AS ERROR_COUNT,
+            ? AS LAST_ERROR
+    ) AS src
+    ON target.RUN_ID = src.RUN_ID
+       AND target.WORKER_ID = src.WORKER_ID
+    WHEN MATCHED THEN UPDATE SET
+        WORKER_GROUP_ID = src.WORKER_GROUP_ID,
+        STATUS = src.STATUS,
+        PHASE = src.PHASE,
+        LAST_HEARTBEAT = src.LAST_HEARTBEAT,
+        HEARTBEAT_COUNT = COALESCE(target.HEARTBEAT_COUNT, 0) + 1,
+        ACTIVE_CONNECTIONS = src.ACTIVE_CONNECTIONS,
+        TARGET_CONNECTIONS = src.TARGET_CONNECTIONS,
+        CPU_PERCENT = src.CPU_PERCENT,
+        MEMORY_PERCENT = src.MEMORY_PERCENT,
+        QUERIES_PROCESSED = src.QUERIES_PROCESSED,
+        ERROR_COUNT = src.ERROR_COUNT,
+        LAST_ERROR = src.LAST_ERROR,
+        UPDATED_AT = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (
+        RUN_ID,
+        WORKER_ID,
+        WORKER_GROUP_ID,
+        STATUS,
+        PHASE,
+        LAST_HEARTBEAT,
+        HEARTBEAT_COUNT,
+        ACTIVE_CONNECTIONS,
+        TARGET_CONNECTIONS,
+        CPU_PERCENT,
+        MEMORY_PERCENT,
+        QUERIES_PROCESSED,
+        ERROR_COUNT,
+        LAST_ERROR
+    )
+    VALUES (
+        src.RUN_ID,
+        src.WORKER_ID,
+        src.WORKER_GROUP_ID,
+        src.STATUS,
+        src.PHASE,
+        src.LAST_HEARTBEAT,
+        1,
+        src.ACTIVE_CONNECTIONS,
+        src.TARGET_CONNECTIONS,
+        src.CPU_PERCENT,
+        src.MEMORY_PERCENT,
+        src.QUERIES_PROCESSED,
+        src.ERROR_COUNT,
+        src.LAST_ERROR
+    )
+    """
+
+    params = [
+        run_id,
+        worker_id,
+        int(worker_group_id),
+        str(status).upper(),
+        str(phase).upper() if phase else None,
+        now,
+        int(active_connections or 0),
+        int(target_connections or 0),
+        float(cpu_percent) if cpu_percent is not None else None,
+        float(memory_percent) if memory_percent is not None else None,
+        int(queries_processed or 0),
+        int(error_count or 0),
+        last_error,
     ]
 
     await pool.execute_query(query, params=params)
@@ -231,6 +455,7 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
             MIN(WAREHOUSE_SIZE),
             MIN(START_TIME),
             MAX(END_TIME),
+            TIMESTAMPDIFF(SECOND, MIN(START_TIME), MAX(END_TIME)) AS DURATION_SECONDS,
             SUM(COALESCE(CONCURRENT_CONNECTIONS, 0)) AS TOTAL_CONCURRENCY,
             SUM(COALESCE(READ_OPERATIONS, 0)) AS READ_OPERATIONS,
             SUM(COALESCE(WRITE_OPERATIONS, 0)) AS WRITE_OPERATIONS,
@@ -242,15 +467,15 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
                     THEN 1
                     ELSE 0
                 END
-            ) AS FAILED_NODES,
+            ) AS FAILED_WORKERS,
             SUM(
                 CASE
                     WHEN UPPER(STATUS) IN ('RUNNING', 'PROCESSING', 'PREPARING')
                     THEN 1
                     ELSE 0
                 END
-            ) AS RUNNING_NODES,
-            COUNT(*) AS NODE_COUNT
+            ) AS RUNNING_WORKERS,
+            COUNT(*) AS WORKER_COUNT
         FROM {prefix}.TEST_RESULTS
         WHERE RUN_ID = ?
           AND TEST_ID <> ?
@@ -269,22 +494,23 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         warehouse_size,
         start_time,
         end_time,
+        duration_seconds_db,
         total_concurrency,
         read_operations,
         write_operations,
         failed_operations,
         total_operations,
-        failed_nodes,
-        running_nodes,
-        node_count,
+        failed_workers,
+        running_workers,
+        worker_count,
     ) = summary_rows[0]
-    if not node_count:
+    if not worker_count:
         return
 
     status = "COMPLETED"
-    if failed_nodes and failed_nodes > 0:
+    if failed_workers and failed_workers > 0:
         status = "FAILED"
-    elif running_nodes and running_nodes > 0:
+    elif running_workers and running_workers > 0:
         status = "RUNNING"
 
     metrics_rows = await pool.execute_query(
@@ -293,11 +519,11 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
             SELECT
                 *,
                 ROW_NUMBER() OVER (
-                    PARTITION BY TEST_ID
+                    PARTITION BY WORKER_ID
                     ORDER BY TIMESTAMP DESC
                 ) AS RN
-            FROM {prefix}.NODE_METRICS_SNAPSHOTS
-            WHERE PARENT_RUN_ID = ?
+            FROM {prefix}.WORKER_METRICS_SNAPSHOTS
+            WHERE RUN_ID = ?
         )
         SELECT
             SUM(TOTAL_QUERIES) AS TOTAL_QUERIES,
@@ -306,21 +532,9 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
             SUM(ERROR_COUNT) AS ERROR_COUNT,
             SUM(QPS) AS QPS,
             MAX(ELAPSED_SECONDS) AS ELAPSED_SECONDS,
-            CASE
-                WHEN SUM(TOTAL_QUERIES) > 0
-                THEN SUM(P50_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
-                ELSE 0
-            END AS P50_LATENCY_MS,
-            CASE
-                WHEN SUM(TOTAL_QUERIES) > 0
-                THEN SUM(P95_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
-                ELSE 0
-            END AS P95_LATENCY_MS,
-            CASE
-                WHEN SUM(TOTAL_QUERIES) > 0
-                THEN SUM(P99_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
-                ELSE 0
-            END AS P99_LATENCY_MS,
+            AVG(IFF(TOTAL_QUERIES > 0, P50_LATENCY_MS, NULL)) AS P50_LATENCY_MS,
+            MAX(IFF(TOTAL_QUERIES > 0, P95_LATENCY_MS, NULL)) AS P95_LATENCY_MS,
+            MAX(IFF(TOTAL_QUERIES > 0, P99_LATENCY_MS, NULL)) AS P99_LATENCY_MS,
             CASE
                 WHEN SUM(TOTAL_QUERIES) > 0
                 THEN SUM(AVG_LATENCY_MS * TOTAL_QUERIES) / SUM(TOTAL_QUERIES)
@@ -333,30 +547,39 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
     )
 
     (
-        node_total_queries,
-        node_read_count,
-        node_write_count,
-        node_error_count,
-        node_qps,
-        node_elapsed,
-        node_p50,
-        node_p95,
-        node_p99,
-        node_avg,
+        worker_total_queries,
+        worker_read_count,
+        worker_write_count,
+        worker_error_count,
+        worker_qps,
+        worker_elapsed,
+        worker_p50,
+        worker_p95,
+        worker_p99,
+        worker_avg,
     ) = metrics_rows[0] if metrics_rows else (None,) * 10
 
-    duration_seconds = float(node_elapsed or 0.0)
+    # Use duration from TIMESTAMPDIFF calculated in Snowflake to avoid timezone issues.
+    # Snowflake returns naive datetimes in session timezone (often Pacific), so
+    # Python-based (end_time - start_time).total_seconds() causes ~8 hour discrepancy.
+    if duration_seconds_db is not None and float(duration_seconds_db) >= 0:
+        duration_seconds = float(duration_seconds_db)
+    else:
+        # Fallback to worker elapsed if database duration not available
+        duration_seconds = float(worker_elapsed or 0.0)
     total_operations = (
-        int(node_total_queries) if node_total_queries is not None else total_operations
+        int(worker_total_queries)
+        if worker_total_queries is not None
+        else total_operations
     )
     read_operations = (
-        int(node_read_count) if node_read_count is not None else read_operations
+        int(worker_read_count) if worker_read_count is not None else read_operations
     )
     write_operations = (
-        int(node_write_count) if node_write_count is not None else write_operations
+        int(worker_write_count) if worker_write_count is not None else write_operations
     )
-    error_count = int(node_error_count or 0)
-    qps = float(node_qps or 0.0)
+    error_count = int(worker_error_count or 0)
+    qps = float(worker_qps or 0.0)
     reads_per_second = (
         float(read_operations) / duration_seconds if duration_seconds > 0 else 0.0
     )
@@ -370,11 +593,11 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
     custom_metrics = {
         "multi_node": {
             "parent_run_id": parent_run_id,
-            "node_count": int(node_count or 0),
+            "worker_count": int(worker_count or 0),
         }
     }
 
-    # Fetch FIND_MAX_RESULT from the first child test (all nodes run same step progression)
+    # Fetch FIND_MAX_RESULT from the first child test (all workers run same step progression)
     find_max_rows = await pool.execute_query(
         f"""
         SELECT FIND_MAX_RESULT
@@ -480,10 +703,10 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         float(qps or 0.0),
         float(reads_per_second or 0.0),
         float(writes_per_second or 0.0),
-        float(node_avg or 0.0),
-        float(node_p50 or 0.0),
-        float(node_p95 or 0.0),
-        float(node_p99 or 0.0),
+        float(worker_avg or 0.0),
+        float(worker_p50 or 0.0),
+        float(worker_p95 or 0.0),
+        float(worker_p99 or 0.0),
         int(error_count or 0),
         float(error_rate or 0.0),
         json.dumps(custom_metrics),
@@ -508,10 +731,10 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         float(qps or 0.0),
         float(reads_per_second or 0.0),
         float(writes_per_second or 0.0),
-        float(node_avg or 0.0),
-        float(node_p50 or 0.0),
-        float(node_p95 or 0.0),
-        float(node_p99 or 0.0),
+        float(worker_avg or 0.0),
+        float(worker_p50 or 0.0),
+        float(worker_p95 or 0.0),
+        float(worker_p99 or 0.0),
         int(error_count or 0),
         float(error_rate or 0.0),
         json.dumps(custom_metrics),
@@ -521,71 +744,94 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
     await pool.execute_query(merge_query, params=params)
 
 
-async def insert_node_metrics_snapshot(
+async def insert_worker_metrics_snapshot(
     *,
-    parent_run_id: str,
+    run_id: str,
     test_id: str,
+    worker_id: str,
     worker_group_id: int,
     worker_group_count: int,
-    node_id: str | None,
     metrics: Metrics,
+    phase: str | None,
+    target_connections: int,
 ) -> None:
     pool = snowflake_pool.get_default_pool()
     snapshot_id = str(uuid4())
 
     snapshot_query = f"""
-    INSERT INTO {_results_prefix()}.NODE_METRICS_SNAPSHOTS (
+    INSERT INTO {_results_prefix()}.WORKER_METRICS_SNAPSHOTS (
         SNAPSHOT_ID,
-        PARENT_RUN_ID,
+        RUN_ID,
         TEST_ID,
+        WORKER_ID,
         WORKER_GROUP_ID,
         WORKER_GROUP_COUNT,
-        NODE_ID,
         TIMESTAMP,
         ELAPSED_SECONDS,
+        PHASE,
         TOTAL_QUERIES,
+        READ_COUNT,
+        WRITE_COUNT,
+        ERROR_COUNT,
         QPS,
         P50_LATENCY_MS,
         P95_LATENCY_MS,
         P99_LATENCY_MS,
         AVG_LATENCY_MS,
-        READ_COUNT,
-        WRITE_COUNT,
-        ERROR_COUNT,
-        BYTES_PER_SECOND,
-        ROWS_PER_SECOND,
+        MIN_LATENCY_MS,
+        MAX_LATENCY_MS,
         ACTIVE_CONNECTIONS,
-        TARGET_WORKERS,
+        TARGET_CONNECTIONS,
+        CPU_PERCENT,
+        MEMORY_PERCENT,
         CUSTOM_METRICS
     )
     SELECT
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?)
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?)
     """
 
     params = [
         snapshot_id,
-        parent_run_id,
+        run_id,
         test_id,
-        worker_group_id,
-        worker_group_count,
-        node_id,
+        worker_id,
+        int(worker_group_id),
+        int(worker_group_count),
         metrics.timestamp.isoformat(),
-        metrics.elapsed_seconds,
-        metrics.total_operations,
-        metrics.current_qps,
-        metrics.overall_latency.p50,
-        metrics.overall_latency.p95,
-        metrics.overall_latency.p99,
-        metrics.overall_latency.avg,
-        metrics.read_metrics.count,
-        metrics.write_metrics.count,
-        metrics.failed_operations,
-        metrics.bytes_per_second,
-        metrics.rows_per_second,
-        metrics.active_connections,
-        metrics.target_workers,
+        float(metrics.elapsed_seconds),
+        str(phase).upper() if phase else None,
+        int(metrics.total_operations),
+        int(metrics.read_metrics.count),
+        int(metrics.write_metrics.count),
+        int(metrics.failed_operations),
+        float(metrics.current_qps),
+        float(metrics.overall_latency.p50),
+        float(metrics.overall_latency.p95),
+        float(metrics.overall_latency.p99),
+        float(metrics.overall_latency.avg),
+        float(metrics.overall_latency.min),
+        float(metrics.overall_latency.max),
+        int(metrics.active_connections),
+        int(target_connections or 0),
+        float(metrics.cpu_percent) if metrics.cpu_percent is not None else None,
+        None,
         json.dumps(metrics.custom_metrics or {}),
     ]
+
+    # Prefer percent values from custom metrics if available.
+    resources = (metrics.custom_metrics or {}).get("resources")
+    if isinstance(resources, dict):
+        mem_pct = resources.get("cgroup_memory_percent") or resources.get(
+            "host_memory_percent"
+        )
+        if mem_pct is not None:
+            params[23] = float(mem_pct)
+
+        cpu_pct = resources.get("cgroup_cpu_percent") or resources.get(
+            "host_cpu_percent"
+        )
+        if cpu_pct is not None:
+            params[22] = float(cpu_pct)
 
     await pool.execute_query(snapshot_query, params=params)
 
@@ -945,31 +1191,43 @@ async def update_test_result_final(
 
 
 async def _get_test_time_range(
-    pool: Any, prefix: str, test_id: str
+    pool: Any, prefix: str, test_id: str | None = None, run_id: str | None = None
 ) -> tuple[datetime, datetime] | None:
     """Get start/end timestamps for a test from QUERY_EXECUTIONS or TEST_RESULTS."""
-    qe_rows = await pool.execute_query(
-        f"""
-        SELECT MIN(START_TIME), MAX(END_TIME)
-        FROM {prefix}.QUERY_EXECUTIONS
-        WHERE TEST_ID = ?
-        """,
-        params=[test_id],
-    )
+    if run_id:
+        qe_rows = await pool.execute_query(
+            f"""
+            SELECT MIN(qe.START_TIME), MAX(qe.END_TIME)
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            JOIN {prefix}.TEST_RESULTS tr ON qe.TEST_ID = tr.TEST_ID
+            WHERE tr.RUN_ID = ?
+            """,
+            params=[run_id],
+        )
+    else:
+        qe_rows = await pool.execute_query(
+            f"""
+            SELECT MIN(START_TIME), MAX(END_TIME)
+            FROM {prefix}.QUERY_EXECUTIONS
+            WHERE TEST_ID = ?
+            """,
+            params=[test_id],
+        )
 
     start_ntz = qe_rows[0][0] if qe_rows and qe_rows[0] else None
     end_ntz = qe_rows[0][1] if qe_rows and qe_rows[0] else None
 
     if start_ntz is None or end_ntz is None:
+        id_to_query = run_id or test_id
         tr_rows = await pool.execute_query(
             f"""
-            SELECT START_TIME, COALESCE(END_TIME, CURRENT_TIMESTAMP())
+            SELECT MIN(START_TIME), MAX(COALESCE(END_TIME, CURRENT_TIMESTAMP()))
             FROM {prefix}.TEST_RESULTS
-            WHERE TEST_ID = ?
+            WHERE RUN_ID = ?
             """,
-            params=[test_id],
+            params=[id_to_query],
         )
-        if not tr_rows:
+        if not tr_rows or tr_rows[0][0] is None:
             return None
         start_ntz, end_ntz = tr_rows[0][0], tr_rows[0][1]
 
@@ -991,7 +1249,7 @@ async def _get_test_time_range(
 
 
 async def enrich_query_executions_from_query_history(
-    *, test_id: str, max_pages: int = 50
+    *, test_id: str | None = None, run_id: str | None = None, max_pages: int = 50
 ) -> int:
     """
     Enrich QUERY_EXECUTIONS rows for a test using INFORMATION_SCHEMA.QUERY_HISTORY.
@@ -1000,30 +1258,37 @@ async def enrich_query_executions_from_query_history(
     Returns the total number of rows merged across all pages.
 
     Args:
-        test_id: The test ID to enrich
+        test_id: The test ID to enrich (single worker)
+        run_id: The run ID to enrich (all workers in run)
         max_pages: Maximum pagination pages (default 50 = 500k queries max)
     """
     pool = snowflake_pool.get_default_pool()
     prefix = _results_prefix()
 
-    time_range = await _get_test_time_range(pool, prefix, test_id)
+    time_range = await _get_test_time_range(pool, prefix, test_id=test_id, run_id=run_id)
     if time_range is None:
         return 0
     start_dt, end_dt = time_range
 
+    # Get query_tag - for run_id, use parent row's tag (all workers share base tag)
+    id_for_tag = run_id or test_id
     tag_rows = await pool.execute_query(
         f"""
         SELECT QUERY_TAG
         FROM {prefix}.TEST_RESULTS
-        WHERE TEST_ID = ?
+        WHERE RUN_ID = ?
+        LIMIT 1
         """,
-        params=[test_id],
+        params=[id_for_tag],
     )
     query_tag = (
         str(tag_rows[0][0]).strip()
         if tag_rows and tag_rows[0] and tag_rows[0][0]
         else None
     )
+    # Strip the phase suffix if present to match all phases
+    if query_tag and ":phase=" in query_tag:
+        query_tag = query_tag.split(":phase=")[0]
     query_tag_like = f"{query_tag}%" if query_tag else "unistore_benchmark%"
 
     start_buf = (start_dt - timedelta(minutes=5)).isoformat()
@@ -1051,6 +1316,8 @@ async def enrich_query_executions_from_query_history(
         row_count = result[0][1]
         oldest_end_time = result[0][0]
 
+        # MERGE by QUERY_ID only - QUERY_ID is unique across all workers
+        # The QUERY_TAG filter ensures we only match queries from this run
         merge_query = f"""
         MERGE INTO {prefix}.QUERY_EXECUTIONS tgt
         USING (
@@ -1073,7 +1340,6 @@ async def enrich_query_executions_from_query_history(
             WHERE QUERY_TAG LIKE ?
         ) src
         ON tgt.QUERY_ID = src.QUERY_ID
-        AND tgt.TEST_ID = ?
         WHEN MATCHED THEN UPDATE SET
             SF_TOTAL_ELAPSED_MS = src.SF_TOTAL_ELAPSED_MS,
             SF_EXECUTION_MS = src.SF_EXECUTION_MS,
@@ -1091,7 +1357,7 @@ async def enrich_query_executions_from_query_history(
             );
         """
         await pool.execute_query(
-            merge_query, params=[start_buf, current_end, query_tag_like, test_id]
+            merge_query, params=[start_buf, current_end, query_tag_like]
         )
         total_merged += row_count
 
@@ -1135,19 +1401,44 @@ class EnrichmentStats(NamedTuple):
     enrichment_ratio: float
 
 
-async def get_enrichment_stats(*, test_id: str) -> EnrichmentStats:
+async def get_enrichment_stats(
+    *, test_id: str | None = None, run_id: str | None = None
+) -> EnrichmentStats:
+    """
+    Get enrichment stats for a test or run.
+    
+    Args:
+        test_id: Query by specific TEST_ID (single worker)
+        run_id: Query by RUN_ID (all workers in a run via JOIN)
+    
+    If run_id is provided, queries all QUERY_EXECUTIONS for workers in that run.
+    """
     pool = snowflake_pool.get_default_pool()
     prefix = _results_prefix()
-    rows = await pool.execute_query(
-        f"""
-        SELECT
-            COUNT(*) AS total,
-            COUNT(SF_CLUSTER_NUMBER) AS enriched
-        FROM {prefix}.QUERY_EXECUTIONS
-        WHERE TEST_ID = ?
-        """,
-        params=[test_id],
-    )
+    
+    if run_id:
+        rows = await pool.execute_query(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(qe.SF_CLUSTER_NUMBER) AS enriched
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            JOIN {prefix}.TEST_RESULTS tr ON qe.TEST_ID = tr.TEST_ID
+            WHERE tr.RUN_ID = ?
+            """,
+            params=[run_id],
+        )
+    else:
+        rows = await pool.execute_query(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(SF_CLUSTER_NUMBER) AS enriched
+            FROM {prefix}.QUERY_EXECUTIONS
+            WHERE TEST_ID = ?
+            """,
+            params=[test_id],
+        )
     total = rows[0][0] if rows else 0
     enriched = rows[0][1] if rows else 0
     ratio = enriched / total if total > 0 else 0.0
@@ -1156,11 +1447,11 @@ async def get_enrichment_stats(*, test_id: str) -> EnrichmentStats:
 
 async def enrich_query_executions_with_retry(
     *,
-    test_id: str,
+    test_id: str | None = None,
+    run_id: str | None = None,
     target_ratio: float = 0.90,
     max_wait_seconds: int = 120,
     poll_interval_seconds: int = 10,
-    max_pages: int = 50,
 ) -> EnrichmentStats:
     """
     Enrich QUERY_EXECUTIONS with retries until target_ratio of queries are enriched.
@@ -1169,13 +1460,30 @@ async def enrich_query_executions_with_retry(
     periodically and re-runs the paginated enrichment merge until we achieve the
     target ratio or timeout.
 
+    The number of pagination pages is calculated dynamically based on actual query
+    count in QUERY_EXECUTIONS (10k queries per page, with 20% buffer).
+
     Args:
-        test_id: The test ID to enrich
+        test_id: The test ID to enrich (single worker, for backward compatibility)
+        run_id: The run ID to enrich (all workers in run - preferred for multi-worker)
         target_ratio: Stop when this ratio of queries are enriched (default 0.90)
         max_wait_seconds: Maximum time to wait for enrichment (default 120)
         poll_interval_seconds: Time between enrichment attempts (default 10)
-        max_pages: Maximum pagination pages per attempt (default 50 = 500k queries)
     """
+    id_for_log = run_id or test_id
+    initial_stats = await get_enrichment_stats(test_id=test_id, run_id=run_id)
+    if initial_stats.total_queries == 0:
+        logger.info("No queries to enrich for test %s", id_for_log)
+        return initial_stats
+
+    max_pages = max(10, (initial_stats.total_queries // 10_000) + 2)
+    logger.info(
+        "Enrichment for %s: %d queries -> max_pages=%d",
+        id_for_log,
+        initial_stats.total_queries,
+        max_pages,
+    )
+
     start = datetime.now(UTC)
     deadline = start + timedelta(seconds=max_wait_seconds)
     best_stats = EnrichmentStats(0, 0, 0.0)
@@ -1188,14 +1496,10 @@ async def enrich_query_executions_with_retry(
         elapsed = int((datetime.now(UTC) - start).total_seconds())
 
         await enrich_query_executions_from_query_history(
-            test_id=test_id, max_pages=max_pages
+            test_id=test_id, run_id=run_id, max_pages=max_pages
         )
-        stats = await get_enrichment_stats(test_id=test_id)
+        stats = await get_enrichment_stats(test_id=test_id, run_id=run_id)
         best_stats = stats
-
-        if stats.total_queries == 0:
-            logger.info("No queries to enrich for test %s", test_id)
-            break
 
         progress = stats.enriched_queries - last_enriched
         last_enriched = stats.enriched_queries
@@ -1203,7 +1507,7 @@ async def enrich_query_executions_with_retry(
         logger.info(
             "📊 Enrichment attempt %d for %s: %d/%d (%.1f%%) [+%d this pass, %ds elapsed]",
             attempt,
-            test_id,
+            id_for_log,
             stats.enriched_queries,
             stats.total_queries,
             stats.enrichment_ratio * 100,
@@ -1214,7 +1518,7 @@ async def enrich_query_executions_with_retry(
         if stats.enrichment_ratio >= target_ratio:
             logger.info(
                 "✅ Enrichment complete for %s: %.1f%% (%d/%d queries) in %ds",
-                test_id,
+                id_for_log,
                 stats.enrichment_ratio * 100,
                 stats.enriched_queries,
                 stats.total_queries,
@@ -1227,7 +1531,7 @@ async def enrich_query_executions_with_retry(
             if stalled_attempts >= 3 and stats.enrichment_ratio > 0.5:
                 logger.warning(
                     "⚠️ Enrichment stalled for %s at %.1f%% - hybrid workload may not emit per-query QUERY_HISTORY rows",
-                    test_id,
+                    id_for_log,
                     stats.enrichment_ratio * 100,
                 )
                 break
@@ -1240,7 +1544,7 @@ async def enrich_query_executions_with_retry(
     if best_stats.enrichment_ratio < target_ratio and best_stats.total_queries > 0:
         logger.warning(
             "⚠️ Enrichment ended for %s: %.1f%% (%d/%d queries) after %ds",
-            test_id,
+            id_for_log,
             best_stats.enrichment_ratio * 100,
             best_stats.enriched_queries,
             best_stats.total_queries,
@@ -1250,42 +1554,74 @@ async def enrich_query_executions_with_retry(
     return best_stats
 
 
-async def update_test_overhead_percentiles(*, test_id: str) -> None:
+async def update_test_overhead_percentiles(
+    *, test_id: str | None = None, run_id: str | None = None
+) -> None:
     """
     Compute overhead percentiles from QUERY_EXECUTIONS.APP_OVERHEAD_MS and store
     them on TEST_RESULTS (one-row summary table).
+    
+    For run_id, updates all worker rows in the run.
     """
     pool = snowflake_pool.get_default_pool()
     prefix = _results_prefix()
 
-    # NOTE: Snowflake does not support CTE + UPDATE in the way we need here.
-    # Use scalar subqueries instead (still set-based, easy to reason about).
-    query = f"""
-    UPDATE {prefix}.TEST_RESULTS
-    SET
-        APP_OVERHEAD_P50_MS = (
-            SELECT PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_OVERHEAD_MS)
-            FROM {prefix}.QUERY_EXECUTIONS
-            WHERE TEST_ID = ?
-              AND APP_OVERHEAD_MS IS NOT NULL
-        ),
-        APP_OVERHEAD_P95_MS = (
-            SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_OVERHEAD_MS)
-            FROM {prefix}.QUERY_EXECUTIONS
-            WHERE TEST_ID = ?
-              AND APP_OVERHEAD_MS IS NOT NULL
-        ),
-        APP_OVERHEAD_P99_MS = (
-            SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_OVERHEAD_MS)
-            FROM {prefix}.QUERY_EXECUTIONS
-            WHERE TEST_ID = ?
-              AND APP_OVERHEAD_MS IS NOT NULL
-        ),
-        UPDATED_AT = CURRENT_TIMESTAMP()
-    WHERE TEST_ID = ?;
-    """
-
-    await pool.execute_query(query, params=[test_id, test_id, test_id, test_id])
+    if run_id:
+        # Update all TEST_RESULTS rows for this run using aggregated overhead from all workers
+        query = f"""
+        UPDATE {prefix}.TEST_RESULTS tr
+        SET
+            APP_OVERHEAD_P50_MS = (
+                SELECT PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY qe.APP_OVERHEAD_MS)
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                JOIN {prefix}.TEST_RESULTS tr2 ON qe.TEST_ID = tr2.TEST_ID
+                WHERE tr2.RUN_ID = ?
+                  AND qe.APP_OVERHEAD_MS IS NOT NULL
+            ),
+            APP_OVERHEAD_P95_MS = (
+                SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY qe.APP_OVERHEAD_MS)
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                JOIN {prefix}.TEST_RESULTS tr2 ON qe.TEST_ID = tr2.TEST_ID
+                WHERE tr2.RUN_ID = ?
+                  AND qe.APP_OVERHEAD_MS IS NOT NULL
+            ),
+            APP_OVERHEAD_P99_MS = (
+                SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY qe.APP_OVERHEAD_MS)
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                JOIN {prefix}.TEST_RESULTS tr2 ON qe.TEST_ID = tr2.TEST_ID
+                WHERE tr2.RUN_ID = ?
+                  AND qe.APP_OVERHEAD_MS IS NOT NULL
+            ),
+            UPDATED_AT = CURRENT_TIMESTAMP()
+        WHERE tr.RUN_ID = ?;
+        """
+        await pool.execute_query(query, params=[run_id, run_id, run_id, run_id])
+    else:
+        query = f"""
+        UPDATE {prefix}.TEST_RESULTS
+        SET
+            APP_OVERHEAD_P50_MS = (
+                SELECT PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_OVERHEAD_MS)
+                FROM {prefix}.QUERY_EXECUTIONS
+                WHERE TEST_ID = ?
+                  AND APP_OVERHEAD_MS IS NOT NULL
+            ),
+            APP_OVERHEAD_P95_MS = (
+                SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_OVERHEAD_MS)
+                FROM {prefix}.QUERY_EXECUTIONS
+                WHERE TEST_ID = ?
+                  AND APP_OVERHEAD_MS IS NOT NULL
+            ),
+            APP_OVERHEAD_P99_MS = (
+                SELECT PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_OVERHEAD_MS)
+                FROM {prefix}.QUERY_EXECUTIONS
+                WHERE TEST_ID = ?
+                  AND APP_OVERHEAD_MS IS NOT NULL
+            ),
+            UPDATED_AT = CURRENT_TIMESTAMP()
+        WHERE TEST_ID = ?;
+        """
+        await pool.execute_query(query, params=[test_id, test_id, test_id, test_id])
 
 
 async def update_enrichment_status(
@@ -1295,23 +1631,25 @@ async def update_enrichment_status(
     error: str | None = None,
 ) -> None:
     """
-    Update the enrichment status for a test.
+    Update the enrichment status for a test and all its worker rows.
 
     Args:
-        test_id: The test ID
+        test_id: The test ID (parent run ID)
         status: One of PENDING, COMPLETED, FAILED, SKIPPED
         error: Optional error message if status is FAILED
     """
     pool = snowflake_pool.get_default_pool()
     prefix = _results_prefix()
 
+    # Update all rows with the same RUN_ID (parent + all workers)
+    # This ensures the aggregated enrichment status reflects the true state.
     query = f"""
     UPDATE {prefix}.TEST_RESULTS
     SET
         ENRICHMENT_STATUS = ?,
         ENRICHMENT_ERROR = ?,
         UPDATED_AT = CURRENT_TIMESTAMP()
-    WHERE TEST_ID = ?
+    WHERE RUN_ID = ?
     """
 
     await pool.execute_query(query, params=[status, error, test_id])

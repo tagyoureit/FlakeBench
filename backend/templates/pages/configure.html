@@ -426,103 +426,160 @@
 
         <div class="card">
             <div class="card-title">Test Parameters</div>
-            
-            <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'FIND_MAX_CONCURRENCY'">
-                <label class="form-label">Test Duration (seconds)</label>
-                <input type="number" class="form-input" x-model.number="config.duration" min="10" max="3600">
-                <small class="form-text">How long to run the test (10-3600 seconds)</small>
-            </div>
 
+            <!-- Load Target group -->
             <div class="form-group">
                 <label class="form-label">Load Mode</label>
                 <select class="form-select" x-model="config.load_mode">
-                    <option value="CONCURRENCY">Fixed workers (closed model)</option>
-                    <option value="QPS">Target throughput (QPS) (auto-scale workers)</option>
-                    <option value="FIND_MAX_CONCURRENCY">Find max (step-load)</option>
+                    <option value="CONCURRENCY">Fixed threads</option>
+                    <option value="QPS">Target throughput (QPS)</option>
+                    <option value="FIND_MAX_CONCURRENCY">Find max throughput</option>
                 </select>
                 <small class="form-text">
-                    Fixed workers runs a constant number of worker tasks. Target throughput dynamically adjusts workers to hit a target ops/sec.
-                    Find max incrementally increases workers to find the maximum sustainable worker count.
+                    Fixed threads runs a constant number of concurrent operations. Target throughput dynamically adjusts to hit a target ops/sec.
+                    Find max throughput incrementally increases load to find the maximum sustainable throughput.
                 </small>
+            </div>
+
+            <!-- Target field depends on load mode -->
+            <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'CONCURRENCY'">
+                <label class="form-label">Threads</label>
+                <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1">
+                <small class="form-text">Total number of concurrent operations (>= 1)</small>
             </div>
 
             <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
                 <label class="form-label">Target QPS (ops/sec)</label>
                 <input type="number" class="form-input" x-model.number="config.target_qps" min="1" max="100000" step="1">
                 <small class="form-text">
-                    Desired total operations per second across the template mix (reads + writes). Concurrency and Snowflake server-side metrics are measured separately.
+                    Desired total operations per second across the template mix (reads + writes).
                 </small>
             </div>
 
-            <div class="form-group" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'CONCURRENCY'">
-                <label class="form-label">Workers</label>
-                <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1">
-                <small class="form-text">Fixed number of worker tasks (>= 1)</small>
+            <!-- Worker Distribution group -->
+            <div class="form-group">
+                <label class="form-label">Scaling Mode</label>
+                <select class="form-select" x-model="config.scaling.mode">
+                    <option value="AUTO">Auto (default)</option>
+                    <option value="BOUNDED">Bounded (min/max)</option>
+                    <option value="FIXED">Fixed (exact)</option>
+                </select>
+                <small class="form-text">
+                    AUTO derives worker counts from the load mode. BOUNDED enforces min/max guardrails. FIXED uses exact worker × thread allocation.
+                </small>
             </div>
 
-            <div class="mt-2" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'QPS'">
-                <details :open="qpsAdvancedOpen" @toggle="qpsAdvancedOpen = $event.target.open">
-                    <summary class="text-sm font-semibold" style="cursor: pointer;">
-                        Advanced: worker bounds
-                    </summary>
-                    <div class="mt-2">
-                        <div class="form-group">
-                            <label class="form-label">Min Workers</label>
-                            <input type="number" class="form-input" x-model.number="config.min_concurrency" min="1" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
-                            <small class="form-text">Starting worker count for target-throughput mode (the controller will scale up/down)</small>
-                        </div>
-
-                        <div class="form-group">
-                            <label class="form-label">Max Workers</label>
-                            <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="-1" step="1" :disabled="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'QPS'">
-                            <small class="form-text">
-                                Upper bound for dynamic worker scaling. Use <code>-1</code> for no user cap (still bounded by engine limits).
-                            </small>
-                        </div>
-
+            <!-- Scaling bounds: visibility depends on mode -->
+            <!-- AUTO: hidden (fully automatic) -->
+            <!-- BOUNDED: show all min/max fields -->
+            <!-- FIXED: show only Workers and Threads per Worker (singular labels), hide max -->
+            <div class="mt-2" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() !== 'AUTO'">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- FIXED mode: singular labels -->
+                    <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'FIXED'">
+                        <label class="form-label">Workers</label>
+                        <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                        <small class="form-text">Exact number of workers to use.</small>
+                    </div>
+                    <!-- BOUNDED mode: min/max workers -->
+                    <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'">
+                        <label class="form-label">Min Workers</label>
+                        <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                        <small class="form-text">Minimum worker count (floor for scale-down).</small>
+                    </div>
+                    <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'">
+                        <label class="form-label">Max Workers</label>
+                        <input type="number" class="form-input" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="No limit">
+                        <small class="form-text">Upper bound for worker count.</small>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- FIXED mode: singular label "Threads per Worker" -->
+                    <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'FIXED'">
+                        <label class="form-label">Threads per Worker</label>
+                        <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" step="1">
+                        <small class="form-text">Exact number of threads per worker.</small>
+                    </div>
+                    <!-- BOUNDED mode: min/max threads per worker -->
+                    <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'">
+                        <label class="form-label">Min Threads per Worker</label>
+                        <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" step="1">
+                        <small class="form-text">Per-worker floor for thread count.</small>
+                    </div>
+                    <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'">
+                        <label class="form-label">Max Threads per Worker</label>
+                        <input type="number" class="form-input" x-model.number="config.scaling.max_connections" min="1" step="1" placeholder="No limit">
                         <small class="form-text">
-                            Usually you can leave these defaults. Max workers is a safety cap.
+                            Upper bound for per-worker threads (leave blank or use <code>-1</code> for no limit).
                         </small>
                     </div>
-                </details>
+                </div>
+                <!-- Validation errors for BOUNDED mode only -->
+                <small class="form-text" style="color: #dc2626;" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED' && Number.isFinite(Number(config.scaling?.max_workers)) && Number(config.scaling?.min_workers) > Number(config.scaling?.max_workers)">
+                    Min Workers must be <= Max Workers.
+                </small>
+                <small class="form-text" style="color: #dc2626;" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED' && Number.isFinite(Number(config.scaling?.max_connections)) && Number(config.scaling?.min_connections) > Number(config.scaling?.max_connections)">
+                    Min Threads per Worker must be <= Max Threads per Worker.
+                </small>
+            </div>
+
+            <!-- Timing group (horizontal) -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() !== 'FIND_MAX_CONCURRENCY'">
+                <div class="form-group">
+                    <label class="form-label">Duration (seconds)</label>
+                    <input type="number" class="form-input" x-model.number="config.duration" min="10" max="3600">
+                    <small class="form-text">Test duration (10-3600s)</small>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Warmup (seconds)</label>
+                    <input type="number" class="form-input" x-model.number="config.warmup" min="0" max="300">
+                    <small class="form-text">Warmup before measurement</small>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Think Time (ms)</label>
+                    <input type="number" class="form-input" x-model.number="config.think_time" min="0" max="10000">
+                    <small class="form-text">Delay between operations</small>
+                </div>
             </div>
 
             <div class="mt-2" x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'FIND_MAX_CONCURRENCY'">
                 <div class="p-3 bg-blue-50 rounded border border-blue-200 mb-3" style="background-color: #eff6ff; border-color: #bfdbfe;">
                     <div class="text-sm" style="color: #1e40af;">
-                        <strong>Find Max (step-load)</strong> automatically finds the maximum sustainable worker count.
-                        <strong>The test runs until degradation is detected or max workers is reached</strong> (no fixed duration).
+                        <strong>Find Max Throughput</strong> automatically finds the maximum sustainable throughput.
+                        <strong>The test runs until degradation is detected or max threads is reached</strong> (no fixed duration).
                         <ol class="mt-2 ml-4" style="list-style-type: decimal; margin-left: 1.5rem;">
-                            <li>Starts at the specified concurrency level</li>
+                            <li>Starts at the specified thread count</li>
                             <li>Runs for the step duration and measures QPS/latency</li>
-                            <li>If stable, increases concurrency by the increment and repeats</li>
-                            <li>Stops when: QPS drops, latency spikes, errors increase, queue builds up, or max workers reached</li>
+                            <li>If stable, increases threads by the increment and repeats</li>
+                            <li>Stops when: QPS drops, latency spikes, errors increase, queue builds up, or max threads reached</li>
                         </ol>
                     </div>
                 </div>
 
-                <div class="form-group">
-                    <label class="form-label">Start Concurrency</label>
-                    <input type="number" class="form-input" x-model.number="config.start_concurrency" min="1" max="100" step="1">
-                    <small class="form-text">Initial number of workers (default: 5)</small>
-                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="form-group">
+                        <label class="form-label">Start Threads</label>
+                        <input type="number" class="form-input" x-model.number="config.start_concurrency" min="1" max="100" step="1">
+                        <small class="form-text">Initial thread count (default: 5)</small>
+                    </div>
 
-                <div class="form-group">
-                    <label class="form-label">Concurrency Increment</label>
-                    <input type="number" class="form-input" x-model.number="config.concurrency_increment" min="1" max="100" step="1">
-                    <small class="form-text">Workers to add each step (default: 10)</small>
-                </div>
+                    <div class="form-group">
+                        <label class="form-label">Thread Increment</label>
+                        <input type="number" class="form-input" x-model.number="config.concurrency_increment" min="1" max="100" step="1">
+                        <small class="form-text">Threads to add each step (default: 10)</small>
+                    </div>
 
-                <div class="form-group">
-                    <label class="form-label">Step Duration (seconds)</label>
-                    <input type="number" class="form-input" x-model.number="config.step_duration_seconds" min="10" max="300" step="5">
-                    <small class="form-text">How long to test at each concurrency level (default: 30s)</small>
-                </div>
+                    <div class="form-group">
+                        <label class="form-label">Step Duration (seconds)</label>
+                        <input type="number" class="form-input" x-model.number="config.step_duration_seconds" min="10" max="300" step="5">
+                        <small class="form-text">Duration at each level (default: 30s)</small>
+                    </div>
 
-                <div class="form-group">
-                    <label class="form-label">Max Workers (ceiling)</label>
-                    <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" step="1">
-                    <small class="form-text">Maximum concurrency to test (test stops when reached even if still stable)</small>
+                    <div class="form-group">
+                        <label class="form-label">Max Threads (ceiling)</label>
+                        <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" step="1">
+                        <small class="form-text">Maximum threads to test</small>
+                    </div>
                 </div>
 
                 <details class="mt-2">
@@ -551,43 +608,27 @@
                 </details>
             </div>
 
-            <div class="form-group mt-4">
-                <label class="form-label">
-                    <input type="checkbox" x-model="config.autoscale_enabled">
-                    Enable multi-node autoscale (scale-out only)
-                </label>
-                <small class="form-text">
-                    Launches additional worker nodes until the total target is reached or host guardrails trip.
-                </small>
-            </div>
+            <!-- Resource Guardrails (collapsible, shown for AUTO and BOUNDED modes, not FIXED) -->
+            <details class="mt-4" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() !== 'FIXED'">
+                <summary class="text-sm font-semibold" style="cursor: pointer;">
+                    Resource Guardrails
+                </summary>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
+                    <div class="form-group">
+                        <label class="form-label">Max Host CPU (%)</label>
+                        <input type="number" class="form-input" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
+                        <small class="form-text">Back off workers if host CPU exceeds this threshold.</small>
+                    </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-4" x-show="config.autoscale_enabled">
-                <div class="form-group">
-                    <label class="form-label">Max Host CPU (%)</label>
-                    <input type="number" class="form-input" x-model.number="config.autoscale_max_cpu_percent" min="1" max="100" step="1">
-                    <small class="form-text">Stops adding nodes if host CPU exceeds this %.</small>
+                    <div class="form-group">
+                        <label class="form-label">Max Host Memory (%)</label>
+                        <input type="number" class="form-input" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
+                        <small class="form-text">Back off workers if host memory exceeds this threshold.</small>
+                    </div>
                 </div>
+            </details>
 
-                <div class="form-group">
-                    <label class="form-label">Max Host Memory (%)</label>
-                    <input type="number" class="form-input" x-model.number="config.autoscale_max_memory_percent" min="1" max="100" step="1">
-                    <small class="form-text">Stops adding nodes if host memory exceeds this %.</small>
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">Think Time (ms)</label>
-                <input type="number" class="form-input" x-model.number="config.think_time" min="0" max="10000">
-                <small class="form-text">Delay between operations to simulate user think time</small>
-            </div>
-
-            <div class="form-group">
-                <label class="form-label">Warmup Period (seconds)</label>
-                <input type="number" class="form-input" x-model.number="config.warmup" min="0" max="300">
-                <small class="form-text">Time to warm up caches before measurement starts</small>
-            </div>
-
-            <div class="form-group" x-show="config.table_type === 'STANDARD' || config.table_type === 'INTERACTIVE'">
+            <div class="form-group mt-4" x-show="config.table_type === 'STANDARD' || config.table_type === 'INTERACTIVE'">
                 <label class="form-label">
                     <input type="checkbox" x-model="config.use_cached_result">
                     Use Snowflake result cache (<code>USE_CACHED_RESULT</code>)
@@ -804,11 +845,18 @@ function testConfiguration() {
             duration: 300,
             load_mode: 'CONCURRENCY',
             target_qps: 100,
-            min_concurrency: 5,
+            scaling: {
+                mode: 'AUTO',
+                min_workers: 1,
+                max_workers: null,
+                min_connections: 5,
+                max_connections: null,
+            },
+            guardrails: {
+                max_cpu_percent: 80,
+                max_memory_percent: 85,
+            },
             concurrent_connections: 10,
-            autoscale_enabled: false,
-            autoscale_max_cpu_percent: 85,
-            autoscale_max_memory_percent: 85,
             // FIND_MAX_CONCURRENCY mode defaults
             start_concurrency: 5,
             concurrency_increment: 10,
@@ -891,7 +939,6 @@ function testConfiguration() {
         aiSqlAdjustLoading: false,
         saveAndPrepareLoading: false,
         prepareTemplateLoading: false,
-        qpsAdvancedOpen: false,
 
         hasSelectedTable() {
             const db = String(this.config.database || '').trim();
@@ -998,6 +1045,47 @@ function testConfiguration() {
             if (this.config.mix_preset == null) {
                 this.config.mix_preset = 'CUSTOM';
             }
+            if (!this.config.scaling || typeof this.config.scaling !== 'object') {
+                this.config.scaling = {};
+            }
+            if (!String(this.config.scaling.mode || '').trim()) {
+                this.config.scaling.mode = 'AUTO';
+            }
+            if (this.config.scaling.min_workers == null || String(this.config.scaling.min_workers).trim() === '') {
+                this.config.scaling.min_workers = 1;
+            }
+            if (String(this.config.scaling.max_workers || '').trim() === '' || Number(this.config.scaling.max_workers) === -1) {
+                this.config.scaling.max_workers = null;
+            }
+            if (this.config.scaling.min_connections == null || String(this.config.scaling.min_connections).trim() === '') {
+                this.config.scaling.min_connections = 1;
+            }
+            if (String(this.config.scaling.max_connections || '').trim() === '' || Number(this.config.scaling.max_connections) === -1) {
+                this.config.scaling.max_connections = null;
+            }
+            const scalingMode = String(this.config.scaling.mode || 'AUTO').trim().toUpperCase();
+            if (!['AUTO', 'BOUNDED', 'FIXED'].includes(scalingMode)) {
+                this.config.scaling.mode = 'AUTO';
+            }
+
+            // Initialize guardrails (used by AUTO and BOUNDED modes)
+            if (!this.config.guardrails || typeof this.config.guardrails !== 'object') {
+                this.config.guardrails = {};
+            }
+            // Migrate legacy autoscale_* fields to guardrails
+            if (this.config.autoscale_max_cpu_percent != null && this.config.guardrails.max_cpu_percent == null) {
+                this.config.guardrails.max_cpu_percent = Number(this.config.autoscale_max_cpu_percent);
+            }
+            if (this.config.autoscale_max_memory_percent != null && this.config.guardrails.max_memory_percent == null) {
+                this.config.guardrails.max_memory_percent = Number(this.config.autoscale_max_memory_percent);
+            }
+            // Set defaults for guardrails
+            if (!Number.isFinite(Number(this.config.guardrails.max_cpu_percent))) {
+                this.config.guardrails.max_cpu_percent = 80;
+            }
+            if (!Number.isFinite(Number(this.config.guardrails.max_memory_percent))) {
+                this.config.guardrails.max_memory_percent = 85;
+            }
 
             const isPg = this.isPostgresFamilyTableType(this.config.table_type);
             const defaults = isPg
@@ -1053,21 +1141,6 @@ function testConfiguration() {
                 }
             }
 
-            // If QPS worker bounds are invalid, auto-open the Advanced section so the user can fix.
-            const loadMode = String(this.config.load_mode || 'CONCURRENCY').trim().toUpperCase();
-            if (loadMode === 'QPS') {
-                const minC = Number(this.config.min_concurrency || 1);
-                const maxC = Number(this.config.concurrent_connections || 1);
-            if (
-                !Number.isFinite(minC) ||
-                !Number.isFinite(maxC) ||
-                minC < 1 ||
-                (maxC !== -1 && maxC < 1) ||
-                (maxC !== -1 && minC > maxC)
-            ) {
-                    this.qpsAdvancedOpen = true;
-                }
-            }
         },
 
         nextTickAsync() {
@@ -1347,7 +1420,7 @@ function testConfiguration() {
             this.$watch('config.custom_update_pct', () => this.syncMixPresetFromWeights());
 
             // Load mode UX:
-            // - When switching into auto-scale mode, default Max Workers to -1 (no user cap)
+            // - When switching into auto-scale mode, default Max Connections to -1 (no user cap)
             //   unless the user already set a non-default cap.
             // - When switching back to CONCURRENCY mode, ensure Concurrent Connections is >= 1.
             this._prevLoadMode = String(this.config.load_mode || 'CONCURRENCY').trim().toUpperCase();
@@ -1355,10 +1428,16 @@ function testConfiguration() {
                 const next = String(v || 'CONCURRENCY').trim().toUpperCase();
                 const prev = String(this._prevLoadMode || 'CONCURRENCY').trim().toUpperCase();
                 if (next === 'QPS' && prev !== 'QPS') {
-                    // If coming from default concurrency=10, default to unlimited cap.
-                    const cur = Number(this.config.concurrent_connections);
-                    if (!Number.isFinite(cur) || cur === 10) {
-                        this.config.concurrent_connections = -1;
+                    const maxConnRaw = this.config.scaling?.max_connections;
+                    const maxConnSet = !(maxConnRaw == null || String(maxConnRaw).trim() === '');
+                    if (!maxConnSet) {
+                        const cur = Number(this.config.concurrent_connections);
+                        if (!Number.isFinite(cur) || cur === 10) {
+                            this.config.concurrent_connections = -1;
+                            this.config.scaling.max_connections = null;
+                        } else if (cur > 0) {
+                            this.config.scaling.max_connections = cur;
+                        }
                     }
                 }
                 if (next !== 'QPS' && prev === 'QPS') {
@@ -1370,13 +1449,29 @@ function testConfiguration() {
                 this._prevLoadMode = next;
             });
 
-            this.$watch('config.autoscale_enabled', (v) => {
-                if (!v) return;
-                if (!Number.isFinite(Number(this.config.autoscale_max_cpu_percent || 0))) {
-                    this.config.autoscale_max_cpu_percent = 85;
+            this.$watch('config.scaling.max_connections', (v) => {
+                const mode = String(this.config.load_mode || 'CONCURRENCY').trim().toUpperCase();
+                if (mode !== 'QPS') return;
+                const next = Number(v);
+                if (!Number.isFinite(next) || next < 1) {
+                    this.config.concurrent_connections = -1;
+                    return;
                 }
-                if (!Number.isFinite(Number(this.config.autoscale_max_memory_percent || 0))) {
-                    this.config.autoscale_max_memory_percent = 85;
+                this.config.concurrent_connections = Math.max(1, Math.round(next));
+            });
+
+            // Initialize guardrails defaults when switching to non-FIXED mode
+            this.$watch('config.scaling.mode', (v) => {
+                const mode = String(v || 'AUTO').toUpperCase();
+                if (mode === 'FIXED') return;
+                if (!this.config.guardrails) {
+                    this.config.guardrails = {};
+                }
+                if (!Number.isFinite(Number(this.config.guardrails.max_cpu_percent || 0))) {
+                    this.config.guardrails.max_cpu_percent = 80;
+                }
+                if (!Number.isFinite(Number(this.config.guardrails.max_memory_percent || 0))) {
+                    this.config.guardrails.max_memory_percent = 85;
                 }
             });
 
@@ -1391,8 +1486,7 @@ function testConfiguration() {
                 this.isReadOnly = true;
             }
 
-            // Prefer URL-based editing (robust across reloads / desktop wrapper),
-            // fall back to localStorage (legacy behavior from templates list).
+            // Prefer URL-based editing (robust across reloads / desktop wrapper).
             const templateId = urlParams.get('template_id');
             if (templateId) {
                 try {
@@ -1414,7 +1508,7 @@ function testConfiguration() {
                         if (this.config.warehouse_name) {
                             this.config.warehouse_name = String(this.config.warehouse_name).trim();
                         }
-                        // Backwards compatible default: if not present, treat as TRUE.
+                        // Default: if not present, treat as TRUE.
                         // Coerce to a boolean for the checkbox UI.
                         if (this.config.use_cached_result == null) {
                             this.config.use_cached_result = true;
@@ -1427,8 +1521,6 @@ function testConfiguration() {
                         this.config.description = template.description;
                         this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
                         this.aiPrepError = null;
-                        // Clear any stale localStorage selection so it can't override URL intent.
-                        localStorage.removeItem('selectedTemplate');
                     } else {
                         const payload = await resp.json().catch(() => ({}));
                         const detail = payload && payload.detail ? payload.detail : null;
@@ -1440,34 +1532,6 @@ function testConfiguration() {
                 } catch (error) {
                     console.error('Failed to load template by id:', error);
                     this.error = error?.message || String(error);
-                }
-            }
-            
-            // Load template if editing
-            const templateStr = this.loadedTemplate ? null : localStorage.getItem('selectedTemplate');
-            if (templateStr) {
-                try {
-                    const template = JSON.parse(templateStr);
-                    this.loadedTemplate = template;
-                    this.hasResults = (template.usage_count || 0) > 0;
-                    if (this.hasResults || this.mode === 'view') {
-                        this.mode = 'view';
-                        this.isReadOnly = true;
-                    } else {
-                        this.mode = 'edit';
-                        this.isReadOnly = false;
-                    }
-                    // Load config from template
-                    this.config = { ...this.config, ...(template.config || {}) };
-                    if (this.config.warehouse_name) {
-                        this.config.warehouse_name = String(this.config.warehouse_name).trim();
-                    }
-                    this.ensureCanonicalWorkloadConfig();
-                    this.config.template_name = template.template_name;
-                    this.config.description = template.description;
-                    localStorage.removeItem('selectedTemplate');
-                } catch (error) {
-                    console.error('Failed to load template:', error);
                 }
             }
 
@@ -1667,6 +1731,55 @@ function testConfiguration() {
                 return;
             }
 
+            const scalingMode = String(this.config.scaling?.mode || 'AUTO').trim().toUpperCase();
+            const minWorkers = Number(this.config.scaling?.min_workers || 1);
+            const maxWorkersRaw = this.config.scaling?.max_workers;
+            const maxWorkers =
+                maxWorkersRaw == null || String(maxWorkersRaw).trim() === ''
+                    ? null
+                    : Number(maxWorkersRaw);
+            const minC = Number(this.config.scaling?.min_connections || 1);
+            const maxCRaw = this.config.scaling?.max_connections;
+            const maxC =
+                maxCRaw == null || String(maxCRaw).trim() === ''
+                    ? null
+                    : Number(maxCRaw);
+
+            if (!Number.isFinite(minWorkers) || minWorkers < 1) {
+                window.toast.warning('Min Workers must be >= 1.');
+                return;
+            }
+            if (maxWorkers != null && (!Number.isFinite(maxWorkers) || maxWorkers < 1)) {
+                window.toast.warning('Max Workers must be >= 1 or blank.');
+                return;
+            }
+            if (maxWorkers != null && minWorkers > maxWorkers) {
+                window.toast.warning('Min Workers must be <= Max Workers.');
+                return;
+            }
+            if (!Number.isFinite(minC) || minC < 1) {
+                window.toast.warning('Min Connections must be >= 1.');
+                return;
+            }
+            if (maxC != null && (!Number.isFinite(maxC) || maxC < 1)) {
+                window.toast.warning('Max Connections must be >= 1 or blank.');
+                return;
+            }
+            if (maxC != null && minC > maxC) {
+                window.toast.warning('Min Connections must be <= Max Connections.');
+                return;
+            }
+            if (scalingMode === 'FIXED') {
+                if (this.config.scaling?.min_workers == null || String(this.config.scaling?.min_workers).trim() === '') {
+                    window.toast.warning('FIXED mode requires Min Workers.');
+                    return;
+                }
+                if (this.config.scaling?.min_connections == null || String(this.config.scaling?.min_connections).trim() === '') {
+                    window.toast.warning('FIXED mode requires Min Connections.');
+                    return;
+                }
+            }
+
             if (loadMode === 'FIND_MAX_CONCURRENCY') {
                 const startC = Number(this.config.start_concurrency || 5);
                 const increment = Number(this.config.concurrency_increment || 10);
@@ -1685,7 +1798,7 @@ function testConfiguration() {
                     return;
                 }
                 if (!Number.isFinite(maxC) || maxC < startC) {
-                    window.toast.warning('Max Workers must be >= Start Concurrency.');
+                    window.toast.warning('Max Connections must be >= Start Concurrency.');
                     return;
                 }
             }
@@ -1696,44 +1809,18 @@ function testConfiguration() {
                     window.toast.warning('Target must be a positive number.');
                     return;
                 }
-                const minC = Number(this.config.min_concurrency || 1);
-                const maxC = Number(this.config.concurrent_connections || 1);
-                if (!Number.isFinite(minC) || minC < 1) {
-                    this.qpsAdvancedOpen = true;
-                    window.toast.warning('Min Workers must be >= 1.');
-                    return;
-                }
-                if (!Number.isFinite(maxC) || (maxC !== -1 && maxC < 1)) {
-                    this.qpsAdvancedOpen = true;
-                    window.toast.warning('Max Workers must be >= 1 (or -1 for no limit).');
-                    return;
-                }
-                if (maxC !== -1 && minC > maxC) {
-                    this.qpsAdvancedOpen = true;
-                    window.toast.warning('Min Workers must be <= Max Workers.');
-                    return;
-                }
             }
 
-            if (this.config.autoscale_enabled) {
-                const maxCpu = Number(this.config.autoscale_max_cpu_percent || 0);
-                const maxMem = Number(this.config.autoscale_max_memory_percent || 0);
+            // Validate guardrails for non-FIXED modes
+            if (scalingMode !== 'FIXED') {
+                const maxCpu = Number(this.config.guardrails?.max_cpu_percent || 0);
+                const maxMem = Number(this.config.guardrails?.max_memory_percent || 0);
                 if (!Number.isFinite(maxCpu) || maxCpu <= 0 || maxCpu > 100) {
-                    window.toast.warning('Autoscale max CPU must be within (0, 100].');
+                    window.toast.warning('Max CPU % must be within (0, 100].');
                     return;
                 }
                 if (!Number.isFinite(maxMem) || maxMem <= 0 || maxMem > 100) {
-                    window.toast.warning('Autoscale max memory must be within (0, 100].');
-                    return;
-                }
-                if (
-                    loadMode === 'QPS' &&
-                    Number(this.config.concurrent_connections || 0) === -1
-                ) {
-                    this.qpsAdvancedOpen = true;
-                    window.toast.warning(
-                        'Autoscale requires Max Workers >= 1 (per-node cap) in QPS mode.',
-                    );
+                    window.toast.warning('Max Memory % must be within (0, 100].');
                     return;
                 }
             }
@@ -2049,14 +2136,16 @@ function testConfiguration() {
                     }
                 }
 
-            const autoscaleEnabled = Boolean(this.config.autoscale_enabled);
-            const endpoint = autoscaleEnabled
-                ? `/api/tests/from-template/${encodeURIComponent(this.loadedTemplate.template_id)}/autoscale`
-                : `/api/tests/from-template/${encodeURIComponent(this.loadedTemplate.template_id)}`;
+            // Use unified endpoint for all scaling modes (AUTO, BOUNDED, FIXED)
+            const endpoint = `/api/tests/from-template/${encodeURIComponent(this.loadedTemplate.template_id)}`;
             const resp = await fetch(endpoint, { method: 'POST' });
                 if (!resp.ok) {
                     const err = await resp.json().catch(() => ({}));
-                    throw new Error(err.detail || 'Failed to prepare test');
+                    const detail = err.detail;
+                    const errorMsg = typeof detail === 'string' 
+                        ? detail 
+                        : (detail?.message || detail?.detail || JSON.stringify(detail) || 'Failed to prepare test');
+                    throw new Error(errorMsg);
                 }
                 const data = await resp.json();
                 window.location.href = data.dashboard_url || `/dashboard/${data.test_id}`;
@@ -2230,11 +2319,15 @@ function testConfiguration() {
                     duration: 300,
                     load_mode: 'CONCURRENCY',
                     target_qps: 100,
-                    min_concurrency: 5,
+                    scaling: {
+                        mode: 'AUTO',
+                        min_connections: 5,
+                    },
+                    guardrails: {
+                        max_cpu_percent: 80,
+                        max_memory_percent: 85,
+                    },
                     concurrent_connections: 10,
-                    autoscale_enabled: false,
-                    autoscale_max_cpu_percent: 85,
-                    autoscale_max_memory_percent: 85,
                     start_concurrency: 5,
                     concurrency_increment: 10,
                     step_duration_seconds: 30,
