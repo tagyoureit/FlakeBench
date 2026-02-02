@@ -13,7 +13,7 @@
         <p>Manage reusable test templates. All tests run from templates.</p>
         
         <div class="flex justify-between items-center mt-4">
-            <div class="form-group mb-0" style="flex: 1; max-width: 400px;">
+            <div class="form-group mb-0 flex-1 max-w-md">
                 <input type="text" 
                        class="form-input" 
                        x-model="searchQuery" 
@@ -21,7 +21,7 @@
                        @input="filterTemplates">
             </div>
             
-            <div class="btn-group" style="margin-bottom: 0; align-items: center;">
+            <div class="btn-group mb-0 items-center">
                 <button class="btn btn-primary" @click="createNewTemplate">
                     <span>+ New Template</span>
                 </button>
@@ -126,32 +126,38 @@
                                             type="button"
                                             class="btn btn-secondary btn-sm"
                                             x-show="template.usage_count === 0"
+                                            :disabled="isTemplateActionInProgress(template.template_id)"
                                             @click="editTemplate(template)"
                                             title="Edit template"
                                         >
-                                            Edit
+                                            <span class="loading-spinner" x-show="editingTemplateId === template.template_id"></span>
+                                            <span x-text="editingTemplateId === template.template_id ? 'Loading…' : 'Edit'"></span>
                                         </button>
                                         <button
                                             type="button"
                                             class="btn btn-secondary btn-sm"
                                             x-show="template.usage_count > 0"
+                                            :disabled="isTemplateActionInProgress(template.template_id)"
                                             @click="viewTemplateDetails(template)"
                                             title="View template details (read-only)"
                                         >
-                                            View
+                                            <span class="loading-spinner" x-show="viewingTemplateId === template.template_id"></span>
+                                            <span x-text="viewingTemplateId === template.template_id ? 'Loading…' : 'View'"></span>
                                         </button>
                                         <button
                                             type="button"
                                             class="btn btn-danger btn-sm"
+                                            :disabled="isTemplateActionInProgress(template.template_id)"
                                             @click="deleteTemplate(template)"
                                             title="Delete template and all results"
                                         >
-                                            Delete
+                                            <span class="loading-spinner" x-show="deletingTemplateId === template.template_id"></span>
+                                            <span x-text="deletingTemplateId === template.template_id ? 'Deleting…' : 'Delete'"></span>
                                         </button>
                                         <button
                                             type="button"
                                             class="btn btn-primary btn-sm"
-                                            :disabled="preparingTemplateId === template.template_id"
+                                            :disabled="isTemplateActionInProgress(template.template_id)"
                                             @click="prepareTest(template)"
                                         >
                                             <span class="loading-spinner" x-show="preparingTemplateId === template.template_id"></span>
@@ -160,10 +166,12 @@
                                         <button
                                             type="button"
                                             class="btn btn-secondary btn-sm"
+                                            :disabled="isTemplateActionInProgress(template.template_id)"
                                             @click="duplicateTemplate(template)"
                                             title="Copy this template"
                                         >
-                                            Copy
+                                            <span class="loading-spinner" x-show="copyingTemplateId === template.template_id"></span>
+                                            <span x-text="copyingTemplateId === template.template_id ? 'Copying…' : 'Copy'"></span>
                                         </button>
                                     </div>
                                 </td>

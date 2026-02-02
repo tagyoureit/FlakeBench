@@ -39,6 +39,19 @@ and throughput, and persists results to Snowflake.
   `backend/connectors/postgres_pool.py`.
 - **Templates**: stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`.
 
+### Helper Packages (Modular Structure)
+
+Large modules have associated helper packages to reduce file sizes and improve
+maintainability. The original files remain the primary entry points with
+backward-compatible imports:
+
+| Main Module | Helper Package | Contents |
+|-------------|----------------|----------|
+| `backend/core/test_executor.py` | `backend/core/executor/` | Types, helpers, mixins (metrics, workers, operations, controllers) |
+| `backend/core/orchestrator.py` | `backend/core/orchestrator_helpers/` | RunContext dataclass, utility functions |
+| `backend/api/routes/test_results.py` | `backend/api/routes/results_helpers/` | Helper functions for data aggregation |
+| `backend/api/routes/templates.py` | `backend/api/routes/templates_helpers/` | Constants and helper functions |
+
 ## Control Plane vs Data Plane (Multi-Worker)
 
 ### Control Plane (Orchestrator)

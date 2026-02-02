@@ -168,6 +168,9 @@ window.DashboardMixins.state = function (opts) {
     _enrichmentPollIntervalId: null,
     _processingLogIntervalId: null,
     _processingLogStartMs: null,
+    // Button loading states
+    stoppingTest: false,
+    rerunningTestId: null,
     // Floating toolbar visibility state
     floatingToolbarVisible: false,
     chartsInView: false,

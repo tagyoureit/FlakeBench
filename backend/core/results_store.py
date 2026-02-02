@@ -1464,13 +1464,14 @@ async def enrich_query_executions_from_query_history(
         return 0
     start_dt, end_dt = time_range
 
-    # Get query_tag - for run_id, use parent row's tag (all workers share base tag)
+    # Get query_tag base - for multi-worker runs, strip test_id to match ALL workers
+    # The time window filter ensures we only match queries from this run's time range.
     id_for_tag = run_id or test_id
     tag_rows = await pool.execute_query(
         f"""
         SELECT QUERY_TAG
         FROM {prefix}.TEST_RESULTS
-        WHERE RUN_ID = ?
+        WHERE RUN_ID = ? AND QUERY_TAG IS NOT NULL
         LIMIT 1
         """,
         params=[id_for_tag],
@@ -1480,9 +1481,12 @@ async def enrich_query_executions_from_query_history(
         if tag_rows and tag_rows[0] and tag_rows[0][0]
         else None
     )
-    # Strip the phase suffix if present to match all phases
+    # Strip :phase= suffix if present
     if query_tag and ":phase=" in query_tag:
         query_tag = query_tag.split(":phase=")[0]
+    # Strip :test_id= suffix to match ALL workers in a multi-worker run
+    if query_tag and ":test_id=" in query_tag:
+        query_tag = query_tag.split(":test_id=")[0]
     query_tag_like = f"{query_tag}%" if query_tag else "unistore_benchmark%"
 
     start_buf = (start_dt - timedelta(minutes=5)).isoformat()

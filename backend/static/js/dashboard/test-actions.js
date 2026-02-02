@@ -62,6 +62,7 @@ root.DashboardMixins.testActions = {
 
   async stopTest() {
     if (!this.testId) return;
+    this.stoppingTest = true;
     try {
       this._debugLog("TEST", "STOP_REQUESTED", { testId: this.testId });
       const resp = await fetch(`/api/tests/${this.testId}/stop`, {
@@ -86,6 +87,8 @@ root.DashboardMixins.testActions = {
     } catch (e) {
       console.error("Failed to stop test:", e);
       window.toast.error(`Failed to stop test: ${e.message || e}`);
+    } finally {
+      this.stoppingTest = false;
     }
   },
 
@@ -103,6 +106,7 @@ root.DashboardMixins.testActions = {
     );
     if (!confirmed) return;
 
+    this.rerunningTestId = id;
     try {
       const response = await fetch(`/api/tests/${id}/rerun`, {
         method: "POST",
@@ -112,6 +116,8 @@ root.DashboardMixins.testActions = {
     } catch (error) {
       console.error("Failed to rerun test:", error);
       window.toast.error("Failed to rerun test");
+    } finally {
+      this.rerunningTestId = null;
     }
   },
 };

@@ -507,11 +507,12 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
 
     # Initialize query execution streamer for continuous persistence.
     # Uses the control pool (default pool) to stream records to Snowflake.
-    # IMPORTANT: Use cfg.run_id (orchestrator run ID) not executor.test_id,
-    # so the dashboard can find the records by run_id.
+    # Use executor.test_id (worker's unique ID) so QUERY_EXECUTIONS.TEST_ID matches
+    # the QUERY_TAG in Snowflake's QUERY_HISTORY for proper enrichment.
+    # The dashboard finds records via JOIN on TEST_RESULTS.RUN_ID.
     query_streamer = QueryExecutionStreamer(
         pool=snowflake_pool.get_default_pool(),
-        test_id=cfg.run_id,
+        test_id=str(executor.test_id),
         flush_interval_seconds=30.0,
         flush_threshold_records=5000,
         batch_insert_size=2000,

@@ -41,6 +41,19 @@ logging.basicConfig(
 logging.getLogger("snowflake.connector.connection").setLevel(logging.WARNING)
 logging.getLogger("snowflake.connector.network").setLevel(logging.WARNING)
 
+
+class EndpointFilter(logging.Filter):
+    """Filter out high-frequency endpoints from access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "/metrics/live" in msg:
+            return False
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
+
 logger = logging.getLogger(__name__)
 
 # Snowsight link support (derived from Snowflake session context).
@@ -1409,6 +1422,10 @@ async def _stream_run_metrics(websocket: WebSocket, test_id: str) -> None:
     warehouse_details_payload: dict[str, Any] | None = None
     logs_buffer: list[dict[str, Any]] = []
 
+    # Fetch initial run_status synchronously before poll loop to ensure first
+    # WebSocket message has the correct phase (avoids fallback to status="RUNNING")
+    cached_run_status = await _fetch_run_status(test_id)
+
     RUN_STATUS_TTL_TRANSITION = 1.0
     RUN_STATUS_TTL_ACTIVE = 2.0
     RUN_STATUS_TTL_TERMINAL = 5.0
@@ -1426,6 +1443,7 @@ async def _stream_run_metrics(websocket: WebSocket, test_id: str) -> None:
 
     def _start_task(key: str, coro: Any) -> None:
         if key in pending_tasks:
+            coro.close()
             return
         pending_tasks[key] = asyncio.create_task(coro)
 

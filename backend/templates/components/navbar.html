@@ -1,15 +1,15 @@
-<nav class="navbar">
-    <div class="container">
-        <div class="brand">
+<nav class="bg-white border-b border-gray-200 py-4 shadow-sm">
+    <div class="container flex justify-between items-center">
+        <div class="text-2xl font-bold text-gray-900">
             <a href="/templates">⚡ Unistore Benchmark</a>
         </div>
-        <nav>
+        <nav class="flex gap-8">
             <a href="/templates" 
                hx-get="/templates"
                hx-target="#main-content"
                hx-swap="innerHTML"
                hx-push-url="true"
-               class="{{ 'active' if request.path == '/templates' else '' }}">
+               class="py-2 px-4 rounded-md transition-colors {{ 'bg-blue-500 text-white' if request.path == '/templates' else 'hover:bg-gray-50' }}">
                 Templates
             </a>
             <a href="/history" 
@@ -17,7 +17,7 @@
                hx-target="#main-content"
                hx-swap="innerHTML"
                hx-push-url="true"
-               class="{{ 'active' if request.path == '/history' else '' }}">
+               class="py-2 px-4 rounded-md transition-colors {{ 'bg-blue-500 text-white' if request.path == '/history' else 'hover:bg-gray-50' }}">
                 History
             </a>
         </nav>

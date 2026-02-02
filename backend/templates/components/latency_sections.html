@@ -16,11 +16,10 @@
 
 <div
     x-show="mode === 'history' && latencyView === 'sf_execution' && sfEnrichmentLowWarning()"
-    class="enrichment-warning"
-    style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 0.375rem; padding: 0.75rem 1rem; margin-bottom: 1rem; display: flex; align-items: flex-start; gap: 0.5rem;"
+    class="enrichment-warning bg-amber-100 border border-amber-500 rounded-md py-3 px-4 mb-4 flex items-start gap-2"
 >
-    <span style="color: #b45309; font-size: 1.1em;">⚠</span>
-    <div style="font-size: 0.875rem; color: #92400e;">
+    <span class="text-amber-700 text-lg">⚠</span>
+    <div class="text-sm text-amber-900">
         <strong>Low enrichment:</strong>
         Only <span x-text="sfEnrichmentSampleCount()?.toLocaleString() || 0"></span> of <span x-text="sfEnrichmentTotalQueries()?.toLocaleString() || 0"></span>
         queries (<span x-text="sfEnrichmentRatioPct() || 0"></span>%) were matched in Snowflake QUERY_HISTORY.
@@ -43,7 +42,7 @@
             >i</span>
         </div>
         <div class="metric-value" x-text="mode === 'history' ? formatCompact(templateInfo?.qps || 0) : formatCompact(metrics.qps_avg_30s)"></div>
-        <div class="metric-change" style="display: flex; flex-direction: column; gap: 2px;">
+        <div class="metric-change flex flex-col gap-0.5">
             <template x-if="mode === 'live'">
                 <span>Instant: <span x-text="formatCompact(metrics.ops_per_sec)"></span></span>
             </template>
@@ -94,12 +93,9 @@
             "
         ></div>
     </div>
+</div>
 
-    <div
-        class="metrics-grid-spacer"
-        x-show="mode === 'live' && !['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())"
-    ></div>
-
+<div class="metrics-grid">
     <div class="metric-card info">
         <div class="metric-label">
             <span x-text="'P50 (Median)'"></span>
@@ -160,60 +156,60 @@
 
 <div class="card" x-show="mode === 'live' && isFindMaxMode()">
     <div class="card-title">Find Max (step-load) (live)</div>
-    <div class="text-sm text-gray-700" style="margin-top: -0.25rem;">
+    <div class="text-sm text-gray-700 -mt-1">
         Step-load controller metrics (baseline vs current latency, upcoming worker change, and conclusion reason).
     </div>
 
-    <div class="overflow-x-auto" style="margin-top: 0.75rem;">
-        <table style="width: 100%; border-collapse: collapse;">
-            <thead style="background: #f3f4f6;">
+    <div class="overflow-x-auto mt-3">
+        <table class="w-full border-collapse">
+            <thead class="bg-gray-100">
                 <tr>
-                    <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">Step</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">Established P95 (baseline)</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">Current P95</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">% diff</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">P95 drift threshold</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">Current P99</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">P99 drift threshold</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">Error %</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap;">Max Error %</th>
+                    <th class="p-2 text-left border-b-2 border-gray-200 whitespace-nowrap">Step</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">Established P95 (baseline)</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">Current P95</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">% diff</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">P95 drift threshold</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">Current P99</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">P99 drift threshold</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">Error %</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap">Max Error %</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;" x-text="'Step ' + (findMaxState()?.current_step ?? '—')"></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMsWithUnit(findMaxBaselineP95Ms())"></td>
+                    <td class="p-2 border-b border-gray-200 font-medium" x-text="'Step ' + (findMaxState()?.current_step ?? '—')"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMsWithUnit(findMaxBaselineP95Ms())"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(findMaxCurrentP95Ms(), findMaxP95MaxThresholdMs())"
                         x-text="formatMsWithUnit(findMaxCurrentP95Ms())"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                    <td class="p-2 text-right border-b border-gray-200"
                         x-text="
                             (findMaxP95DiffPct() == null)
                                 ? 'N/A'
                                 : ((findMaxP95DiffPct() >= 0 ? '+' : '') + findMaxP95DiffPct().toFixed(1) + '%')
                         "
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMsWithUnit(findMaxP95MaxThresholdMs())"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMsWithUnit(findMaxP95MaxThresholdMs())"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(findMaxCurrentP99Ms(), findMaxP99MaxThresholdMs())"
                         x-text="formatMsWithUnit(findMaxCurrentP99Ms())"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMsWithUnit(findMaxP99MaxThresholdMs())"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMsWithUnit(findMaxP99MaxThresholdMs())"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(findMaxCurrentErrorPct(), findMaxMaxErrorPct(), true)"
                         x-text="formatPctValue(findMaxCurrentErrorPct())"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetPct(findMaxMaxErrorPct())"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetPct(findMaxMaxErrorPct())"></td>
                 </tr>
             </tbody>
         </table>
     </div>
 
-    <div class="metrics-grid" style="margin-top: 1rem;">
+    <div class="metrics-grid mt-4">
         <div class="metric-card">
             <div class="metric-label">
                 <span>Workers</span>
@@ -230,7 +226,7 @@
                                 : findMaxCurrentWorkers() + ' → ' + findMaxNextWorkers()))
                 "
             ></div>
-            <div class="metric-change" style="display: flex; flex-direction: column; gap: 2px;">
+        <div class="metric-change flex flex-col gap-0.5">
                 <div x-show="findMaxActiveWorkers() != null" x-text="'Active: ' + formatInt(findMaxActiveWorkers())"></div>
                 <div x-show="findMaxNextWorkers() != null" x-text="'Next change in: ' + (findMaxCountdownSeconds != null ? (findMaxCountdownSeconds + 's') : '—')"></div>
             </div>
@@ -250,139 +246,139 @@
                 <span>Conclusion Reason</span>
                 <span class="info-icon" title="Plain-text reason for why the FIND_MAX_CONCURRENCY run stopped or completed.">i</span>
             </div>
-            <div class="metric-value" style="font-size: 1rem; line-height: 1.4; white-space: pre-wrap;" x-text="findMaxConclusionReason()"></div>
+            <div class="metric-value text-base leading-normal whitespace-pre-wrap" x-text="findMaxConclusionReason()"></div>
             <div class="metric-change" x-text="'Status: ' + (status || '')"></div>
         </div>
     </div>
 </div>
 
-<div class="card" x-show="templateInfo" style="margin-top: 1rem;">
+<div class="card mt-4" x-show="templateInfo">
     <div class="card-title">Targets (SLOs)</div>
-    <div class="text-sm text-gray-700" style="margin-top: -0.25rem; display: flex; align-items: center; gap: 0.5rem;">
+    <div class="text-sm text-gray-700 -mt-1 flex items-center gap-2">
         <div><strong>Overall:</strong></div>
         <span class="status-badge" :class="sloOverallBadgeClass()" x-text="sloOverallStatus()"></span>
-        <div style="color: #6b7280;">
+        <div class="text-gray-500">
             (strict: all query types with non-zero weight must meet enabled targets)
         </div>
     </div>
 
-    <div x-show="sloOverallStatus() === 'DISABLED'" style="color: #6b7280; margin-top: 0.75rem;">
+    <div x-show="sloOverallStatus() === 'DISABLED'" class="text-gray-500 mt-3">
         No SLO targets configured (all targets are disabled).
     </div>
 
-    <div class="overflow-x-auto" style="margin-top: 0.75rem;" x-show="sloOverallStatus() !== 'DISABLED'">
-        <table style="width: 100%; border-collapse: collapse;">
-            <thead style="background: #f3f4f6;">
+    <div class="overflow-x-auto mt-3" x-show="sloOverallStatus() !== 'DISABLED'">
+        <table class="w-full border-collapse">
+            <thead class="bg-gray-100">
                 <tr>
-                    <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Query Type</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Weight</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P95 (ms)</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P95 Target</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P99 (ms)</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P99 Target</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Error %</th>
-                    <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Max Error %</th>
-                    <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Status</th>
+                    <th class="p-2 text-left border-b-2 border-gray-200">Query Type</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200">Weight</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200">P95 (ms)</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200">P95 Target</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200">P99 (ms)</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200">P99 Target</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200">Error %</th>
+                    <th class="p-2 text-right border-b-2 border-gray-200">Max Error %</th>
+                    <th class="p-2 text-left border-b-2 border-gray-200">Status</th>
                 </tr>
             </thead>
             <tbody>
                 <tr x-show="workloadPct('POINT_LOOKUP') > 0">
-                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Point Lookup</td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="workloadPct('POINT_LOOKUP') + '%'"></td>
+                    <td class="p-2 border-b border-gray-200 font-medium">Point Lookup</td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="workloadPct('POINT_LOOKUP') + '%'"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedP95Ms('POINT_LOOKUP'), sloTargetP95Ms('POINT_LOOKUP'))"
                         x-text="formatMs(sloObservedP95Ms('POINT_LOOKUP'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetMs(sloTargetP95Ms('POINT_LOOKUP'))"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetMs(sloTargetP95Ms('POINT_LOOKUP'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedP99Ms('POINT_LOOKUP'), sloTargetP99Ms('POINT_LOOKUP'))"
                         x-text="formatMs(sloObservedP99Ms('POINT_LOOKUP'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetMs(sloTargetP99Ms('POINT_LOOKUP'))"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetMs(sloTargetP99Ms('POINT_LOOKUP'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedErrorPct('POINT_LOOKUP'), sloTargetErrorPct('POINT_LOOKUP'), true)"
                         x-text="formatPctValue(sloObservedErrorPct('POINT_LOOKUP'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetPct(sloTargetErrorPct('POINT_LOOKUP'))"></td>
-                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetPct(sloTargetErrorPct('POINT_LOOKUP'))"></td>
+                    <td class="p-2 border-b border-gray-200">
                         <span class="status-badge" :class="sloBadgeClass('POINT_LOOKUP')" x-text="sloRowStatus('POINT_LOOKUP')"></span>
                     </td>
                 </tr>
                 <tr x-show="workloadPct('RANGE_SCAN') > 0">
-                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Range Scan</td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="workloadPct('RANGE_SCAN') + '%'"></td>
+                    <td class="p-2 border-b border-gray-200 font-medium">Range Scan</td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="workloadPct('RANGE_SCAN') + '%'"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedP95Ms('RANGE_SCAN'), sloTargetP95Ms('RANGE_SCAN'))"
                         x-text="formatMs(sloObservedP95Ms('RANGE_SCAN'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetMs(sloTargetP95Ms('RANGE_SCAN'))"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetMs(sloTargetP95Ms('RANGE_SCAN'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedP99Ms('RANGE_SCAN'), sloTargetP99Ms('RANGE_SCAN'))"
                         x-text="formatMs(sloObservedP99Ms('RANGE_SCAN'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetMs(sloTargetP99Ms('RANGE_SCAN'))"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetMs(sloTargetP99Ms('RANGE_SCAN'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedErrorPct('RANGE_SCAN'), sloTargetErrorPct('RANGE_SCAN'), true)"
                         x-text="formatPctValue(sloObservedErrorPct('RANGE_SCAN'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetPct(sloTargetErrorPct('RANGE_SCAN'))"></td>
-                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetPct(sloTargetErrorPct('RANGE_SCAN'))"></td>
+                    <td class="p-2 border-b border-gray-200">
                         <span class="status-badge" :class="sloBadgeClass('RANGE_SCAN')" x-text="sloRowStatus('RANGE_SCAN')"></span>
                     </td>
                 </tr>
                 <tr x-show="workloadPct('INSERT') > 0">
-                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Insert</td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="workloadPct('INSERT') + '%'"></td>
+                    <td class="p-2 border-b border-gray-200 font-medium">Insert</td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="workloadPct('INSERT') + '%'"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedP95Ms('INSERT'), sloTargetP95Ms('INSERT'))"
                         x-text="formatMs(sloObservedP95Ms('INSERT'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetMs(sloTargetP95Ms('INSERT'))"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetMs(sloTargetP95Ms('INSERT'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedP99Ms('INSERT'), sloTargetP99Ms('INSERT'))"
                         x-text="formatMs(sloObservedP99Ms('INSERT'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetMs(sloTargetP99Ms('INSERT'))"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetMs(sloTargetP99Ms('INSERT'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;"
+                        class="p-2 text-right border-b border-gray-200"
                         :class="thresholdClass(sloObservedErrorPct('INSERT'), sloTargetErrorPct('INSERT'), true)"
                         x-text="formatPctValue(sloObservedErrorPct('INSERT'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatTargetPct(sloTargetErrorPct('INSERT'))"></td>
-                    <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatTargetPct(sloTargetErrorPct('INSERT'))"></td>
+                    <td class="p-2 border-b border-gray-200">
                         <span class="status-badge" :class="sloBadgeClass('INSERT')" x-text="sloRowStatus('INSERT')"></span>
                     </td>
                 </tr>
                 <tr x-show="workloadPct('UPDATE') > 0">
-                    <td style="padding: 0.5rem; font-weight: 500;">Update</td>
-                    <td style="padding: 0.5rem; text-align: right;" x-text="workloadPct('UPDATE') + '%'"></td>
+                    <td class="p-2 font-medium">Update</td>
+                    <td class="p-2 text-right" x-text="workloadPct('UPDATE') + '%'"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right;"
+                        class="p-2 text-right"
                         :class="thresholdClass(sloObservedP95Ms('UPDATE'), sloTargetP95Ms('UPDATE'))"
                         x-text="formatMs(sloObservedP95Ms('UPDATE'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right;" x-text="formatTargetMs(sloTargetP95Ms('UPDATE'))"></td>
+                    <td class="p-2 text-right" x-text="formatTargetMs(sloTargetP95Ms('UPDATE'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right;"
+                        class="p-2 text-right"
                         :class="thresholdClass(sloObservedP99Ms('UPDATE'), sloTargetP99Ms('UPDATE'))"
                         x-text="formatMs(sloObservedP99Ms('UPDATE'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right;" x-text="formatTargetMs(sloTargetP99Ms('UPDATE'))"></td>
+                    <td class="p-2 text-right" x-text="formatTargetMs(sloTargetP99Ms('UPDATE'))"></td>
                     <td
-                        style="padding: 0.5rem; text-align: right;"
+                        class="p-2 text-right"
                         :class="thresholdClass(sloObservedErrorPct('UPDATE'), sloTargetErrorPct('UPDATE'), true)"
                         x-text="formatPctValue(sloObservedErrorPct('UPDATE'))"
                     ></td>
-                    <td style="padding: 0.5rem; text-align: right;" x-text="formatTargetPct(sloTargetErrorPct('UPDATE'))"></td>
-                    <td style="padding: 0.5rem;">
+                    <td class="p-2 text-right" x-text="formatTargetPct(sloTargetErrorPct('UPDATE'))"></td>
+                    <td class="p-2">
                         <span class="status-badge" :class="sloBadgeClass('UPDATE')" x-text="sloRowStatus('UPDATE')"></span>
                     </td>
                 </tr>
@@ -390,17 +386,16 @@
         </table>
     </div>
 
-    <div style="color: #6b7280; margin-top: 0.75rem;">
+    <div class="text-gray-500 mt-3">
         SLO evaluation uses end-to-end (app) latency. The SQL-execution view is still available for diagnosing where time is spent.
     </div>
 </div>
 
 <div
     x-show="latencyView === 'sf_execution' && !sfLatencyAvailable()"
-    class="card"
-    style="margin-top: -1rem;"
+    class="card -mt-4"
 >
-    <div style="color: #6b7280;">
+    <div class="text-gray-500">
         SQL execution timings are available after processing completes (they come from
         <code>INFORMATION_SCHEMA.QUERY_HISTORY</code>).
     </div>
@@ -408,11 +403,11 @@
 
 <div class="card" x-show="templateInfo && isFinalMetricsReady()">
     <div class="card-title">Detailed Latency Breakdown</div>
-    <div style="color: #6b7280; margin-top: -0.25rem;">
+    <div class="text-gray-500 -mt-1">
         Values below reflect the selected latency view.
     </div>
 
-    <div class="metrics-grid" style="margin-top: 1rem;">
+    <div class="metrics-grid mt-4">
         <div class="metric-card">
             <div class="metric-label">
                 <span>Read Operations</span>
@@ -437,30 +432,30 @@
         </div>
     </div>
 
-    <h4 style="margin-top: 1.5rem; margin-bottom: 0.5rem; font-weight: 600;">Read vs Write Latency</h4>
-    <table style="width: 100%; border-collapse: collapse; margin-top: 0.5rem;">
-        <thead style="background: #f3f4f6;">
+    <h4 class="mt-6 mb-2 font-semibold">Read vs Write Latency</h4>
+    <table class="w-full border-collapse mt-2">
+        <thead class="bg-gray-100">
             <tr>
-                <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Type</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;"># Queries</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P50 (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P95 (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P99 (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Min (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Max (ms)</th>
-                <th x-show="mode === 'history'" style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Data</th>
+                <th class="p-2 text-left border-b-2 border-gray-200">Type</th>
+                <th class="p-2 text-right border-b-2 border-gray-200"># Queries</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">P50 (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">P95 (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">P99 (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">Min (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">Max (ms)</th>
+                <th x-show="mode === 'history'" class="p-2 text-left border-b-2 border-gray-200">Data</th>
             </tr>
         </thead>
         <tbody>
             <tr>
-                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Reads</td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatCompact((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_p50_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_p95_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_p99_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_min_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('read_max_latency_ms'))"></td>
-                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                <td class="p-2 border-b border-gray-200 font-medium">Reads</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
                         :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('POINT_LOOKUP,RANGE_SCAN')}` : '#'"
@@ -470,14 +465,14 @@
                 </td>
             </tr>
             <tr>
-                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Writes</td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatCompact((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_p50_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_p95_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_p99_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_min_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('write_max_latency_ms'))"></td>
-                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                <td class="p-2 border-b border-gray-200 font-medium">Writes</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
                         :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('INSERT,UPDATE')}` : '#'"
@@ -489,30 +484,30 @@
         </tbody>
     </table>
 
-    <h4 style="margin-top: 1.5rem; margin-bottom: 0.5rem; font-weight: 600;">Per-Query-Type Latency</h4>
-    <table style="width: 100%; border-collapse: collapse; margin-top: 0.5rem;">
-        <thead style="background: #f3f4f6;">
+    <h4 class="mt-6 mb-2 font-semibold">Per-Query-Type Latency</h4>
+    <table class="w-full border-collapse mt-2">
+        <thead class="bg-gray-100">
             <tr>
-                <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Query Type</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;"># Queries</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P50 (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P95 (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">P99 (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Min (ms)</th>
-                <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb;">Max (ms)</th>
-                <th x-show="mode === 'history'" style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">Data</th>
+                <th class="p-2 text-left border-b-2 border-gray-200">Query Type</th>
+                <th class="p-2 text-right border-b-2 border-gray-200"># Queries</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">P50 (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">P95 (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">P99 (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">Min (ms)</th>
+                <th class="p-2 text-right border-b-2 border-gray-200">Max (ms)</th>
+                <th x-show="mode === 'history'" class="p-2 text-left border-b-2 border-gray-200">Data</th>
             </tr>
         </thead>
         <tbody>
             <tr>
-                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Point Lookup</td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatCompact(templateInfo?.point_lookup_count || 0)"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_p50_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_p95_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_p99_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_min_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('point_lookup_max_latency_ms'))"></td>
-                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                <td class="p-2 border-b border-gray-200 font-medium">Point Lookup</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.point_lookup_count || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('point_lookup_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('point_lookup_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('point_lookup_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('point_lookup_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('point_lookup_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
                         :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('POINT_LOOKUP')}` : '#'"
@@ -522,14 +517,14 @@
                 </td>
             </tr>
             <tr>
-                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Range Scan</td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatCompact(templateInfo?.range_scan_count || 0)"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_p50_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_p95_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_p99_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_min_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('range_scan_max_latency_ms'))"></td>
-                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                <td class="p-2 border-b border-gray-200 font-medium">Range Scan</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.range_scan_count || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('range_scan_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('range_scan_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('range_scan_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('range_scan_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('range_scan_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
                         :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('RANGE_SCAN')}` : '#'"
@@ -539,14 +534,14 @@
                 </td>
             </tr>
             <tr>
-                <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Insert</td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatCompact(templateInfo?.insert_count || 0)"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_p50_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_p95_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_p99_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_min_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;" x-text="formatMs(detailLatency('insert_max_latency_ms'))"></td>
-                <td x-show="mode === 'history'" style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                <td class="p-2 border-b border-gray-200 font-medium">Insert</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.insert_count || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('insert_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('insert_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('insert_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('insert_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('insert_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
                         :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('INSERT')}` : '#'"
@@ -556,14 +551,14 @@
                 </td>
             </tr>
             <tr>
-                <td style="padding: 0.5rem; font-weight: 500;">Update</td>
-                <td style="padding: 0.5rem; text-align: right;" x-text="formatCompact(templateInfo?.update_count || 0)"></td>
-                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_p50_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_p95_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_p99_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_min_latency_ms'))"></td>
-                <td style="padding: 0.5rem; text-align: right;" x-text="formatMs(detailLatency('update_max_latency_ms'))"></td>
-                <td x-show="mode === 'history'" style="padding: 0.5rem;">
+                <td class="p-2 font-medium">Update</td>
+                <td class="p-2 text-right" x-text="formatCompact(templateInfo?.update_count || 0)"></td>
+                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_p50_latency_ms'))"></td>
+                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_p95_latency_ms'))"></td>
+                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_p99_latency_ms'))"></td>
+                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_min_latency_ms'))"></td>
+                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2">
                     <a
                         class="btn btn-secondary btn-sm"
                         :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('UPDATE')}` : '#'"

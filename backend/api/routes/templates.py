@@ -2873,6 +2873,43 @@ async def delete_template(template_id: str):
             """,
             params=[template_id],
         )
+        # Delete from RUN_ID-keyed tables (parent test run_id = test_id)
+        await pool.execute_query(
+            f"""
+            DELETE FROM {prefix}.WORKER_METRICS_SNAPSHOTS
+            WHERE RUN_ID IN (
+                SELECT TEST_ID
+                FROM {prefix}.TEST_RESULTS
+                WHERE TEST_CONFIG:"template_id"::string = ?
+                  AND RUN_ID = TEST_ID
+            )
+            """,
+            params=[template_id],
+        )
+        await pool.execute_query(
+            f"""
+            DELETE FROM {prefix}.WAREHOUSE_POLL_SNAPSHOTS
+            WHERE RUN_ID IN (
+                SELECT TEST_ID
+                FROM {prefix}.TEST_RESULTS
+                WHERE TEST_CONFIG:"template_id"::string = ?
+                  AND RUN_ID = TEST_ID
+            )
+            """,
+            params=[template_id],
+        )
+        await pool.execute_query(
+            f"""
+            DELETE FROM {prefix}.FIND_MAX_STEP_HISTORY
+            WHERE RUN_ID IN (
+                SELECT TEST_ID
+                FROM {prefix}.TEST_RESULTS
+                WHERE TEST_CONFIG:"template_id"::string = ?
+                  AND RUN_ID = TEST_ID
+            )
+            """,
+            params=[template_id],
+        )
         await pool.execute_query(
             f"""
             DELETE FROM {prefix}.TEST_RESULTS

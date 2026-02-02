@@ -18,6 +18,30 @@ tasks:
     cmds:
       - task --list
 
+  css:build:
+    desc: "Build Tailwind CSS (minified)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - uv run tailwindcss -i backend/static/css/input.css -o backend/static/css/tailwind.css --minify
+
+  css:watch:
+    desc: "Watch and rebuild Tailwind CSS on changes"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - uv run tailwindcss -i backend/static/css/input.css -o backend/static/css/tailwind.css --watch
+
+  css:dev:
+    desc: "Build Tailwind CSS (unminified, for debugging)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - uv run tailwindcss -i backend/static/css/input.css -o backend/static/css/tailwind.css
+
   test:variations:smoke:
     desc: "Run short 4-variation smoke checks via API (override with DURATION_SECONDS=5)"
     preconditions:

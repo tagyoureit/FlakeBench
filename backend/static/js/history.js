@@ -145,6 +145,22 @@ function testHistory() {
     chatHistory: [],
     chatLoading: false,
 
+    // Loading states for individual buttons
+    rerunningTestId: null,
+    deletingTestId: null,
+    viewingTestId: null,
+    applyingFilters: false,
+    deepCompareLoading: false,
+
+    // Check if any action is in progress for a specific test
+    isTestActionInProgress(testId) {
+      return (
+        this.rerunningTestId === testId ||
+        this.deletingTestId === testId ||
+        this.viewingTestId === testId
+      );
+    },
+
     _refreshInterval: null,
     multiNodeExpanded: {},
     tableTypeLabel,
@@ -334,6 +350,7 @@ function testHistory() {
     },
 
     openDeepCompare() {
+      this.deepCompareLoading = true;
       window.location.href = this.deepCompareUrl();
     },
 
@@ -472,7 +489,10 @@ function testHistory() {
         this.filters.end_date = "";
       }
       this.currentPage = 1;
-      this.loadTests();
+      this.applyingFilters = true;
+      this.loadTests().finally(() => {
+        this.applyingFilters = false;
+      });
     },
 
     resetFilters() {
@@ -513,6 +533,7 @@ function testHistory() {
     },
 
     viewTest(test) {
+      this.viewingTestId = test.test_id;
       window.location.href = this.dashboardUrl(test);
     },
 
@@ -523,6 +544,7 @@ function testHistory() {
       );
       if (!confirmed) return;
 
+      this.rerunningTestId = testId;
       try {
         const response = await fetch(`/api/tests/${testId}/rerun`, {
           method: "POST",
@@ -532,6 +554,8 @@ function testHistory() {
       } catch (error) {
         console.error("Failed to rerun test:", error);
         window.toast.error("Failed to rerun test");
+      } finally {
+        this.rerunningTestId = null;
       }
     },
 
@@ -542,6 +566,7 @@ function testHistory() {
       );
       if (!confirmed) return;
 
+      this.deletingTestId = testId;
       try {
         await fetch(`/api/tests/${testId}`, {
           method: "DELETE",
@@ -551,6 +576,8 @@ function testHistory() {
       } catch (error) {
         console.error("Failed to delete test:", error);
         window.toast.error("Failed to delete test");
+      } finally {
+        this.deletingTestId = null;
       }
     },
 

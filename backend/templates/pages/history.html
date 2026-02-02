@@ -98,7 +98,10 @@
 
             <div class="btn-group">
                 <button type="button" class="btn btn-secondary" @click="resetFilters">Reset Filters</button>
-                <button type="button" class="btn btn-primary" @click="applyFilters">Apply</button>
+                <button type="button" class="btn btn-primary" :disabled="applyingFilters" @click="applyFilters">
+                    <span class="loading-spinner" x-show="applyingFilters"></span>
+                    <span x-text="applyingFilters ? 'Applying…' : 'Apply'"></span>
+                </button>
             </div>
 
             <div x-show="searchError" class="alert alert-error mb-4">
@@ -327,9 +330,11 @@
                 <button
                     type="button"
                     class="btn btn-primary btn-sm"
+                    :disabled="deepCompareLoading"
                     @click="openDeepCompare"
                 >
-                    Deep Compare
+                    <span class="loading-spinner" x-show="deepCompareLoading"></span>
+                    <span x-text="deepCompareLoading ? 'Loading…' : 'Deep Compare'"></span>
                 </button>
             </div>
         </div>
@@ -384,18 +389,18 @@
                 </thead>
                 <tbody>
                     <template x-for="row in displayRows" :key="row.type + ':' + row.test.test_id">
-                        <tr :style="row.type === 'child' ? 'background: #f9fafb;' : ''">
+                        <tr :class="row.type === 'child' ? 'bg-gray-50' : ''">
                             <td>
-                                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                <div class="flex items-center gap-2">
                                     <button
                                         type="button"
-                                        class="btn btn-secondary btn-sm"
-                                        style="min-width: 1.5rem; padding: 0 0.5rem;"
+                                        class="btn btn-secondary btn-sm px-2"
+                                        style="min-width: 1.5rem;"
                                         x-show="row.type === 'parent' && row.child_count > 0"
                                         @click="toggleMultiNode(row.run_id)"
                                         x-text="multiNodeExpanded[row.run_id] ? 'v' : '>'"
                                     ></button>
-                                    <span x-show="row.type === 'child'" style="color: #6b7280;">-</span>
+                                    <span x-show="row.type === 'child'" class="text-gray-500">-</span>
                                     <a
                                         :href="dashboardUrl(row.test)"
                                         class="text-blue-600 hover:underline"
@@ -403,11 +408,11 @@
                                     ></a>
                                     <span
                                         x-show="row.type === 'parent'"
-                                        style="font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 0.25rem; background: #e0f2fe; color: #0369a1;"
+                                        class="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700"
                                     >PARENT</span>
                                     <span
                                         x-show="row.type === 'child'"
-                                        style="font-size: 0.7rem; padding: 0.1rem 0.35rem; border-radius: 0.25rem; background: #fef3c7; color: #92400e;"
+                                        class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800"
                                     >CHILD</span>
                                 </div>
                             </td>
@@ -463,28 +468,34 @@
                                     <button 
                                         type="button" 
                                         class="btn btn-primary btn-sm"
+                                        :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="viewTest(row.test)">
-                                        View
+                                        <span class="loading-spinner" x-show="viewingTestId === row.test.test_id"></span>
+                                        <span x-text="viewingTestId === row.test.test_id ? 'Loading…' : 'View'"></span>
                                     </button>
                                     <button
                                         type="button"
                                         class="btn btn-secondary btn-sm"
                                         @click="toggleCompare(row.test.test_id)"
-                                        :disabled="!isCompared(row.test.test_id) && compareTests.length >= 2"
+                                        :disabled="isTestActionInProgress(row.test.test_id) || (!isCompared(row.test.test_id) && compareTests.length >= 2)"
                                     >
                                         <span x-text="isCompared(row.test.test_id) ? 'Remove' : 'Compare'"></span>
                                     </button>
                                     <button 
                                         type="button" 
                                         class="btn btn-secondary btn-sm"
+                                        :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="rerunTest(row.test.test_id)">
-                                        Re-run
+                                        <span class="loading-spinner" x-show="rerunningTestId === row.test.test_id"></span>
+                                        <span x-text="rerunningTestId === row.test.test_id ? 'Preparing…' : 'Re-run'"></span>
                                     </button>
                                     <button 
                                         type="button" 
                                         class="btn btn-error btn-sm"
+                                        :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="deleteTest(row.test.test_id)">
-                                        Delete
+                                        <span class="loading-spinner" x-show="deletingTestId === row.test.test_id"></span>
+                                        <span x-text="deletingTestId === row.test.test_id ? 'Deleting…' : 'Delete'"></span>
                                     </button>
                                 </div>
                             </td>

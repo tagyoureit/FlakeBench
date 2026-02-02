@@ -6,6 +6,22 @@ function templatesManager() {
     loading: true,
     error: null,
     preparingTemplateId: null,
+    // Loading states for individual buttons
+    editingTemplateId: null,
+    viewingTemplateId: null,
+    deletingTemplateId: null,
+    copyingTemplateId: null,
+
+    // Check if any action is in progress for a specific template
+    isTemplateActionInProgress(templateId) {
+      return (
+        this.editingTemplateId === templateId ||
+        this.viewingTemplateId === templateId ||
+        this.deletingTemplateId === templateId ||
+        this.copyingTemplateId === templateId ||
+        this.preparingTemplateId === templateId
+      );
+    },
 
     async init() {
       await this.loadTemplates();
@@ -160,6 +176,7 @@ function templatesManager() {
     },
 
     editTemplate(template) {
+      this.editingTemplateId = template.template_id;
       const templateId = encodeURIComponent(String(template?.template_id || ""));
       window.location.href = templateId
         ? `/configure?template_id=${templateId}`
@@ -169,6 +186,7 @@ function templatesManager() {
     viewTemplateDetails(template) {
       // Route to the same /configure page, but force read-only mode.
       // (The configure page will also force read-only if usage_count > 0.)
+      this.viewingTemplateId = template.template_id;
       const templateId = encodeURIComponent(String(template?.template_id || ""));
       window.location.href = templateId
         ? `/configure?template_id=${templateId}&mode=view`
@@ -176,6 +194,9 @@ function templatesManager() {
     },
 
     async duplicateTemplate(template) {
+      if (this.copyingTemplateId) return;
+      this.copyingTemplateId = template.template_id;
+
       const newTemplate = {
         ...template,
         template_name: `${template.template_name} (Copy)`,
@@ -194,12 +215,15 @@ function templatesManager() {
 
         if (response.ok) {
           await this.loadTemplates();
+          window.toast.success("Template copied.");
         } else {
           window.toast.error("Failed to duplicate template");
         }
       } catch (error) {
         console.error("Error duplicating template:", error);
         window.toast.error("Error duplicating template");
+      } finally {
+        this.copyingTemplateId = null;
       }
     },
 
@@ -218,6 +242,7 @@ function templatesManager() {
         return;
       }
 
+      this.deletingTemplateId = template.template_id;
       try {
         const response = await fetch(`/api/templates/${template.template_id}`, {
           method: "DELETE",
@@ -232,6 +257,8 @@ function templatesManager() {
       } catch (error) {
         console.error("Error deleting template:", error);
         window.toast.error("Error deleting template");
+      } finally {
+        this.deletingTemplateId = null;
       }
     },
   };

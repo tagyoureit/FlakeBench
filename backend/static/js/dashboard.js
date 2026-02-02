@@ -852,52 +852,60 @@ function dashboard(opts) {
       }
 
       // MCW Live Chart (real-time active clusters for live dashboard)
+      // IMPORTANT: Preserve existing chart data if present - don't destroy charts that have
+      // collected data during real-time updates (fixes "chart goes blank after test completes")
       const mcwLiveCanvas = document.getElementById("mcwLiveChart");
       if (!onlyWarehouse && !onlyOverhead) {
-        if (mcwLiveCanvas && window.Chart && Chart.getChart) {
-          safeDestroy(Chart.getChart(mcwLiveCanvas));
-        }
+        const existingMcwChart = mcwLiveCanvas && (mcwLiveCanvas.__chart || (window.Chart && Chart.getChart ? Chart.getChart(mcwLiveCanvas) : null));
+        const mcwHasData = existingMcwChart && existingMcwChart.data && existingMcwChart.data.labels && existingMcwChart.data.labels.length > 0;
+        
+        // Skip reinitialization if chart already has data (preserve real-time collected data)
+        if (!mcwHasData) {
+          if (mcwLiveCanvas && window.Chart && Chart.getChart) {
+            safeDestroy(Chart.getChart(mcwLiveCanvas));
+          }
 
-        const mcwLiveCtx = mcwLiveCanvas && mcwLiveCanvas.getContext
-          ? mcwLiveCanvas.getContext("2d")
-          : null;
-        if (mcwLiveCtx) {
-          mcwLiveCanvas.__chart = new Chart(mcwLiveCtx, {
-            type: "line",
-            data: {
-              labels: [],
-              datasets: [
-                {
-                  label: "Active Clusters",
-                  data: [],
-                  borderColor: "rgb(59, 130, 246)",
-                  backgroundColor: "rgba(59, 130, 246, 0.1)",
-                  tension: 0.0,
-                  stepped: true,
-                  fill: true,
-                },
-              ],
-            },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              animation: { duration: 0 },
-              scales: {
-                y: {
-                  beginAtZero: true,
-                  ticks: { precision: 0 },
-                  title: { display: true, text: "Active Clusters (MCW)" },
-                },
+          const mcwLiveCtx = mcwLiveCanvas && mcwLiveCanvas.getContext
+            ? mcwLiveCanvas.getContext("2d")
+            : null;
+          if (mcwLiveCtx) {
+            mcwLiveCanvas.__chart = new Chart(mcwLiveCtx, {
+              type: "line",
+              data: {
+                labels: [],
+                datasets: [
+                  {
+                    label: "Active Clusters",
+                    data: [],
+                    borderColor: "rgb(59, 130, 246)",
+                    backgroundColor: "rgba(59, 130, 246, 0.1)",
+                    tension: 0.0,
+                    stepped: true,
+                    fill: true,
+                  },
+                ],
               },
-              plugins: {
-                tooltip: {
-                  callbacks: {
-                    label: (ctx) => `${ctx.dataset.label}: ${Math.trunc(Number(ctx.parsed.y))}`,
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 0 },
+                scales: {
+                  y: {
+                    beginAtZero: true,
+                    ticks: { precision: 0 },
+                    title: { display: true, text: "Active Clusters (MCW)" },
+                  },
+                },
+                plugins: {
+                  tooltip: {
+                    callbacks: {
+                      label: (ctx) => `${ctx.dataset.label}: ${Math.trunc(Number(ctx.parsed.y))}`,
+                    },
                   },
                 },
               },
-            },
-          });
+            });
+          }
         }
       }
 

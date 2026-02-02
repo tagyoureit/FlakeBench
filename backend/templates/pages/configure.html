@@ -11,7 +11,7 @@
     <!-- Initial load state (prevents "defaults then fill in later" flicker) -->
     <div x-show="isInitializing" class="card">
         <div class="flex items-center gap-3">
-            <span class="loading-spinner" style="border-top-color: var(--primary); border-color: rgba(59, 130, 246, 0.2);"></span>
+            <span class="loading-spinner"></span>
             <div>
                 <div class="font-semibold">Loading configuration…</div>
                 <div class="text-sm text-gray-600">Applying template and fetching warehouses</div>
@@ -177,7 +177,7 @@
                     
                     <!-- Multi-Cluster Warehouse Details -->
                     <span x-show="selectedWarehouseDetails?.max_cluster_count > 1">
-                        <hr style="margin: 8px 0;">
+                        <hr class="my-2">
                         <strong>Multi-Cluster Configuration:</strong><br>
                         &nbsp;&nbsp;• Min Clusters: <span x-text="selectedWarehouseDetails?.min_cluster_count"></span><br>
                         &nbsp;&nbsp;• Max Clusters: <span x-text="selectedWarehouseDetails?.max_cluster_count"></span><br>
@@ -191,7 +191,7 @@
                     </span>
                     
                     <!-- Query Acceleration Service (QAS) -->
-                    <hr style="margin: 8px 0;">
+                    <hr class="my-2">
                     <strong>Query Acceleration Service (QAS):</strong> 
                     <span x-text="selectedWarehouseDetails?.enable_query_acceleration ? 'Enabled' : 'Disabled'"></span>
                     <span x-show="selectedWarehouseDetails?.enable_query_acceleration">
@@ -199,7 +199,7 @@
                     </span><br>
                     
                     <!-- Auto-Suspend/Resume Settings -->
-                    <hr style="margin: 8px 0;">
+                    <hr class="my-2">
                     <strong>Auto Settings:</strong><br>
                     &nbsp;&nbsp;• Auto-Suspend: <span x-text="selectedWarehouseDetails?.auto_suspend ? selectedWarehouseDetails.auto_suspend + ' seconds' : 'Disabled'"></span><br>
                     &nbsp;&nbsp;• Auto-Resume: <span x-text="selectedWarehouseDetails?.auto_resume ? 'Enabled' : 'Disabled'"></span><br>
@@ -275,98 +275,98 @@
             </div>
 
             <div class="overflow-x-auto mt-3">
-                <table style="width: 100%; border-collapse: collapse; table-layout: fixed;">
-                    <thead style="background: #f3f4f6;">
+                <table class="w-full border-collapse" style="table-layout: fixed;">
+                    <thead class="bg-gray-100">
                         <tr>
-                            <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 7rem;">Query Type</th>
-                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 5rem;">Mix %</th>
-                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 8rem;">P95 Target (ms)</th>
-                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 8rem;">P99 Target (ms)</th>
-                            <th style="padding: 0.5rem; text-align: right; border-bottom: 2px solid #e5e7eb; white-space: nowrap; width: 7rem;">Max Error %</th>
-                            <th style="padding: 0.5rem; text-align: left; border-bottom: 2px solid #e5e7eb;">SQL (stored in template)</th>
+                            <th class="p-2 text-left border-b-2 border-gray-200 whitespace-nowrap" style="width: 7rem;">Query Type</th>
+                            <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap" style="width: 5rem;">Mix %</th>
+                            <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap" style="width: 8rem;">P95 Target (ms)</th>
+                            <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap" style="width: 8rem;">P99 Target (ms)</th>
+                            <th class="p-2 text-right border-b-2 border-gray-200 whitespace-nowrap" style="width: 7rem;">Max Error %</th>
+                            <th class="p-2 text-left border-b-2 border-gray-200">SQL (stored in template)</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Point Lookup</td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_point_lookup_pct" min="0" max="100">
+                            <td class="p-2 border-b border-gray-200 font-medium">Point Lookup</td>
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_point_lookup_pct" min="0" max="100">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_point_lookup_p95_latency_ms" min="-1">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_point_lookup_p95_latency_ms" min="-1">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_point_lookup_p99_latency_ms" min="-1">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_point_lookup_p99_latency_ms" min="-1">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_point_lookup_error_rate_pct" min="-1" max="100" step="0.1">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_point_lookup_error_rate_pct" min="-1" max="100" step="0.1">
                             </td>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                            <td class="p-2 border-b border-gray-200">
                                 <template x-if="editingSql !== 'point_lookup'">
-                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
-                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_point_lookup_query)"></pre>
-                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('point_lookup')">Edit</button>
+                                    <div class="flex items-start gap-2">
+                                        <pre class="text-xs m-0 whitespace-pre-wrap break-words max-h-16 overflow-y-auto flex-1 bg-slate-50 p-1 px-2 rounded border border-slate-300" x-text="formatSqlDisplay(config.custom_point_lookup_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm flex-shrink-0" @click="toggleSqlEdit('point_lookup')">Edit</button>
                                     </div>
                                 </template>
                                 <template x-if="editingSql === 'point_lookup'">
                                     <div>
-                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_point_lookup_query"></textarea>
+                                        <textarea class="form-textarea font-mono text-xs" rows="4" style="min-width: 28rem;" x-model="config.custom_point_lookup_query"></textarea>
                                         <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('point_lookup')">Done</button>
                                     </div>
                                 </template>
                             </td>
                         </tr>
                         <tr>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">Range Scan</td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_range_scan_pct" min="0" max="100">
+                            <td class="p-2 border-b border-gray-200 font-medium">Range Scan</td>
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_range_scan_pct" min="0" max="100">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_range_scan_p95_latency_ms" min="-1">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_range_scan_p95_latency_ms" min="-1">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_range_scan_p99_latency_ms" min="-1">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_range_scan_p99_latency_ms" min="-1">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_range_scan_error_rate_pct" min="-1" max="100" step="0.1">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_range_scan_error_rate_pct" min="-1" max="100" step="0.1">
                             </td>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                            <td class="p-2 border-b border-gray-200">
                                 <template x-if="editingSql !== 'range_scan'">
-                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
-                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_range_scan_query)"></pre>
-                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('range_scan')">Edit</button>
+                                    <div class="flex items-start gap-2">
+                                        <pre class="text-xs m-0 whitespace-pre-wrap break-words max-h-16 overflow-y-auto flex-1 bg-slate-50 p-1 px-2 rounded border border-slate-300" x-text="formatSqlDisplay(config.custom_range_scan_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm flex-shrink-0" @click="toggleSqlEdit('range_scan')">Edit</button>
                                     </div>
                                 </template>
                                 <template x-if="editingSql === 'range_scan'">
                                     <div>
-                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_range_scan_query"></textarea>
+                                        <textarea class="form-textarea font-mono text-xs" rows="4" style="min-width: 28rem;" x-model="config.custom_range_scan_query"></textarea>
                                         <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('range_scan')">Done</button>
                                     </div>
                                 </template>
                             </td>
                         </tr>
                         <tr :class="{ 'opacity-50': isInteractiveTable(config.table_type) }">
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb; font-weight: 500;">
+                            <td class="p-2 border-b border-gray-200 font-medium">
                                 Insert
                                 <span x-show="isInteractiveTable(config.table_type)" class="text-xs text-red-600 block">(N/A)</span>
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_insert_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_insert_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_insert_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_insert_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_insert_p99_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_insert_p99_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right; border-bottom: 1px solid #e5e7eb;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_insert_error_rate_pct" min="-1" max="100" step="0.1" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right border-b border-gray-200">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_insert_error_rate_pct" min="-1" max="100" step="0.1" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem; border-bottom: 1px solid #e5e7eb;">
+                            <td class="p-2 border-b border-gray-200">
                                 <template x-if="editingSql !== 'insert' && !isInteractiveTable(config.table_type)">
-                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
-                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_insert_query)"></pre>
-                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('insert')">Edit</button>
+                                    <div class="flex items-start gap-2">
+                                        <pre class="text-xs m-0 whitespace-pre-wrap break-words max-h-16 overflow-y-auto flex-1 bg-slate-50 p-1 px-2 rounded border border-slate-300" x-text="formatSqlDisplay(config.custom_insert_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm flex-shrink-0" @click="toggleSqlEdit('insert')">Edit</button>
                                     </div>
                                 </template>
                                 <template x-if="isInteractiveTable(config.table_type)">
@@ -374,34 +374,34 @@
                                 </template>
                                 <template x-if="editingSql === 'insert' && !isInteractiveTable(config.table_type)">
                                     <div>
-                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_insert_query"></textarea>
+                                        <textarea class="form-textarea font-mono text-xs" rows="4" style="min-width: 28rem;" x-model="config.custom_insert_query"></textarea>
                                         <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('insert')">Done</button>
                                     </div>
                                 </template>
                             </td>
                         </tr>
                         <tr :class="{ 'opacity-50': isInteractiveTable(config.table_type) }">
-                            <td style="padding: 0.5rem; font-weight: 500;">
+                            <td class="p-2 font-medium">
                                 Update
                                 <span x-show="isInteractiveTable(config.table_type)" class="text-xs text-red-600 block">(N/A)</span>
                             </td>
-                            <td style="padding: 0.5rem; text-align: right;">
-                                <input type="number" class="form-input" style="width: 4.5rem; text-align: right;" x-model.number="config.custom_update_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right">
+                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_update_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_update_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_update_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_update_p99_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_update_p99_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem; text-align: right;">
-                                <input type="number" class="form-input" style="max-width: 10rem; text-align: right;" x-model.number="config.target_update_error_rate_pct" min="-1" max="100" step="0.1" :disabled="isInteractiveTable(config.table_type)">
+                            <td class="p-2 text-right">
+                                <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_update_error_rate_pct" min="-1" max="100" step="0.1" :disabled="isInteractiveTable(config.table_type)">
                             </td>
-                            <td style="padding: 0.5rem;">
+                            <td class="p-2">
                                 <template x-if="editingSql !== 'update' && !isInteractiveTable(config.table_type)">
-                                    <div style="display: flex; align-items: flex-start; gap: 0.5rem;">
-                                        <pre class="text-xs" style="margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 4rem; overflow-y: auto; flex: 1; background: #f8fafc; padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid #e2e8f0;" x-text="formatSqlDisplay(config.custom_update_query)"></pre>
-                                        <button type="button" class="btn btn-secondary btn-sm" style="flex-shrink: 0;" @click="toggleSqlEdit('update')">Edit</button>
+                                    <div class="flex items-start gap-2">
+                                        <pre class="text-xs m-0 whitespace-pre-wrap break-words max-h-16 overflow-y-auto flex-1 bg-slate-50 p-1 px-2 rounded border border-slate-300" x-text="formatSqlDisplay(config.custom_update_query)"></pre>
+                                        <button type="button" class="btn btn-secondary btn-sm flex-shrink-0" @click="toggleSqlEdit('update')">Edit</button>
                                     </div>
                                 </template>
                                 <template x-if="isInteractiveTable(config.table_type)">
@@ -409,7 +409,7 @@
                                 </template>
                                 <template x-if="editingSql === 'update' && !isInteractiveTable(config.table_type)">
                                     <div>
-                                        <textarea class="form-textarea" rows="4" style="min-width: 28rem; font-family: monospace; font-size: 0.75rem;" x-model="config.custom_update_query"></textarea>
+                                        <textarea class="form-textarea font-mono text-xs" rows="4" style="min-width: 28rem;" x-model="config.custom_update_query"></textarea>
                                         <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('update')">Done</button>
                                     </div>
                                 </template>
@@ -728,13 +728,13 @@
                 type="button"
                 class="btn btn-primary"
                 x-show="loadedTemplate"
-                :disabled="prepareTemplateLoading"
+                :disabled="isTemplateActionInProgress()"
                 @click="prepareTemplate()"
             >
                 <span class="loading-spinner" x-show="prepareTemplateLoading"></span>
                 <span x-text="prepareTemplateLoading ? 'Preparing…' : 'Run Benchmark'"></span>
             </button>
-            <button type="button" class="btn btn-secondary" @click="cancel" x-text="loadedTemplate ? 'Close' : 'Cancel'"></button>
+            <button type="button" class="btn btn-secondary" :disabled="isTemplateActionInProgress()" @click="cancel" x-text="loadedTemplate ? 'Close' : 'Cancel'"></button>
         </div>
         
         <div class="text-sm text-gray-600 mt-3" x-show="!isReadOnly">
@@ -866,19 +866,31 @@
             <button 
                 type="button" 
                 class="btn btn-primary" 
-                :disabled="prepareTemplateLoading"
+                :disabled="isTemplateActionInProgress()"
                 @click="prepareTemplate()"
             >
                 <span class="loading-spinner" x-show="prepareTemplateLoading"></span>
                 <span x-text="prepareTemplateLoading ? 'Preparing…' : 'Run Benchmark'"></span>
             </button>
-            <button type="button" class="btn btn-secondary" @click="copyTemplate">
-                Copy Template
+            <button 
+                type="button" 
+                class="btn btn-secondary" 
+                :disabled="isTemplateActionInProgress()"
+                @click="copyTemplate"
+            >
+                <span class="loading-spinner" x-show="copyTemplateLoading"></span>
+                <span x-text="copyTemplateLoading ? 'Copying…' : 'Copy Template'"></span>
             </button>
-            <button type="button" class="btn btn-danger" @click="deleteTemplateWithResults">
-                Delete Template & Results
+            <button 
+                type="button" 
+                class="btn btn-danger" 
+                :disabled="isTemplateActionInProgress()"
+                @click="deleteTemplateWithResults"
+            >
+                <span class="loading-spinner" x-show="deleteTemplateLoading"></span>
+                <span x-text="deleteTemplateLoading ? 'Deleting…' : 'Delete Template & Results'"></span>
             </button>
-            <button type="button" class="btn btn-secondary" @click="cancel">
+            <button type="button" class="btn btn-secondary" :disabled="isTemplateActionInProgress()" @click="cancel">
                 Close
             </button>
         </div>
@@ -1000,6 +1012,17 @@ function testConfiguration() {
         aiSqlAdjustLoading: false,
         saveAndPrepareLoading: false,
         prepareTemplateLoading: false,
+        copyTemplateLoading: false,
+        deleteTemplateLoading: false,
+
+        // Check if any template action is in progress
+        isTemplateActionInProgress() {
+            return (
+                this.prepareTemplateLoading ||
+                this.copyTemplateLoading ||
+                this.deleteTemplateLoading
+            );
+        },
 
         hasSelectedTable() {
             const db = String(this.config.database || '').trim();
@@ -2308,8 +2331,9 @@ function testConfiguration() {
         },
         
         async copyTemplate() {
-            if (!this.loadedTemplate) return;
+            if (!this.loadedTemplate || this.copyTemplateLoading) return;
             
+            this.copyTemplateLoading = true;
             const newTemplate = {
                 ...this.loadedTemplate,
                 template_name: this.loadedTemplate.template_name + ' (Copy)',
@@ -2342,6 +2366,8 @@ function testConfiguration() {
             } catch (error) {
                 console.error('Error copying template:', error);
                 window.toast.error('Error copying template');
+            } finally {
+                this.copyTemplateLoading = false;
             }
         },
         
@@ -2358,6 +2384,7 @@ function testConfiguration() {
                 return;
             }
             
+            this.deleteTemplateLoading = true;
             try {
                 const response = await fetch(`/api/templates/${this.loadedTemplate.template_id}`, {
                     method: 'DELETE'
@@ -2372,6 +2399,8 @@ function testConfiguration() {
             } catch (error) {
                 console.error('Error deleting template:', error);
                 window.toast.error('Error deleting template');
+            } finally {
+                this.deleteTemplateLoading = false;
             }
         },
         

@@ -4634,20 +4634,82 @@ async def get_overhead_timeseries(test_id: str) -> dict[str, Any]:
 
 @router.delete("/{test_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_test(test_id: str) -> None:
+    """Delete a test and all related data.
+
+    If this is a parent test (run_id == test_id), cascade deletes all child
+    worker tests and their associated data.
+    """
     try:
         pool = snowflake_pool.get_default_pool()
-        await pool.execute_query(
-            f"DELETE FROM {_prefix()}.METRICS_SNAPSHOTS WHERE TEST_ID = ?",
+        prefix = _prefix()
+
+        # Check if this is a parent test (run_id == test_id)
+        rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
             params=[test_id],
         )
-        await pool.execute_query(
-            f"DELETE FROM {_prefix()}.QUERY_EXECUTIONS WHERE TEST_ID = ?",
-            params=[test_id],
-        )
-        await pool.execute_query(
-            f"DELETE FROM {_prefix()}.TEST_RESULTS WHERE TEST_ID = ?",
-            params=[test_id],
-        )
+        if not rows:
+            # Test not found, nothing to delete
+            return None
+
+        run_id = rows[0][0]
+        is_parent = run_id is not None and str(run_id) == str(test_id)
+
+        if is_parent:
+            # Cascade delete: remove all data for this run_id (parent + children)
+
+            # Delete from tables that use RUN_ID
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.WORKER_METRICS_SNAPSHOTS WHERE RUN_ID = ?",
+                params=[test_id],
+            )
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.WAREHOUSE_POLL_SNAPSHOTS WHERE RUN_ID = ?",
+                params=[test_id],
+            )
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.FIND_MAX_STEP_HISTORY WHERE RUN_ID = ?",
+                params=[test_id],
+            )
+
+            # Get all test_ids in this run (parent + children)
+            child_rows = await pool.execute_query(
+                f"SELECT TEST_ID FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?",
+                params=[test_id],
+            )
+            all_test_ids = [str(r[0]) for r in child_rows] if child_rows else [test_id]
+
+            # Delete from tables keyed by TEST_ID for all tests in the run
+            for tid in all_test_ids:
+                await pool.execute_query(
+                    f"DELETE FROM {prefix}.METRICS_SNAPSHOTS WHERE TEST_ID = ?",
+                    params=[tid],
+                )
+                await pool.execute_query(
+                    f"DELETE FROM {prefix}.QUERY_EXECUTIONS WHERE TEST_ID = ?",
+                    params=[tid],
+                )
+
+            # Delete all TEST_RESULTS for this run (parent + children)
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?",
+                params=[test_id],
+            )
+        else:
+            # Single test delete (child or standalone test)
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.METRICS_SNAPSHOTS WHERE TEST_ID = ?",
+                params=[test_id],
+            )
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.QUERY_EXECUTIONS WHERE TEST_ID = ?",
+                params=[test_id],
+            )
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+                params=[test_id],
+            )
+
         return None
     except Exception as e:
         raise http_exception("delete test", e)
