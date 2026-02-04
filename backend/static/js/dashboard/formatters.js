@@ -125,4 +125,23 @@ window.DashboardMixins.formatters = {
     const d = typeof digits === "number" ? digits : Number(digits);
     return `${n.toFixed(Number.isFinite(d) ? d : 2)}%`;
   },
+
+  formatBytes(value) {
+    if (value == null) return "N/A";
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n) || n < 0) return "N/A";
+    
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let unitIndex = 0;
+    let size = n;
+    
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+    
+    // Show 2 decimal places for KB and above, whole numbers for bytes
+    const formatted = unitIndex === 0 ? Math.round(size) : size.toFixed(2);
+    return `${formatted} ${units[unitIndex]}`;
+  },
 };

@@ -43,6 +43,18 @@ window.DashboardMixins.state = function (opts) {
       sf_running_range_scan_bench: 0,
       sf_running_insert_bench: 0,
       sf_running_update_bench: 0,
+      // Postgres query stats (from pg_stat_activity polling)
+      pg_bench_available: false,
+      pg_running_bench: 0,
+      pg_waiting_bench: 0,
+      pg_running_tagged_bench: 0,
+      pg_running_other_bench: 0,
+      pg_running_read_bench: 0,
+      pg_running_write_bench: 0,
+      pg_running_point_lookup_bench: 0,
+      pg_running_range_scan_bench: 0,
+      pg_running_insert_bench: 0,
+      pg_running_update_bench: 0,
       p50_latency: 0,
       p95_latency: 0,
       p99_latency: 0,
@@ -84,8 +96,10 @@ window.DashboardMixins.state = function (opts) {
       app_write_ops_sec: 0,
     },
     sfRunningBreakdown: "read_write", // 'read_write' | 'by_kind'
+    pgRunningBreakdown: "read_write", // 'read_write' | 'by_kind' (Postgres)
     opsSecBreakdown: "read_write", // 'read_write' | 'by_kind'
     _sfRunningHasBreakdown: true, // Set to false when breakdown data not available
+    _pgRunningHasBreakdown: true, // Set to false when breakdown data not available (Postgres)
     _opsSecHasBreakdown: true, // Set to false when breakdown data not available
     latencyView: "end_to_end", // 'end_to_end' | 'sf_execution'
     latencyViewUserSelected: false,
@@ -103,7 +117,7 @@ window.DashboardMixins.state = function (opts) {
     logWorkerFilter: "",
     logTargets: [],
     logTargetsLoading: false,
-    logSelectedTargetId: null,
+    logSelectedTargetIds: [],
     logSelectedTestId: null,
     _logPollIntervalId: null,
     warehouseTs: [],

@@ -61,8 +61,9 @@ def annotate_query_for_sf_kind(query: str, query_kind: str) -> str:
     """
     Insert a short SQL comment encoding the benchmark query kind after the first keyword.
 
-    This is used only for Snowflake server-side concurrency sampling (QUERY_HISTORY),
-    so we can break RUNNING counts down by kind without relying on fragile SQL parsing.
+    This marker enables server-side stats tracking for both:
+    - Snowflake: QUERY_HISTORY filtering by UB_KIND marker
+    - PostgreSQL: pg_stat_statements filtering by UB_KIND marker
 
     NOTE: The marker is placed AFTER the first SQL keyword (SELECT/INSERT/UPDATE/DELETE)
     because Snowflake strips leading comments from QUERY_TEXT in QUERY_HISTORY.
@@ -79,7 +80,9 @@ def annotate_query_for_sf_kind(query: str, query_kind: str) -> str:
     # Snowflake strips leading comments from QUERY_TEXT in INFORMATION_SCHEMA.QUERY_HISTORY.
 
     # Match leading whitespace + first keyword (SELECT, INSERT, UPDATE, DELETE, WITH, MERGE)
-    match = re.match(r"^(\s*)(SELECT|INSERT|UPDATE|DELETE|WITH|MERGE)\b", q, re.IGNORECASE)
+    match = re.match(
+        r"^(\s*)(SELECT|INSERT|UPDATE|DELETE|WITH|MERGE)\b", q, re.IGNORECASE
+    )
     if match:
         prefix = match.group(1)  # Leading whitespace
         keyword = match.group(2)  # The SQL keyword

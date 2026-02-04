@@ -229,7 +229,7 @@ class SnowflakeConnectionPool:
                 if remaining > 0 and pct >= next_pct_log:
                     errors = attempted - created_ok
                     elapsed = asyncio.get_running_loop().time() - t0
-                    logger.info(
+                    logger.debug(
                         "[%s] Pool init progress: %d/%d attempted, %d created, %d errors (%.1fs elapsed)",
                         self._pool_name,
                         attempted,
@@ -382,7 +382,11 @@ class SnowflakeConnectionPool:
                 try:
                     await self._run_in_executor(cursor.execute, "SELECT 1")
                 finally:
-                    await self._run_in_executor(cursor.close)
+                    try:
+                        await self._run_in_executor(cursor.close)
+                    except RuntimeError:
+                        # Executor already shut down - cursor will be cleaned up with connection
+                        pass
                 self._last_health_check[conn_id] = datetime.now()
 
             return True
@@ -528,7 +532,11 @@ class SnowflakeConnectionPool:
                 return results
 
             finally:
-                await self._run_in_executor(cursor.close)
+                try:
+                    await self._run_in_executor(cursor.close)
+                except RuntimeError:
+                    # Executor already shut down - cursor will be cleaned up with connection
+                    pass
 
     async def execute_query_with_info(
         self,
@@ -585,7 +593,11 @@ class SnowflakeConnectionPool:
                     "total_elapsed_time_ms": total_elapsed_time_ms,
                 }
             finally:
-                await self._run_in_executor(cursor.close)
+                try:
+                    await self._run_in_executor(cursor.close)
+                except RuntimeError:
+                    # Executor already shut down - cursor will be cleaned up with connection
+                    pass
 
     async def update_query_tag(self, new_tag: str) -> int:
         """

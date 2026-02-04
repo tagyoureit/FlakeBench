@@ -53,12 +53,8 @@
                     <strong>Database:</strong>
                     <span>Postgres</span>
                 </div>
-                <div class="mt-1" x-show="isPostgresTable() && postgresPoolDisplay()">
-                    <strong>Postgres:</strong>
-                    <span x-text="postgresPoolDisplay()"></span>
-                </div>
                 <div class="mt-1" x-show="isPostgresTable() && postgresConnectionsDisplay()">
-                    <strong>Postgres:</strong>
+                    <strong>Pool:</strong>
                     <span x-text="postgresConnectionsDisplay()"></span>
                 </div>
                 <div class="mt-1" x-show="loadModeDisplay()">
@@ -69,9 +65,17 @@
                     <strong>Workload Mix:</strong>
                     <span x-text="workloadDisplay()"></span>
                 </div>
-                <div class="mt-1" x-show="templateInfo && Number(templateInfo.duration_seconds || 0) > 0">
+                <div class="mt-1" x-show="durationDisplay()">
                     <strong>Duration:</strong>
-                    <span x-text="templateInfo ? (templateInfo.duration_seconds ?? '') : ''"></span>s
+                    <span x-text="durationDisplay()"></span>
+                </div>
+                <!-- Live Cost Estimate -->
+                <div class="mt-1" x-show="!isPostgresTable() && hasTestStarted()">
+                    <strong>Est. Cost:</strong>
+                    <span class="cursor-help" x-text="formatLiveCost()" :title="formatLiveCostTooltip()"></span>
+                    <span class="text-xs text-gray-500" x-show="projectedCost() > 0">
+                        (proj: <span x-text="formatProjectedCost()"></span>)
+                    </span>
                 </div>
                 <div class="mt-1" x-show="scalingSummary()">
                     <strong>Scaling:</strong>
@@ -128,11 +132,16 @@
                                         class="phase-spinner"
                                         x-show="phaseState(phaseName) === 'current' && (phaseName === 'PREPARING' || phaseName === 'PROCESSING')"
                                     ></span>
-                                    <!-- Checkmark for completed phases OR the COMPLETED phase when current -->
+                                    <!-- Checkmark for completed phases (green for success, red X for failure) -->
                                     <span 
                                         class="phase-checkmark"
-                                        x-show="phaseState(phaseName) === 'completed' || (phaseName === 'COMPLETED' && phaseState(phaseName) === 'current')"
+                                        x-show="(phaseState(phaseName) === 'completed' || (phaseName === 'COMPLETED' && phaseState(phaseName) === 'current')) && !['FAILED', 'CANCELLED', 'STOPPED'].includes((status || '').toUpperCase())"
                                     >✓</span>
+                                    <!-- X mark for failed/cancelled/stopped phases -->
+                                    <span 
+                                        class="phase-xmark"
+                                        x-show="(phaseState(phaseName) === 'completed' || (phaseName === 'COMPLETED' && phaseState(phaseName) === 'current')) && ['FAILED', 'CANCELLED', 'STOPPED'].includes((status || '').toUpperCase())"
+                                    >✗</span>
                                     <span x-text="completedPhaseDisplayName(phaseName)"></span>
                                 </span>
                                 <!-- Arrow between phases (not after last) -->
@@ -377,6 +386,39 @@
         </div>
     </div>
 
+    <!-- Postgres Running Queries (shown only for Postgres tests) -->
+    <div class="card" x-show="['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())">
+        <div class="flex justify-between items-center gap-3 flex-wrap">
+            <div class="card-title mb-0">Postgres Running Queries (Server)</div>
+            <div class="flex gap-2 flex-wrap items-center">
+                <div class="font-semibold">Breakdown:</div>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="pgRunningBreakdown === 'read_write' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setPgRunningBreakdown('read_write')"
+                >
+                    Read / Write
+                </button>
+                <button
+                    type="button"
+                    class="btn btn-sm"
+                    :class="pgRunningBreakdown === 'by_kind' ? 'btn-primary' : 'btn-secondary'"
+                    @click="setPgRunningBreakdown('by_kind')"
+                >
+                    Point / Range / Insert / Update
+                </button>
+            </div>
+        </div>
+        <div class="text-gray-500 mt-2">
+            Sampled every ~5 seconds from <code>pg_stat_activity</code> filtered by <code>UB_KIND</code> query markers.
+            Shows active queries broken down by operation type.
+        </div>
+        <div class="chart-container mt-3">
+            <canvas id="pgRunningChart"></canvas>
+        </div>
+    </div>
+
     <div class="card" x-show="metrics.resources_available">
         <div class="card-title">Resources (host + process)</div>
         <div class="metrics-grid">
@@ -427,7 +469,7 @@
         <div class="log-controls">
             <div class="log-control" x-show="logTargets && logTargets.length">
                 <label class="form-label">Source</label>
-                <select class="form-select" x-model="logSelectedTargetId" @change="onLogTargetChange()">
+                <select class="form-select" x-model="logSelectedTargetIds" @change="onLogTargetChange()" multiple size="1">
                     <template x-for="target in logTargets" :key="target.target_id || target.test_id">
                         <option
                             :value="target.target_id || target.test_id"

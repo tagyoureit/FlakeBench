@@ -6,7 +6,7 @@ see `SKILL.md`.
 ## Start Here
 
 - `architecture-overview.md` — system purpose, topology, and components
-- `operations-and-runbooks.md` — how to run, validate, and troubleshoot
+- `operations-and-runbooks.md` — how to run, validate, troubleshoot, and front-end dev
 - `data-flow-and-lifecycle.md` — lifecycle, control-plane state, metrics flow
 - `metrics-streaming-debug.md` — debugging guide for metrics streaming and phase transitions
 - `log-streaming-architecture.md` — log flow from workers to UI, current limitations

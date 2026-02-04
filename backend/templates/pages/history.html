@@ -9,8 +9,97 @@
 {% block content %}
 <div x-data="testHistory()">
     <div class="card card-compact">
-        <div class="card-title card-title--compact">Test History</div>
-        <p>Browse and manage all previous test results</p>
+        <div class="flex justify-between items-center">
+            <div>
+                <div class="card-title card-title--compact">Test History</div>
+                <p>Browse and manage all previous test results</p>
+            </div>
+            <button 
+                type="button" 
+                class="btn btn-secondary btn-sm"
+                @click="showCostSettings = true"
+                title="Configure cost settings"
+            >
+                ⚙️ Cost Settings
+            </button>
+        </div>
+    </div>
+
+    <!-- Cost Settings Modal -->
+    <div 
+        x-show="showCostSettings" 
+        x-cloak
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
+        @click.self="showCostSettings = false"
+        @keydown.escape.window="showCostSettings = false"
+    >
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md mx-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-semibold">Cost Settings</h3>
+                <button 
+                    type="button" 
+                    class="text-gray-500 hover:text-gray-700"
+                    @click="showCostSettings = false"
+                >&times;</button>
+            </div>
+            
+            <div class="space-y-4">
+                <div>
+                    <label class="form-label">Cost per Credit ($)</label>
+                    <input 
+                        type="number" 
+                        class="form-input"
+                        step="0.01"
+                        min="0"
+                        x-model.number="costSettings.dollarsPerCredit"
+                        @change="saveCostSettings()"
+                    >
+                    <p class="text-xs text-gray-500 mt-1">
+                        Default: $4.00 (Enterprise tier). Adjust based on your Snowflake contract.
+                    </p>
+                </div>
+                
+                <div class="flex items-center gap-2">
+                    <input 
+                        type="checkbox" 
+                        id="showCredits"
+                        x-model="costSettings.showCredits"
+                        @change="saveCostSettings()"
+                        class="rounded"
+                    >
+                    <label for="showCredits" class="text-sm">Show credits in tooltips</label>
+                </div>
+                
+                <div class="pt-4 border-t">
+                    <h4 class="font-medium text-sm mb-2">Warehouse Credit Rates</h4>
+                    <div class="text-xs text-gray-600 grid grid-cols-2 gap-1">
+                        <span>XSMALL: 1 credit/hr</span>
+                        <span>SMALL: 2 credits/hr</span>
+                        <span>MEDIUM: 4 credits/hr</span>
+                        <span>LARGE: 8 credits/hr</span>
+                        <span>XLARGE: 16 credits/hr</span>
+                        <span>2XLARGE: 32 credits/hr</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flex justify-end gap-2 mt-6">
+                <button 
+                    type="button" 
+                    class="btn btn-secondary"
+                    @click="resetCostSettings()"
+                >
+                    Reset to Defaults
+                </button>
+                <button 
+                    type="button" 
+                    class="btn btn-primary"
+                    @click="showCostSettings = false"
+                >
+                    Done
+                </button>
+            </div>
+        </div>
     </div>
 
     <details class="card card-collapsible">
@@ -49,7 +138,7 @@
                     <option value="COMPLETED">Completed</option>
                     <option value="RUNNING">Running</option>
                     <option value="FAILED">Failed</option>
-                    <option value="PAUSED">Paused</option>
+                    <option value="CANCELLED">Cancelled</option>
                 </select>
             </div>
 
@@ -151,9 +240,10 @@
                                             class="btn btn-sm"
                                             :class="isCompared(test.test_id) ? 'btn-secondary' : 'btn-primary'"
                                             @click="toggleCompare(test.test_id)"
-                                            :disabled="!isCompared(test.test_id) && compareTests.length >= 2"
+                                            :disabled="isTogglingCompare(test.test_id) || (!isCompared(test.test_id) && compareTests.length >= 2)"
                                         >
-                                            <span x-text="isCompared(test.test_id) ? 'Remove' : 'Add to compare'"></span>
+                                            <span class="loading-spinner" x-show="isTogglingCompare(test.test_id)"></span>
+                                            <span x-text="isTogglingCompare(test.test_id) ? 'Loading…' : (isCompared(test.test_id) ? 'Remove' : 'Add to compare')"></span>
                                         </button>
                                     </td>
                                 </tr>
@@ -229,11 +319,9 @@
                             </template>
                         </tr>
                         <tr>
-                            <td class="font-semibold">Warehouse Size</td>
+                            <td class="font-semibold">Warehouse / Instance Size</td>
                             <template x-for="test in compareTests" :key="test.test_id">
-                                <td
-                                    x-text="['POSTGRES', 'SNOWFLAKE_POSTGRES'].includes((test.table_type || '').toUpperCase()) ? '—' : test.warehouse_size"
-                                ></td>
+                                <td x-text="test.postgres_instance_size || test.warehouse_size || '—'"></td>
                             </template>
                         </tr>
                         <tr>
@@ -323,6 +411,49 @@
                                 <td x-text="Number(test.duration || 0).toFixed(0)"></td>
                             </template>
                         </tr>
+                        <tr>
+                            <td class="font-semibold">Estimated Cost</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td>
+                                    <span 
+                                        class="cursor-help"
+                                        x-text="window.CostUtils ? window.CostUtils.formatCostForTableType(test.estimated_cost_usd, test.table_type, test.cost_calculation_method) : '$' + (test.estimated_cost_usd || 0).toFixed(4)"
+                                        :title="window.CostUtils ? window.CostUtils.generateCostTooltip({
+                                            warehouseSize: test.postgres_instance_size || test.warehouse_size,
+                                            tableType: test.table_type,
+                                            durationSeconds: test.duration,
+                                            creditsUsed: test.credits_used,
+                                            creditsPerHour: test.credits_per_hour,
+                                            estimatedCostUsd: test.estimated_cost_usd,
+                                            dollarsPerCredit: costSettings.dollarsPerCredit,
+                                            nodeCount: test.node_count
+                                        }) : ''"
+                                    ></span>
+                                    <span
+                                        class="ml-2 text-sm"
+                                        :class="(test.estimated_cost_usd || 0) > 0 && (test.estimated_cost_usd || 0) === Math.min(...compareTests.filter(t => (t.estimated_cost_usd || 0) > 0).map(t => t.estimated_cost_usd)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                        x-show="(test.estimated_cost_usd || 0) > 0 && (test.estimated_cost_usd || 0) === Math.min(...compareTests.filter(t => (t.estimated_cost_usd || 0) > 0).map(t => t.estimated_cost_usd))"
+                                    >
+                                        ✓ Best
+                                    </span>
+                                </td>
+                            </template>
+                        </tr>
+                        <tr>
+                            <td class="font-semibold">Cost per 1K Ops</td>
+                            <template x-for="test in compareTests" :key="test.test_id">
+                                <td>
+                                    <span x-text="window.CostUtils ? window.CostUtils.formatCostForTableType(test.cost_per_1k_ops, test.table_type, test.cost_calculation_method) : '$' + (test.cost_per_1k_ops || 0).toFixed(4)"></span>
+                                    <span
+                                        class="ml-2 text-sm"
+                                        :class="(test.cost_per_1k_ops || 0) > 0 && (test.cost_per_1k_ops || 0) === Math.min(...compareTests.filter(t => (t.cost_per_1k_ops || 0) > 0).map(t => t.cost_per_1k_ops)) ? 'text-green-600 font-bold' : 'text-gray-500'"
+                                        x-show="(test.cost_per_1k_ops || 0) > 0 && (test.cost_per_1k_ops || 0) === Math.min(...compareTests.filter(t => (t.cost_per_1k_ops || 0) > 0).map(t => t.cost_per_1k_ops))"
+                                    >
+                                        ✓ Best
+                                    </span>
+                                </td>
+                            </template>
+                        </tr>
                     </tbody>
                 </table>
             </div>
@@ -383,6 +514,10 @@
                             P95 Latency
                             <span x-show="sortField === 'p95_latency'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
                         </th>
+                        <th @click="sortBy('estimated_cost_usd')" class="cursor-pointer">
+                            Est. Cost
+                            <span x-show="sortField === 'estimated_cost_usd'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
+                        </th>
                         <th>Status</th>
                         <th>Actions</th>
                     </tr>
@@ -429,6 +564,22 @@
                             <td x-text="new Date(row.test.created_at).toLocaleString()"></td>
                             <td x-text="row.test.ops_per_sec.toFixed(0)"></td>
                             <td x-text="row.test.p95_latency.toFixed(2) + ' ms'"></td>
+                            <td>
+                                <span 
+                                    class="text-sm cursor-help"
+                                    x-text="window.CostUtils ? window.CostUtils.formatCostForTableType(row.test.estimated_cost_usd, row.test.table_type, row.test.cost_calculation_method) : '$' + (row.test.estimated_cost_usd || 0).toFixed(4)"
+                                    :title="window.CostUtils ? window.CostUtils.generateCostTooltip({
+                                        warehouseSize: row.test.postgres_instance_size || row.test.warehouse_size,
+                                        tableType: row.test.table_type,
+                                        durationSeconds: row.test.duration,
+                                        creditsUsed: row.test.credits_used,
+                                        creditsPerHour: row.test.credits_per_hour,
+                                        estimatedCostUsd: row.test.estimated_cost_usd,
+                                        dollarsPerCredit: costSettings.dollarsPerCredit,
+                                        nodeCount: row.test.node_count
+                                    }) : 'Credits: ' + (row.test.credits_used || 0).toFixed(4)"
+                                ></span>
+                            </td>
                             <td>
                                 <div class="flex flex-col gap-1">
                                     <span 
@@ -477,9 +628,10 @@
                                         type="button"
                                         class="btn btn-secondary btn-sm"
                                         @click="toggleCompare(row.test.test_id)"
-                                        :disabled="isTestActionInProgress(row.test.test_id) || (!isCompared(row.test.test_id) && compareTests.length >= 2)"
+                                        :disabled="isTogglingCompare(row.test.test_id) || isTestActionInProgress(row.test.test_id) || (!isCompared(row.test.test_id) && compareTests.length >= 2)"
                                     >
-                                        <span x-text="isCompared(row.test.test_id) ? 'Remove' : 'Compare'"></span>
+                                        <span class="loading-spinner" x-show="isTogglingCompare(row.test.test_id)"></span>
+                                        <span x-text="isTogglingCompare(row.test.test_id) ? 'Loading…' : (isCompared(row.test.test_id) ? 'Remove' : 'Compare')"></span>
                                     </button>
                                     <button 
                                         type="button" 
@@ -487,15 +639,15 @@
                                         :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="rerunTest(row.test.test_id)">
                                         <span class="loading-spinner" x-show="rerunningTestId === row.test.test_id"></span>
-                                        <span x-text="rerunningTestId === row.test.test_id ? 'Preparing…' : 'Re-run'"></span>
+                                        <span x-text="rerunningTestId === row.test.test_id ? 'Loading…' : 'Run Again'"></span>
                                     </button>
                                     <button 
                                         type="button" 
                                         class="btn btn-error btn-sm"
                                         :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="deleteTest(row.test.test_id)">
-                                        <span class="loading-spinner" x-show="deletingTestId === row.test.test_id"></span>
-                                        <span x-text="deletingTestId === row.test.test_id ? 'Deleting…' : 'Delete'"></span>
+                                        <span class="loading-spinner" x-show="isDeleting(row.test.test_id)"></span>
+                                        <span x-text="isDeleting(row.test.test_id) ? 'Deleting…' : 'Delete'"></span>
                                     </button>
                                 </div>
                             </td>

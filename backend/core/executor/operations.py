@@ -3,24 +3,20 @@ Operation execution for test executor (read, write, custom operations).
 """
 
 import asyncio
-import json
 import logging
 import random
 import re
 import time
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 from uuid import uuid4
 
 from backend.core.executor.helpers import (
     annotate_query_for_sf_kind,
     classify_sql_error,
     is_postgres_pool,
-    preview_params_for_log,
-    preview_query_for_log,
     quote_column,
-    sql_error_meta_for_log,
 )
 from backend.core.executor.types import QueryExecutionRecord, TableRuntimeState
 
@@ -33,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 class OperationsMixin:
     """Mixin providing operation execution functionality for TestExecutor."""
+
+    if TYPE_CHECKING:
+
+        def _init_custom_workload(self) -> None: ...
 
     # These attributes are defined in the main TestExecutor class
     scenario: Any
@@ -156,7 +156,6 @@ class OperationsMixin:
 
     async def _execute_read(self, worker_id: int, warmup: bool = False) -> None:
         """Execute a read operation (point lookup or range scan)."""
-        start_wall = datetime.now(UTC)
         start_perf = time.perf_counter()
         epoch_at_start = int(self._metrics_epoch)
 
@@ -165,7 +164,7 @@ class OperationsMixin:
         self._table_state.setdefault(full_name, TableRuntimeState())
         state = self._table_state[full_name]
         profile = state.profile
-        pool = getattr(manager, "pool", None)
+        pool = cast(Any, getattr(manager, "pool", None))
 
         # Decide between point lookup and range scan
         use_point_lookup = random.random() < self.scenario.point_lookup_ratio
@@ -173,21 +172,25 @@ class OperationsMixin:
 
         try:
             if use_point_lookup and profile and profile.id_column:
-                query, params = self._build_point_lookup(full_name, manager, profile, pool)
+                query, params = self._build_point_lookup(
+                    full_name, manager, profile, pool
+                )
             else:
-                query, params = self._build_range_scan(full_name, manager, profile, pool)
+                query, params = self._build_range_scan(
+                    full_name, manager, profile, pool
+                )
                 query_kind = "RANGE_SCAN"
 
-            # Annotate for Snowflake
-            if hasattr(pool, "warehouse"):
-                query = annotate_query_for_sf_kind(query, query_kind)
+            # Annotate query with UB_KIND marker for server-side stats tracking
+            # (Snowflake QUERY_HISTORY and Postgres pg_stat_statements)
+            query = annotate_query_for_sf_kind(query, query_kind)
 
-            result, info = await pool.execute_query_with_info(query, params=params, fetch=True)
+            result, info = await pool.execute_query_with_info(
+                query, params=params, fetch=True
+            )
             rows_read = len(result or [])
-            sf_query_id = str(info.get("query_id") or "")
-
-            end_wall = datetime.now(UTC)
             app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
+            sf_execution_ms = info.get("total_elapsed_time_ms")
 
             counted = False
             async with self._metrics_lock:
@@ -201,9 +204,20 @@ class OperationsMixin:
                     self.metrics.read_metrics.total_duration_ms += app_elapsed_ms
                     self.metrics.rows_read += int(rows_read)
 
-                    if self._find_max_step_collecting and query_kind in self._find_max_step_ops_by_kind:
+                    if (
+                        self._find_max_step_collecting
+                        and query_kind in self._find_max_step_ops_by_kind
+                    ):
                         self._find_max_step_ops_by_kind[query_kind] += 1
-                        self._find_max_step_lat_by_kind_ms[query_kind].append(app_elapsed_ms)
+                        self._find_max_step_lat_by_kind_ms[query_kind].append(
+                            app_elapsed_ms
+                        )
+
+                    # Latency breakdown (execution vs network overhead)
+                    if sf_execution_ms is not None and sf_execution_ms >= 0:
+                        self._latency_sf_execution_ms.append(sf_execution_ms)
+                        network_overhead = max(0.0, app_elapsed_ms - sf_execution_ms)
+                        self._latency_network_overhead_ms.append(network_overhead)
 
             if counted and not warmup:
                 self._lat_read_ms.append(app_elapsed_ms)
@@ -214,7 +228,6 @@ class OperationsMixin:
                     self._range_scan_count += 1
 
         except Exception as e:
-            end_wall = datetime.now(UTC)
             app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
 
             category = classify_sql_error(e)
@@ -224,15 +237,19 @@ class OperationsMixin:
                     self.metrics.failed_operations += 1
                     self.metrics.read_metrics.count += 1
                     self.metrics.read_metrics.error_count += 1
-                    self._sql_error_categories[category] = self._sql_error_categories.get(category, 0) + 1
+                    self._sql_error_categories[category] = (
+                        self._sql_error_categories.get(category, 0) + 1
+                    )
 
-                    if self._find_max_step_collecting and query_kind in self._find_max_step_errors_by_kind:
+                    if (
+                        self._find_max_step_collecting
+                        and query_kind in self._find_max_step_errors_by_kind
+                    ):
                         self._find_max_step_ops_by_kind[query_kind] += 1
                         self._find_max_step_errors_by_kind[query_kind] += 1
 
     async def _execute_write(self, worker_id: int, warmup: bool = False) -> None:
         """Execute a write operation (insert or update)."""
-        start_wall = datetime.now(UTC)
         start_perf = time.perf_counter()
         epoch_at_start = int(self._metrics_epoch)
 
@@ -241,7 +258,7 @@ class OperationsMixin:
         self._table_state.setdefault(full_name, TableRuntimeState())
         state = self._table_state[full_name]
         profile = state.profile
-        pool = getattr(manager, "pool", None)
+        pool = cast(Any, getattr(manager, "pool", None))
 
         # Decide between insert and update
         use_update = random.random() < self.scenario.update_ratio
@@ -254,14 +271,16 @@ class OperationsMixin:
                 query, params = self._build_insert(full_name, manager, profile, pool)
                 query_kind = "INSERT"
 
-            # Annotate for Snowflake
-            if hasattr(pool, "warehouse"):
-                query = annotate_query_for_sf_kind(query, query_kind)
+            # Annotate query with UB_KIND marker for server-side stats tracking
+            # (Snowflake QUERY_HISTORY and Postgres pg_stat_statements)
+            query = annotate_query_for_sf_kind(query, query_kind)
 
-            _, info = await pool.execute_query_with_info(query, params=params, fetch=False)
+            _, info = await pool.execute_query_with_info(
+                query, params=params, fetch=False
+            )
             sf_rowcount = info.get("rowcount")
+            sf_execution_ms = info.get("total_elapsed_time_ms")
 
-            end_wall = datetime.now(UTC)
             app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
 
             counted = False
@@ -276,9 +295,20 @@ class OperationsMixin:
                     self.metrics.write_metrics.total_duration_ms += app_elapsed_ms
                     self.metrics.rows_written += int(sf_rowcount or 1)
 
-                    if self._find_max_step_collecting and query_kind in self._find_max_step_ops_by_kind:
+                    if (
+                        self._find_max_step_collecting
+                        and query_kind in self._find_max_step_ops_by_kind
+                    ):
                         self._find_max_step_ops_by_kind[query_kind] += 1
-                        self._find_max_step_lat_by_kind_ms[query_kind].append(app_elapsed_ms)
+                        self._find_max_step_lat_by_kind_ms[query_kind].append(
+                            app_elapsed_ms
+                        )
+
+                    # Latency breakdown (execution vs network overhead)
+                    if sf_execution_ms is not None and sf_execution_ms >= 0:
+                        self._latency_sf_execution_ms.append(sf_execution_ms)
+                        network_overhead = max(0.0, app_elapsed_ms - sf_execution_ms)
+                        self._latency_network_overhead_ms.append(network_overhead)
 
             if counted and not warmup:
                 self._lat_write_ms.append(app_elapsed_ms)
@@ -289,7 +319,6 @@ class OperationsMixin:
                     self._update_count += 1
 
         except Exception as e:
-            end_wall = datetime.now(UTC)
             app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
 
             category = classify_sql_error(e)
@@ -299,14 +328,23 @@ class OperationsMixin:
                     self.metrics.failed_operations += 1
                     self.metrics.write_metrics.count += 1
                     self.metrics.write_metrics.error_count += 1
-                    self._sql_error_categories[category] = self._sql_error_categories.get(category, 0) + 1
+                    self._sql_error_categories[category] = (
+                        self._sql_error_categories.get(category, 0) + 1
+                    )
 
-                    if self._find_max_step_collecting and query_kind in self._find_max_step_errors_by_kind:
+                    if (
+                        self._find_max_step_collecting
+                        and query_kind in self._find_max_step_errors_by_kind
+                    ):
                         self._find_max_step_ops_by_kind[query_kind] += 1
                         self._find_max_step_errors_by_kind[query_kind] += 1
 
     def _build_point_lookup(
-        self, full_name: str, manager: "TableManager", profile: "TableProfile", pool=None
+        self,
+        full_name: str,
+        manager: "TableManager",
+        profile: "TableProfile",
+        pool=None,
     ) -> tuple[str, list]:
         """Build a point lookup query."""
         if not profile.id_column:
@@ -321,7 +359,9 @@ class OperationsMixin:
         elif profile.id_min is not None and profile.id_max is not None:
             target_id = random.randint(profile.id_min, profile.id_max)
         else:
-            raise ValueError("Cannot build point lookup without key pool or id_min/id_max")
+            raise ValueError(
+                "Cannot build point lookup without key pool or id_min/id_max"
+            )
 
         id_col_quoted = quote_column(id_col, pool)
         select_list = self._select_list_sql()
@@ -329,7 +369,11 @@ class OperationsMixin:
         return query, [target_id]
 
     def _build_range_scan(
-        self, full_name: str, manager: "TableManager", profile: "TableProfile", pool=None
+        self,
+        full_name: str,
+        manager: "TableManager",
+        profile: "TableProfile | None",
+        pool=None,
     ) -> tuple[str, list]:
         """Build a range scan query."""
         select_list = self._select_list_sql()
@@ -352,9 +396,16 @@ class OperationsMixin:
             return query, [cutoff]
 
         # Fall back to id-based range
-        if profile and profile.id_column and profile.id_min is not None and profile.id_max is not None:
+        if (
+            profile
+            and profile.id_column
+            and profile.id_min is not None
+            and profile.id_max is not None
+        ):
             id_col = str(profile.id_column)
-            start_id = random.randint(profile.id_min, max(profile.id_min, profile.id_max - batch_size))
+            start_id = random.randint(
+                profile.id_min, max(profile.id_min, profile.id_max - batch_size)
+            )
             id_col_quoted = quote_column(id_col, pool)
             query = f"SELECT {select_list} FROM {full_name} WHERE {id_col_quoted} BETWEEN ? AND ? + {batch_size}"
             return query, [start_id, start_id]
@@ -364,7 +415,11 @@ class OperationsMixin:
         return query, []
 
     def _build_insert(
-        self, full_name: str, manager: "TableManager", profile: "TableProfile", pool=None
+        self,
+        full_name: str,
+        manager: "TableManager",
+        profile: "TableProfile | None",
+        pool=None,
     ) -> tuple[str, list]:
         """Build an insert query."""
         state = self._table_state.get(full_name) or TableRuntimeState()
@@ -383,7 +438,9 @@ class OperationsMixin:
                 col_type = manager.config.columns[col].upper()
 
                 if id_col and col_upper == id_col.upper():
-                    if any(t in col_type for t in ("NUMBER", "INT", "DECIMAL", "SERIAL")):
+                    if any(
+                        t in col_type for t in ("NUMBER", "INT", "DECIMAL", "SERIAL")
+                    ):
                         seq = state.insert_id_seq or count(1)
                         state.insert_id_seq = seq
                         params.append(next(seq))
@@ -415,7 +472,11 @@ class OperationsMixin:
         return query, params
 
     def _build_update(
-        self, full_name: str, manager: "TableManager", profile: "TableProfile", pool=None
+        self,
+        full_name: str,
+        manager: "TableManager",
+        profile: "TableProfile",
+        pool=None,
     ) -> tuple[str, list]:
         """Build an update query."""
         if not profile.id_column:
@@ -437,8 +498,14 @@ class OperationsMixin:
         update_cols = []
         if isinstance(tpl_cfg, dict):
             ai_cfg = tpl_cfg.get("ai_workload")
-            if isinstance(ai_cfg, dict) and isinstance(ai_cfg.get("update_columns"), list):
-                update_cols = [str(c).upper() for c in ai_cfg.get("update_columns") if str(c).strip()]
+            if isinstance(ai_cfg, dict) and isinstance(
+                ai_cfg.get("update_columns"), list
+            ):
+                update_cols = [
+                    str(c).upper()
+                    for c in ai_cfg.get("update_columns")
+                    if str(c).strip()
+                ]
 
         is_pg = is_postgres_pool(pool)
         candidates = update_cols or [c.upper() for c in manager.config.columns.keys()]
@@ -447,7 +514,9 @@ class OperationsMixin:
             if col_upper == id_col.upper():
                 continue
 
-            col_type_raw = manager.config.columns.get(col_upper) or manager.config.columns.get(col_upper.lower())
+            col_type_raw = manager.config.columns.get(
+                col_upper
+            ) or manager.config.columns.get(col_upper.lower())
             col_type = str(col_type_raw or "").upper()
 
             id_col_quoted = quote_column(id_col, pool)
@@ -459,11 +528,15 @@ class OperationsMixin:
                 return query, [target_id]
 
             if any(t in col_type for t in ("VARCHAR", "TEXT", "STRING")):
-                query = f"UPDATE {full_name} SET {col_quoted} = ? WHERE {id_col_quoted} = ?"
+                query = (
+                    f"UPDATE {full_name} SET {col_quoted} = ? WHERE {id_col_quoted} = ?"
+                )
                 return query, [f"TEST_{random.randint(1, 1000000)}", target_id]
 
             if any(t in col_type for t in ("NUMBER", "INT", "DECIMAL")):
-                query = f"UPDATE {full_name} SET {col_quoted} = ? WHERE {id_col_quoted} = ?"
+                query = (
+                    f"UPDATE {full_name} SET {col_quoted} = ? WHERE {id_col_quoted} = ?"
+                )
                 return query, [random.randint(1, 1000000), target_id]
 
         # Fallback: no-op update
@@ -473,7 +546,6 @@ class OperationsMixin:
 
     async def _execute_custom(self, worker_id: int, warmup: bool = False) -> None:
         """Execute a CUSTOM workload operation."""
-        start_wall = datetime.now(UTC)
         start_perf = time.perf_counter()
         epoch_at_start = int(self._metrics_epoch)
 
@@ -485,7 +557,7 @@ class OperationsMixin:
         self._table_state.setdefault(full_name, TableRuntimeState())
         state = self._table_state[full_name]
         profile = state.profile
-        pool = getattr(manager, "pool", None)
+        pool = cast(Any, getattr(manager, "pool", None))
 
         sql_tpl = self._custom_sql_by_kind.get(query_kind)
         if not sql_tpl:
@@ -503,21 +575,24 @@ class OperationsMixin:
             rows_written_expected = 1
 
         try:
-            if hasattr(pool, "warehouse"):
-                query = annotate_query_for_sf_kind(query, query_kind)
+            # Annotate query with UB_KIND marker for server-side stats tracking
+            # (Snowflake QUERY_HISTORY and Postgres pg_stat_statements)
+            query = annotate_query_for_sf_kind(query, query_kind)
 
             if is_read:
-                result, info = await pool.execute_query_with_info(query, params=params, fetch=True)
+                result, info = await pool.execute_query_with_info(
+                    query, params=params, fetch=True
+                )
                 rows_read = len(result or [])
-                sf_query_id = str(info.get("query_id") or "")
                 sf_rowcount = info.get("rowcount")
             else:
-                _, info = await pool.execute_query_with_info(query, params=params, fetch=False)
+                _, info = await pool.execute_query_with_info(
+                    query, params=params, fetch=False
+                )
                 rows_read = 0
-                sf_query_id = str(info.get("query_id") or "")
                 sf_rowcount = info.get("rowcount")
 
-            end_wall = datetime.now(UTC)
+            sf_execution_ms = info.get("total_elapsed_time_ms")
             app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
 
             counted = False
@@ -528,9 +603,14 @@ class OperationsMixin:
                     self.metrics.successful_operations += 1
                     self._latencies_ms.append(app_elapsed_ms)
 
-                    if self._find_max_step_collecting and query_kind in self._find_max_step_ops_by_kind:
+                    if (
+                        self._find_max_step_collecting
+                        and query_kind in self._find_max_step_ops_by_kind
+                    ):
                         self._find_max_step_ops_by_kind[query_kind] += 1
-                        self._find_max_step_lat_by_kind_ms[query_kind].append(app_elapsed_ms)
+                        self._find_max_step_lat_by_kind_ms[query_kind].append(
+                            app_elapsed_ms
+                        )
 
                     if is_read:
                         self.metrics.read_metrics.count += 1
@@ -538,11 +618,21 @@ class OperationsMixin:
                         self.metrics.read_metrics.total_duration_ms += app_elapsed_ms
                         self.metrics.rows_read += int(rows_read)
                     else:
-                        rows_written = int(sf_rowcount) if sf_rowcount is not None else int(rows_written_expected)
+                        rows_written = (
+                            int(sf_rowcount)
+                            if sf_rowcount is not None
+                            else int(rows_written_expected)
+                        )
                         self.metrics.write_metrics.count += 1
                         self.metrics.write_metrics.success_count += 1
                         self.metrics.write_metrics.total_duration_ms += app_elapsed_ms
                         self.metrics.rows_written += rows_written
+
+                    # Latency breakdown (execution vs network overhead)
+                    if sf_execution_ms is not None and sf_execution_ms >= 0:
+                        self._latency_sf_execution_ms.append(sf_execution_ms)
+                        network_overhead = max(0.0, app_elapsed_ms - sf_execution_ms)
+                        self._latency_network_overhead_ms.append(network_overhead)
 
             if counted and not warmup:
                 if is_read:
@@ -561,7 +651,6 @@ class OperationsMixin:
                     self._update_count += 1
 
         except Exception as e:
-            end_wall = datetime.now(UTC)
             app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
 
             category = classify_sql_error(e)
@@ -577,11 +666,16 @@ class OperationsMixin:
                         self.metrics.write_metrics.count += 1
                         self.metrics.write_metrics.error_count += 1
 
-                    if self._find_max_step_collecting and query_kind in self._find_max_step_ops_by_kind:
+                    if (
+                        self._find_max_step_collecting
+                        and query_kind in self._find_max_step_ops_by_kind
+                    ):
                         self._find_max_step_ops_by_kind[query_kind] += 1
                         self._find_max_step_errors_by_kind[query_kind] += 1
 
-                    self._sql_error_categories[category] = self._sql_error_categories.get(category, 0) + 1
+                    self._sql_error_categories[category] = (
+                        self._sql_error_categories.get(category, 0) + 1
+                    )
 
     def _build_custom_params(
         self,
@@ -611,7 +705,9 @@ class OperationsMixin:
             return len(pg_matches)
 
         def _new_value_for(col_upper: str) -> Any:
-            col_type_raw = manager.config.columns.get(col_upper) or manager.config.columns.get(col_upper.lower())
+            col_type_raw = manager.config.columns.get(
+                col_upper
+            ) or manager.config.columns.get(col_upper.lower())
             typ = str(col_type_raw or "").upper()
 
             if "TIMESTAMP" in typ:
@@ -629,7 +725,9 @@ class OperationsMixin:
             ph = _count_placeholders(query)
             if ph == 1:
                 if profile and profile.time_column:
-                    pooled = self._next_from_pool(worker_id, "RANGE", profile.time_column)
+                    pooled = self._next_from_pool(
+                        worker_id, "RANGE", profile.time_column
+                    )
                     if pooled is not None:
                         return [pooled]
                     if profile.time_max is not None:
@@ -649,23 +747,51 @@ class OperationsMixin:
             insert_cols: list[str] = []
             if isinstance(tpl_cfg, dict):
                 ai_cfg = tpl_cfg.get("ai_workload")
-                if isinstance(ai_cfg, dict) and isinstance(ai_cfg.get("insert_columns"), list):
-                    insert_cols = [str(c).upper() for c in ai_cfg.get("insert_columns") if str(c).strip()]
+                if isinstance(ai_cfg, dict) and isinstance(
+                    ai_cfg.get("insert_columns"), list
+                ):
+                    insert_cols = [
+                        str(c).upper()
+                        for c in ai_cfg.get("insert_columns")
+                        if str(c).strip()
+                    ]
 
-            cols = insert_cols or [str(c).upper() for c in manager.config.columns.keys()]
+            cols = insert_cols or [
+                str(c).upper() for c in manager.config.columns.keys()
+            ]
             cols = cols[:ph]
 
             params = []
             for c in cols:
                 c_upper = c.upper()
-                if profile and profile.id_column and c_upper == str(profile.id_column).upper():
-                    col_type_raw = manager.config.columns.get(c_upper) or manager.config.columns.get(c_upper.lower())
+                if (
+                    profile
+                    and profile.id_column
+                    and c_upper == str(profile.id_column).upper()
+                ):
+                    col_type_raw = manager.config.columns.get(
+                        c_upper
+                    ) or manager.config.columns.get(c_upper.lower())
                     col_type = str(col_type_raw or "").upper()
                     if any(t in col_type for t in ("NUMBER", "INT", "DECIMAL")):
-                        if state.insert_id_seq is None:
-                            start_id = (profile.id_max or 0) + 1
-                            state.insert_id_seq = count(start_id)
-                        params.append(next(state.insert_id_seq))
+                        # Use per-worker insert sequences to avoid PK conflicts
+                        if state.insert_id_seqs is None:
+                            state.insert_id_seqs = {}
+                        if worker_id not in state.insert_id_seqs:
+                            # Partition ID space by worker
+                            # Estimate range based on test duration:
+                            # - 1000 inserts/sec max (conservative)
+                            # - 10x safety factor
+                            # - Minimum 100K for short tests
+                            tpl_cfg = getattr(self, "_template_config", None) or {}
+                            duration = (tpl_cfg.get("warmup") or 30) + (
+                                tpl_cfg.get("duration") or 120
+                            )
+                            range_size = max(duration * 1000 * 10, 100_000)
+                            base = (profile.id_max or 0) + 1
+                            start_id = base + (worker_id * range_size)
+                            state.insert_id_seqs[worker_id] = count(start_id)
+                        params.append(next(state.insert_id_seqs[worker_id]))
                     else:
                         params.append(str(uuid4()))
                     continue
@@ -683,8 +809,14 @@ class OperationsMixin:
                 update_cols: list[str] = []
                 if isinstance(tpl_cfg, dict):
                     ai_cfg = tpl_cfg.get("ai_workload")
-                    if isinstance(ai_cfg, dict) and isinstance(ai_cfg.get("update_columns"), list):
-                        update_cols = [str(c).upper() for c in ai_cfg.get("update_columns") if str(c).strip()]
+                    if isinstance(ai_cfg, dict) and isinstance(
+                        ai_cfg.get("update_columns"), list
+                    ):
+                        update_cols = [
+                            str(c).upper()
+                            for c in ai_cfg.get("update_columns")
+                            if str(c).strip()
+                        ]
 
                 set_col = update_cols[0] if update_cols else None
                 new_val = _new_value_for(set_col) if set_col else f"TEST_{uuid4()}"

@@ -5,6 +5,7 @@ Manages async connection pooling for Postgres with health checks and retry logic
 """
 
 import logging
+import time
 from typing import Optional, Any, Dict, List
 from contextlib import asynccontextmanager
 import asyncio
@@ -38,6 +39,7 @@ class PostgresConnectionPool:
         max_retries: int = 3,
         retry_delay: float = 1.0,
         command_timeout: float = 60.0,
+        pool_name: str = "default",
     ):
         """
         Initialize Postgres connection pool.
@@ -53,6 +55,7 @@ class PostgresConnectionPool:
             max_retries: Max retry attempts for transient failures
             retry_delay: Delay between retries in seconds
             command_timeout: Command timeout in seconds
+            pool_name: Descriptive name for logging (e.g., "catalog", "benchmark")
         """
         self.host = host
         self.port = port
@@ -64,13 +67,14 @@ class PostgresConnectionPool:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.command_timeout = command_timeout
+        self.pool_name = pool_name
 
         self._pool: Optional[Pool] = None
         self._initialized = False
 
         logger.info(
-            f"Initialized Postgres pool: {user}@{host}:{port}/{database}, "
-            f"min_size={min_size}, max_size={max_size}"
+            f"[{pool_name}] Postgres pool configured: {user}@{host}:{port}/{database}, "
+            f"size={min_size}-{max_size}"
         )
 
     async def initialize(self):
@@ -78,7 +82,7 @@ class PostgresConnectionPool:
         if self._initialized:
             return
 
-        logger.info("Creating Postgres connection pool...")
+        logger.info(f"[{self.pool_name}] Creating Postgres connection pool...")
 
         for attempt in range(self.max_retries):
             try:
@@ -95,7 +99,7 @@ class PostgresConnectionPool:
 
                 self._initialized = True
                 logger.info(
-                    f"Postgres pool created successfully "
+                    f"[{self.pool_name}] Postgres pool ready "
                     f"(size: {self.min_size}-{self.max_size})"
                 )
                 return
@@ -279,6 +283,9 @@ class PostgresConnectionPool:
         converted_query = self._convert_placeholders(query)
 
         async with self.get_connection() as conn:
+            # Capture server-side execution time for App Overhead metrics
+            start_time = time.perf_counter()
+
             if fetch:
                 # SELECT-style query
                 if params:
@@ -310,10 +317,13 @@ class PostgresConnectionPool:
                         except ValueError:
                             pass
 
+            # Calculate elapsed time in milliseconds
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+
             return results, {
                 "query_id": None,  # Postgres doesn't have Snowflake-style query IDs
                 "rowcount": rowcount,
-                "total_elapsed_time_ms": None,  # Could add timing if needed
+                "total_elapsed_time_ms": elapsed_ms,  # Server-side timing for overhead calc
             }
 
     async def execute_many(
@@ -476,6 +486,10 @@ def get_pool_for_database(
     This enables dynamic database selection from templates without requiring
     POSTGRES_DATABASE to match.
 
+    NOTE: This creates small pools (1-2 connections) intended for catalog/API
+    operations like schema introspection. Benchmark workers should create their
+    own properly-sized pools directly.
+
     Args:
         database: Database name to connect to
         pool_type: "default" for standard Postgres, "snowflake_postgres" for Snowflake Postgres
@@ -496,12 +510,12 @@ def get_pool_for_database(
         database=database,
         user=params["user"],
         password=params["password"],
-        min_size=settings.POSTGRES_POOL_MIN_SIZE,
-        max_size=settings.POSTGRES_POOL_MAX_SIZE,
+        min_size=1,  # Catalog pools only need 1-2 connections
+        max_size=2,
+        pool_name="catalog",
     )
 
     _dynamic_pools[cache_key] = pool
-    logger.info(f"Created dynamic pool for {pool_type}/{database}")
     return pool
 
 

@@ -52,16 +52,16 @@
                     <strong>Warehouse:</strong>
                     <span x-text="warehouseDisplay()"></span>
                 </div>
+                <div class="mt-1" x-show="!isPostgresTable() && resourceConstraintDisplay()">
+                    <strong>Resource:</strong>
+                    <span x-text="resourceConstraintDisplay()"></span>
+                </div>
                 <div class="mt-1" x-show="isPostgresTable()">
                     <strong>Database:</strong>
                     <span>Postgres</span>
                 </div>
-                <div class="mt-1" x-show="isPostgresTable() && postgresPoolDisplay()">
-                    <strong>Postgres:</strong>
-                    <span x-text="postgresPoolDisplay()"></span>
-                </div>
                 <div class="mt-1" x-show="isPostgresTable() && postgresConnectionsDisplay()">
-                    <strong>Postgres:</strong>
+                    <strong>Pool:</strong>
                     <span x-text="postgresConnectionsDisplay()"></span>
                 </div>
                 <div class="mt-1" x-show="loadModeDisplay()">
@@ -72,9 +72,9 @@
                     <strong>Workload Mix:</strong>
                     <span x-text="workloadDisplay()"></span>
                 </div>
-                <div class="mt-1" x-show="templateInfo && Number(templateInfo.duration_seconds || 0) > 0">
+                <div class="mt-1" x-show="durationDisplay()">
                     <strong>Duration:</strong>
-                    <span x-text="templateInfo && templateInfo.duration_seconds != null ? formatSecondsTenths(templateInfo.duration_seconds) : ''"></span>s
+                    <span x-text="durationDisplay()"></span>
                 </div>
                 <div class="mt-1" x-show="scalingSummary()">
                     <strong>Scaling:</strong>
@@ -84,13 +84,11 @@
                     <strong>Bounds:</strong>
                     <span x-text="boundsCompletionReason()"></span>
                 </div>
-                <div class="mt-1">
-                    <strong>Status:</strong>
-                    <span
-                        class="status-badge"
-                        :class="phaseBadgeClass()"
-                        x-text="phaseLabel() || (templateInfo ? (templateInfo.status || '') : '')"
-                    ></span>
+                <div class="mt-1" x-show="templateInfo && (templateInfo.qps || templateInfo.p95_latency_ms)">
+                    <strong>QPS:</strong>
+                    <span x-text="templateInfo ? Number(templateInfo.qps || 0).toFixed(0) : ''"></span>
+                    • <strong>P95:</strong>
+                    <span x-text="templateInfo ? Number(templateInfo.p95_latency_ms || 0).toFixed(2) : ''"></span> ms
                 </div>
                 <div class="mt-1" x-show="templateInfo && templateInfo.query_tag">
                     <strong>Query Tag:</strong>
@@ -124,7 +122,7 @@
                         :disabled="!testId || rerunningTestId === testId"
                     >
                         <span class="loading-spinner" x-show="rerunningTestId === testId"></span>
-                        <span x-text="rerunningTestId === testId ? 'Preparing…' : 'Re-run'"></span>
+                        <span x-text="rerunningTestId === testId ? 'Loading…' : 'Run Again'"></span>
                     </button>
                 </div>
             </div>
@@ -144,19 +142,14 @@
                 type="button"
                 class="btn btn-sm"
                 :class="latencyView === 'sf_execution' ? 'btn-primary' : 'btn-secondary'"
-                @click="setLatencyView('sf_execution')"
+                @click="toggleLatencyView()"
                 :disabled="!sfLatencyAvailable()"
             >
-                SQL (Snowflake)
+                <span x-text="latencyView === 'sf_execution' ? 'Server' : 'Total'"></span>
             </button>
-            <button
-                type="button"
-                class="btn btn-sm"
-                :class="latencyView === 'end_to_end' ? 'btn-primary' : 'btn-secondary'"
-                @click="setLatencyView('end_to_end')"
-            >
-                End-to-end
-            </button>
+            <span class="floating-toolbar-indicator" :class="{ 'active': latencyView === 'sf_execution' }">
+                <span x-text="latencyView === 'sf_execution' ? 'Snowflake execution only' : 'Including network & client'"></span>
+            </span>
         </div>
 
         <div class="floating-toolbar-divider" x-show="latencyInView && chartsInView && metricsWarmupEndElapsed > 0"></div>
@@ -227,7 +220,12 @@
                 </template>
                 <br>
                 <small style="color: var(--text-muted);">
-                    Fetching Snowflake timing details from QUERY_HISTORY. This may take several minutes for high-QPS tests.
+                    <template x-if="isPostgresTable()">
+                        <span>Capturing pg_stat_statements metrics...</span>
+                    </template>
+                    <template x-if="!isPostgresTable()">
+                        <span>Fetching Snowflake timing details from QUERY_HISTORY. This may take several minutes for high-QPS tests.</span>
+                    </template>
                 </small>
             </div>
         </div>
@@ -717,6 +715,118 @@
         </div>
     </div>
 
+    <!-- Postgres Server Metrics (pg_stat_statements) - only shown for Postgres tables -->
+    <div
+        class="card"
+        x-show="templateInfo && isFinalMetricsReady() && ['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())"
+    >
+        <div class="card-title">PostgreSQL Server Metrics</div>
+        <div style="color: #6b7280; margin-top: -0.25rem;">
+            Server-side execution metrics captured via <code>pg_stat_statements</code> during the measurement phase.
+        </div>
+
+        <div x-show="templateInfo && templateInfo.pg_enrichment_available" style="margin-top: 1rem;">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Total Calls</span>
+                        <span
+                            class="info-icon"
+                            title="Total number of query executions recorded by pg_stat_statements during the measurement phase."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatInt(templateInfo?.pg_enrichment?.total_calls)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Mean Server Time</span>
+                        <span
+                            class="info-icon"
+                            title="Average server-side execution time per query (excludes network overhead). Lower is better."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatMsWithUnit(templateInfo?.pg_enrichment?.mean_exec_time_ms)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Cache Hit Ratio</span>
+                        <span
+                            class="info-icon"
+                            title="Shared buffer cache hit ratio. 100% means all data was served from memory; lower values indicate disk I/O."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatPct(templateInfo?.pg_enrichment?.cache_hit_pct)"></div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">
+                        <span>Rows Returned</span>
+                        <span
+                            class="info-icon"
+                            title="Total rows returned by all queries during the measurement phase."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatInt(templateInfo?.pg_enrichment?.rows_returned)"></div>
+                </div>
+                <div class="metric-card" x-show="templateInfo?.pg_enrichment?.blk_read_time_ms !== null">
+                    <div class="metric-label">
+                        <span>Block Read Time</span>
+                        <span
+                            class="info-icon"
+                            title="Total time spent reading data blocks from disk (requires track_io_timing=ON)."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatMsWithUnit(templateInfo?.pg_enrichment?.blk_read_time_ms)"></div>
+                </div>
+                <div class="metric-card" x-show="templateInfo?.pg_enrichment?.wal_bytes !== null && templateInfo?.pg_enrichment?.wal_bytes > 0">
+                    <div class="metric-label">
+                        <span>WAL Generated</span>
+                        <span
+                            class="info-icon"
+                            title="Total Write-Ahead Log bytes generated (indicates write activity)."
+                        >i</span>
+                    </div>
+                    <div class="metric-value" x-text="formatBytes(templateInfo?.pg_enrichment?.wal_bytes)"></div>
+                </div>
+            </div>
+
+            <!-- Network Overhead indicator -->
+            <div 
+                x-show="templateInfo?.pg_enrichment?.mean_exec_time_ms && templateInfo?.avg_latency_ms"
+                style="margin-top: 1rem; padding: 0.75rem 1rem; background: var(--bg-secondary); border-radius: 0.5rem; border-left: 3px solid var(--primary);"
+            >
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="font-weight: 600;">Network Overhead:</span>
+                    <span x-text="formatMsWithUnit(templateInfo?.avg_latency_ms - templateInfo?.pg_enrichment?.mean_exec_time_ms)"></span>
+                    <span style="color: var(--text-muted);">
+                        (App latency <span x-text="formatMsWithUnit(templateInfo?.avg_latency_ms)"></span> 
+                        - Server time <span x-text="formatMsWithUnit(templateInfo?.pg_enrichment?.mean_exec_time_ms)"></span>)
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <div
+            x-show="templateInfo && !templateInfo.pg_enrichment_available && templateInfo.pg_capabilities"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            <template x-if="!templateInfo?.pg_capabilities?.pg_stat_statements_available">
+                <span>pg_stat_statements extension is not available on this PostgreSQL server. Server-side metrics cannot be collected.</span>
+            </template>
+            <template x-if="templateInfo?.pg_capabilities?.pg_stat_statements_available">
+                <span>Server-side metrics were not captured for this run.</span>
+            </template>
+        </div>
+
+        <div
+            x-show="templateInfo && !templateInfo.pg_enrichment_available && !templateInfo.pg_capabilities"
+            class="alert alert-info"
+            style="margin-top: 1rem;"
+        >
+            PostgreSQL server metrics are unavailable for this run.
+        </div>
+    </div>
+
     <div class="card" x-show="templateInfo && isFinalMetricsReady() && !['postgres', 'snowflake_postgres'].includes((templateInfo?.table_type || '').toLowerCase())">
         <div class="card-title">MCW Nodes + Queue (per-second)</div>
         <div style="color: #6b7280; margin-top: -0.25rem;">
@@ -861,51 +971,44 @@
             x-show="!workerMetricsError && !workerMetricsLoading && workerMetricsAvailable"
             style="margin-top: 1rem;"
         >
-            <div class="table">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Worker</th>
-                            <th>Group</th>
-                            <th>QPS</th>
-                            <th>P95</th>
-                            <th>CPU %</th>
-                            <th>Memory (MB)</th>
-                            <th>Details</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <template x-for="worker in workerMetricsWorkers" :key="worker.key">
-                            <tr>
-                                <td x-text="worker.worker_id || ('group-' + worker.worker_group_id)"></td>
-                                <td x-text="worker.worker_group_id"></td>
-                                <td x-text="formatCompact(worker.latest ? worker.latest.qps : 0)"></td>
-                                <td x-text="formatMsWithUnit(worker.latest ? worker.latest.p95_latency : 0)"></td>
-                                <td x-text="formatPctValue(worker.latest ? worker.latest.resources_host_cpu_percent : 0)"></td>
-                                <td x-text="formatCompact(worker.latest ? worker.latest.resources_host_memory_mb : 0)"></td>
-                                <td>
-                                    <button
-                                        type="button"
-                                        class="btn btn-sm btn-secondary"
-                                        @click="toggleWorkerMetrics(worker)"
-                                    >
-                                        <span x-text="workerMetricsExpanded[worker.key] ? 'Hide' : 'Show'"></span>
-                                    </button>
-                                </td>
-                            </tr>
-                        </template>
-                        <template x-for="worker in workerMetricsWorkers" :key="'expanded-' + worker.key">
-                            <tr x-show="workerMetricsExpanded[worker.key]" x-cloak>
-                                <td colspan="7">
-                                    <div class="chart-container" style="height: 220px;">
-                                        <canvas :id="'workerMetricsChart-' + worker.key"></canvas>
-                                    </div>
-                                </td>
-                            </tr>
-                        </template>
-                    </tbody>
-                </table>
+            <div style="display: grid; grid-template-columns: 80px 60px 60px 60px 70px 100px 70px 1fr; border-bottom: 1px solid #e5e7eb;">
+                <div style="font-weight: 600; font-size: 0.875rem; color: #6b7280; padding: 0.75rem 0.5rem;">Worker</div>
+                <div style="font-weight: 600; font-size: 0.875rem; color: #6b7280; padding: 0.75rem 0.5rem; text-align: right;">Group</div>
+                <div style="font-weight: 600; font-size: 0.875rem; color: #6b7280; padding: 0.75rem 0.5rem; text-align: right;">QPS</div>
+                <div style="font-weight: 600; font-size: 0.875rem; color: #6b7280; padding: 0.75rem 0.5rem; text-align: right;">P95</div>
+                <div style="font-weight: 600; font-size: 0.875rem; color: #6b7280; padding: 0.75rem 0.5rem; text-align: right;">CPU %</div>
+                <div style="font-weight: 600; font-size: 0.875rem; color: #6b7280; padding: 0.75rem 0.5rem; text-align: right;">Memory (MB)</div>
+                <div style="font-weight: 600; font-size: 0.875rem; color: #6b7280; padding: 0.75rem 0.5rem;">Details</div>
+                <div></div>
             </div>
+            <template x-for="worker in workerMetricsWorkers" :key="worker.key">
+                <div style="display: grid; grid-template-columns: 80px 60px 60px 60px 70px 100px 70px 1fr; border-bottom: 1px solid #e5e7eb; align-items: start;">
+                    <div style="padding: 0.75rem 0.5rem;" x-text="worker.worker_id || ('group-' + worker.worker_group_id)"></div>
+                    <div style="padding: 0.75rem 0.5rem; text-align: right;" x-text="worker.worker_group_id"></div>
+                    <div style="padding: 0.75rem 0.5rem; text-align: right;" x-text="formatCompact(worker.latest ? worker.latest.qps : 0)"></div>
+                    <div style="padding: 0.75rem 0.5rem; text-align: right;" x-text="formatMsWithUnit(worker.latest ? worker.latest.p95_latency : 0)"></div>
+                    <div style="padding: 0.75rem 0.5rem; text-align: right;" x-text="formatPctValue(worker.latest ? worker.latest.resources_host_cpu_percent : 0)"></div>
+                    <div style="padding: 0.75rem 0.5rem; text-align: right;" x-text="formatCompact(worker.latest ? worker.latest.resources_host_memory_mb : 0)"></div>
+                    <div style="padding: 0.75rem 0.5rem;">
+                        <button
+                            type="button"
+                            class="btn btn-sm btn-secondary"
+                            @click="toggleWorkerMetrics(worker)"
+                        >
+                            <span x-text="workerMetricsExpanded[worker.key] ? 'Hide' : 'Show'"></span>
+                        </button>
+                    </div>
+                    <div
+                        x-show="workerMetricsExpanded[worker.key]"
+                        x-cloak
+                        style="padding: 0.5rem 1rem 0.75rem 0;"
+                    >
+                        <div class="chart-container" style="height: 280px;">
+                            <canvas :id="'workerMetricsChart-' + worker.key"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </template>
         </div>
     </div>
 
@@ -965,7 +1068,7 @@
         <div class="log-controls">
             <div class="log-control" x-show="logTargets && logTargets.length">
                 <label class="form-label">Source</label>
-                <select class="form-select" x-model="logSelectedTargetId" @change="onLogTargetChange()">
+                <select class="form-select" x-model="logSelectedTargetIds" @change="onLogTargetChange()" multiple size="1" style="min-width: 140px;">
                     <template x-for="target in logTargets" :key="target.target_id || target.test_id">
                         <option
                             :value="target.target_id || target.test_id"

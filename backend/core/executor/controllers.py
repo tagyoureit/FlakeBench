@@ -7,10 +7,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Optional
-
-from backend.config import settings
-from backend.connectors import snowflake_pool
+from typing import TYPE_CHECKING, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +30,16 @@ class StepResult:
 
 class ControllersMixin:
     """Mixin providing QPS and FIND_MAX controller functionality."""
+
+    if TYPE_CHECKING:
+
+        async def _controlled_worker(
+            self,
+            worker_id: int,
+            *,
+            warmup: bool = False,
+            stop_signal: Optional[asyncio.Event] = None,
+        ) -> None: ...
 
     # These attributes are defined in the main TestExecutor class
     scenario: Any
@@ -73,7 +80,9 @@ class ControllersMixin:
             warmup_seconds: Warmup duration before measurement
             duration_seconds: Measurement duration
         """
-        controller_logger = logging.LoggerAdapter(logger, {"worker_id": "QPS_CONTROLLER"})
+        controller_logger = logging.LoggerAdapter(
+            logger, {"worker_id": "QPS_CONTROLLER"}
+        )
 
         qps_workers: dict[int, tuple[asyncio.Task, asyncio.Event]] = {}
         next_worker_id = 0
@@ -105,7 +114,9 @@ class ControllersMixin:
             next_worker_id += 1
             stop_signal = asyncio.Event()
             task = asyncio.create_task(
-                self._controlled_worker(worker_id=wid, warmup=warmup, stop_signal=stop_signal)
+                self._controlled_worker(
+                    worker_id=wid, warmup=warmup, stop_signal=stop_signal
+                )
             )
             qps_workers[wid] = (task, stop_signal)
             _sync_worker_list()
@@ -158,7 +169,10 @@ class ControllersMixin:
         if warmup_seconds > 0:
             controller_logger.info("Warmup phase (%ds)...", warmup_seconds)
             warmup_end = asyncio.get_running_loop().time() + warmup_seconds
-            while asyncio.get_running_loop().time() < warmup_end and not self._stop_event.is_set():
+            while (
+                asyncio.get_running_loop().time() < warmup_end
+                and not self._stop_event.is_set()
+            ):
                 await asyncio.sleep(1.0)
 
         # Transition to measurement
@@ -167,6 +181,7 @@ class ControllersMixin:
             self._measurement_active = True
             # Reset metrics for measurement window
             from backend.models import Metrics
+
             self.metrics = Metrics()
             self.metrics.timestamp = datetime.now(UTC)
             self._latencies_ms.clear()
@@ -176,7 +191,10 @@ class ControllersMixin:
 
         # Controller loop
         loop_interval = 2.0
-        while asyncio.get_running_loop().time() < measurement_end and not self._stop_event.is_set():
+        while (
+            asyncio.get_running_loop().time() < measurement_end
+            and not self._stop_event.is_set()
+        ):
             await asyncio.sleep(loop_interval)
 
             # Get current QPS
@@ -211,7 +229,10 @@ class ControllersMixin:
             if desired != current_workers:
                 controller_logger.debug(
                     "Scaling: %d -> %d workers (QPS: %.1f / %.1f)",
-                    current_workers, desired, current_qps, target_qps
+                    current_workers,
+                    desired,
+                    current_qps,
+                    target_qps,
                 )
                 await _scale_to(target=desired, warmup=False)
 
@@ -271,7 +292,9 @@ class ControllersMixin:
             next_worker_id += 1
             stop_signal = asyncio.Event()
             task = asyncio.create_task(
-                self._controlled_worker(worker_id=wid, warmup=False, stop_signal=stop_signal)
+                self._controlled_worker(
+                    worker_id=wid, warmup=False, stop_signal=stop_signal
+                )
             )
             fmc_workers[wid] = (task, stop_signal)
             _sync_worker_list()
@@ -319,7 +342,9 @@ class ControllersMixin:
         # Initialize
         controller_logger.info(
             "Starting FIND_MAX controller (start=%d, increment=%d, max=%d)",
-            start_cc, increment, max_cc
+            start_cc,
+            increment,
+            max_cc,
         )
 
         step_results: list[StepResult] = []
@@ -382,7 +407,9 @@ class ControllersMixin:
             async with self._metrics_lock:
                 self._find_max_step_collecting = False
                 step_latencies = list(self._latencies_ms)
-                step_kind_latencies = {k: list(v) for k, v in self._find_max_step_lat_by_kind_ms.items()}
+                step_kind_latencies = {
+                    k: list(v) for k, v in self._find_max_step_lat_by_kind_ms.items()
+                }
                 step_kind_ops = dict(self._find_max_step_ops_by_kind)
                 step_kind_errors = dict(self._find_max_step_errors_by_kind)
 
@@ -430,7 +457,9 @@ class ControllersMixin:
             # Check error rate
             if step_error_rate > max_error_rate_pct:
                 stable = False
-                stop_reason = f"Error rate {step_error_rate:.2f}% > {max_error_rate_pct}%"
+                stop_reason = (
+                    f"Error rate {step_error_rate:.2f}% > {max_error_rate_pct}%"
+                )
 
             # Check queue buildup
             if stable and self._warehouse_query_status:
@@ -443,7 +472,11 @@ class ControllersMixin:
             # Check SLO constraints
             if stable:
                 stable, stop_reason = self._check_fmc_slo_constraints(
-                    fmc_slo_by_kind, step_kind_ops, step_kind_errors, step_kind_latencies, _pctile
+                    fmc_slo_by_kind,
+                    step_kind_ops,
+                    step_kind_errors,
+                    step_kind_latencies,
+                    _pctile,
                 )
 
             # Compare to previous stable step
@@ -457,7 +490,9 @@ class ControllersMixin:
                         stop_reason = f"QPS dropped {-qps_change_pct:.1f}% vs previous"
 
                 if stable and prev.p95_latency_ms > 0 and step_p95_latency > 0:
-                    latency_change_pct = ((step_p95_latency - prev.p95_latency_ms) / prev.p95_latency_ms) * 100.0
+                    latency_change_pct = (
+                        (step_p95_latency - prev.p95_latency_ms) / prev.p95_latency_ms
+                    ) * 100.0
                     if latency_change_pct > latency_stability_pct:
                         stable = False
                         stop_reason = f"P95 latency increased {latency_change_pct:.1f}%"
@@ -496,15 +531,22 @@ class ControllersMixin:
                     termination_reason = step_result.stop_reason
 
                 # Try backoff
-                if backoff_attempts < max_backoff_attempts and best_concurrency < current_cc:
+                if (
+                    backoff_attempts < max_backoff_attempts
+                    and best_concurrency < current_cc
+                ):
                     backoff_attempts += 1
-                    controller_logger.info(f"FIND_MAX: Backing off to {best_concurrency}")
+                    controller_logger.info(
+                        f"FIND_MAX: Backing off to {best_concurrency}"
+                    )
                     backoff_result = await run_step(best_concurrency, is_backoff=True)
                     step_results.append(backoff_result)
 
                     if backoff_result.stable:
                         # Try midpoint
-                        midpoint = best_concurrency + (current_cc - best_concurrency) // 2
+                        midpoint = (
+                            best_concurrency + (current_cc - best_concurrency) // 2
+                        )
                         if midpoint > best_concurrency and midpoint < current_cc:
                             mid_result = await run_step(midpoint)
                             step_results.append(mid_result)
@@ -514,7 +556,9 @@ class ControllersMixin:
                                 current_cc = midpoint + increment
                                 continue
 
-                controller_logger.info(f"FIND_MAX: Stopping - {step_result.stop_reason}")
+                controller_logger.info(
+                    f"FIND_MAX: Stopping - {step_result.stop_reason}"
+                )
                 break
 
             current_cc += increment
@@ -526,7 +570,8 @@ class ControllersMixin:
 
         # Build result
         final_reason = termination_reason or (
-            step_results[-1].stop_reason if step_results and not step_results[-1].stable
+            step_results[-1].stop_reason
+            if step_results and not step_results[-1].stable
             else "Reached max workers"
         )
 
@@ -564,14 +609,30 @@ class ControllersMixin:
 
         slo_by_kind: dict[str, dict[str, Any]] = {}
         kind_map = {
-            "POINT_LOOKUP": ("custom_point_lookup_pct", "target_point_lookup_p95_latency_ms",
-                             "target_point_lookup_p99_latency_ms", "target_point_lookup_error_rate_pct"),
-            "RANGE_SCAN": ("custom_range_scan_pct", "target_range_scan_p95_latency_ms",
-                           "target_range_scan_p99_latency_ms", "target_range_scan_error_rate_pct"),
-            "INSERT": ("custom_insert_pct", "target_insert_p95_latency_ms",
-                       "target_insert_p99_latency_ms", "target_insert_error_rate_pct"),
-            "UPDATE": ("custom_update_pct", "target_update_p95_latency_ms",
-                       "target_update_p99_latency_ms", "target_update_error_rate_pct"),
+            "POINT_LOOKUP": (
+                "custom_point_lookup_pct",
+                "target_point_lookup_p95_latency_ms",
+                "target_point_lookup_p99_latency_ms",
+                "target_point_lookup_error_rate_pct",
+            ),
+            "RANGE_SCAN": (
+                "custom_range_scan_pct",
+                "target_range_scan_p95_latency_ms",
+                "target_range_scan_p99_latency_ms",
+                "target_range_scan_error_rate_pct",
+            ),
+            "INSERT": (
+                "custom_insert_pct",
+                "target_insert_p95_latency_ms",
+                "target_insert_p99_latency_ms",
+                "target_insert_error_rate_pct",
+            ),
+            "UPDATE": (
+                "custom_update_pct",
+                "target_update_p95_latency_ms",
+                "target_update_p99_latency_ms",
+                "target_update_error_rate_pct",
+            ),
         }
 
         for kind, (pct_key, p95_key, p99_key, err_key) in kind_map.items():

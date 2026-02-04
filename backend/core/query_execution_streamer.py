@@ -6,10 +6,11 @@ replacing the previous approach of buffering all records until shutdown.
 
 Key features:
 - Unbounded buffer (no record loss from FIFO eviction)
-- Background flush task (30s interval OR 5000 records threshold)
+- Background flush task (30s interval OR 2000 records threshold)
 - Batched INSERTs (2000 rows per statement)
 - Failure handling (re-queue once, then drop batch)
 - Graceful shutdown with flush-latency-based timeout
+- Non-blocking: buffer swap and dict conversion don't block event loop
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ class QueryExecutionStreamer:
         test_id: str,
         *,
         flush_interval_seconds: float = 30.0,
-        flush_threshold_records: int = 5000,
+        flush_threshold_records: int = 2000,
         batch_insert_size: int = 2000,
         results_prefix: str | None = None,
     ) -> None:
@@ -65,7 +66,7 @@ class QueryExecutionStreamer:
             pool: Snowflake connection pool (control pool) for persistence.
             test_id: Test identifier for all records.
             flush_interval_seconds: Time between flushes (default 30s).
-            flush_threshold_records: Flush when buffer reaches this size (default 5000).
+            flush_threshold_records: Flush when buffer reaches this size (default 2000).
             batch_insert_size: Rows per INSERT statement (default 2000).
             results_prefix: Schema prefix for QUERY_EXECUTIONS table.
         """
@@ -83,6 +84,7 @@ class QueryExecutionStreamer:
         # Background task state
         self._flush_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._threshold_event = asyncio.Event()  # Signals when buffer hits threshold
 
         # Metrics for monitoring and shutdown timeout calculation
         self._flush_count = 0
@@ -92,6 +94,9 @@ class QueryExecutionStreamer:
 
         # Track partial run state (set if we had to drop batches)
         self._run_partial = False
+
+        # Semaphore to limit concurrent flushes (pool has 5 connections, reserve 1 for other ops)
+        self._flush_semaphore = asyncio.Semaphore(4)
 
     @property
     def run_partial(self) -> bool:
@@ -135,6 +140,9 @@ class QueryExecutionStreamer:
         try:
             async with self._buffer_lock:
                 self._buffer.append(record)
+                # Signal threshold event if buffer is full enough
+                if len(self._buffer) >= self._flush_threshold:
+                    self._threshold_event.set()
         except Exception:
             # Silently ignore - streaming is best-effort, don't crash the caller
             pass
@@ -146,6 +154,7 @@ class QueryExecutionStreamer:
             return
 
         self._stop_event.clear()
+        self._threshold_event.clear()
         self._flush_task = asyncio.create_task(
             self._flush_loop(), name=f"streamer-flush-{self._test_id[:8]}"
         )
@@ -205,65 +214,130 @@ class QueryExecutionStreamer:
         )
 
     async def _flush_loop(self) -> None:
-        """Background loop that periodically flushes the buffer."""
+        """Background loop that triggers flushes on interval OR threshold.
+        
+        Flushes run concurrently (up to semaphore limit) so new flushes can
+        start while previous ones are still in progress.
+        """
+        flush_tasks: set[asyncio.Task[None]] = set()
+        
         while not self._stop_event.is_set():
+            # Wait for: stop signal, threshold reached, or interval timeout
+            stop_task = asyncio.create_task(self._stop_event.wait())
+            threshold_task = asyncio.create_task(self._threshold_event.wait())
+
             try:
-                # Wait for interval or stop signal
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self._flush_interval
+                done, pending = await asyncio.wait(
+                    [stop_task, threshold_task],
+                    timeout=self._flush_interval,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                # If we get here, stop was signaled
-                break
-            except asyncio.TimeoutError:
-                # Normal timeout - time to flush
-                pass
 
-            # Check if buffer needs flushing
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+
+                # Check if stop was signaled
+                if stop_task in done:
+                    break
+
+                # Clear threshold event if it was set (will be re-set by append if needed)
+                self._threshold_event.clear()
+
+            except asyncio.CancelledError:
+                stop_task.cancel()
+                threshold_task.cancel()
+                raise
+
+            # Spawn a flush task if buffer has records (don't await - runs concurrently)
             if len(self._buffer) > 0:
-                await self._flush_buffer()
+                task = asyncio.create_task(self._flush_buffer())
+                flush_tasks.add(task)
+                task.add_done_callback(flush_tasks.discard)
+            
+            # Clean up completed tasks
+            flush_tasks = {t for t in flush_tasks if not t.done()}
 
-        # Final flush on shutdown
+        # Wait for in-flight flushes to complete before final flush
+        if flush_tasks:
+            logger.info(f"QueryExecutionStreamer waiting for {len(flush_tasks)} in-flight flushes")
+            await asyncio.gather(*flush_tasks, return_exceptions=True)
+
+        # Final flush on shutdown (force=True to bypass semaphore)
         if len(self._buffer) > 0:
             logger.info(
                 f"QueryExecutionStreamer final flush: {len(self._buffer)} records"
             )
-            await self._flush_buffer()
+            await self._flush_buffer(force=True)
 
-    async def _flush_buffer(self) -> None:
-        """Flush current buffer contents to Snowflake."""
-        # Atomically grab all buffered records
-        async with self._buffer_lock:
-            if not self._buffer:
-                return
-            raw_records = list(self._buffer)
-            self._buffer.clear()
+    async def _flush_buffer(self, force: bool = False) -> None:
+        """Flush current buffer contents to Snowflake.
+        
+        Args:
+            force: If True, bypass semaphore and flush immediately (used at shutdown).
+        """
+        # Acquire semaphore to limit concurrent flushes (unless forced at shutdown)
+        if not force:
+            await self._flush_semaphore.acquire()
+        
+        try:
+            # Atomically swap buffer - O(1) operation, minimal lock time
+            # This prevents blocking appends during the copy
+            async with self._buffer_lock:
+                if not self._buffer:
+                    return
+                raw_records = self._buffer
+                self._buffer = deque()  # New empty buffer
 
-        # Convert dataclasses to dicts (deferred from append for performance)
+            # Convert deque to list outside the lock (no contention)
+            raw_records_list = list(raw_records)
+
+            # Convert dataclasses to dicts in executor to avoid blocking event loop
+            # This is CPU-bound work that can take significant time for large buffers
+            loop = asyncio.get_running_loop()
+            records = await loop.run_in_executor(
+                None, self._convert_records_to_dicts, raw_records_list
+            )
+
+            start_time = time.monotonic()
+            success = await self._persist_records(records, retry=True)
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+
+            self._flush_latencies_ms.append(elapsed_ms)
+            self._flush_count += 1
+
+            if success:
+                self._total_records_flushed += len(records)
+                logger.info(
+                    f"QueryExecutionStreamer flush: {len(records)} records in {elapsed_ms:.0f}ms"
+                )
+            else:
+                self._dropped_batches += 1
+                self._run_partial = True
+                logger.warning(
+                    f"QueryExecutionStreamer dropped batch: {len(records)} records after retry"
+                )
+        finally:
+            if not force:
+                self._flush_semaphore.release()
+
+    def _convert_records_to_dicts(
+        self, raw_records: list[Any]
+    ) -> list[dict[str, Any]]:
+        """Convert dataclass records to dicts (runs in executor thread).
+        
+        This is CPU-bound work that would block the event loop if run in
+        the async context, so we run it in a thread pool.
+        """
         records: list[dict[str, Any]] = []
         for r in raw_records:
             if hasattr(r, "__dataclass_fields__"):
                 records.append(asdict(r))
             else:
                 records.append(r)
-
-        start_time = time.monotonic()
-        success = await self._persist_records(records, retry=True)
-        elapsed_ms = (time.monotonic() - start_time) * 1000
-
-        self._flush_latencies_ms.append(elapsed_ms)
-        self._flush_count += 1
-
-        if success:
-            self._total_records_flushed += len(records)
-            logger.debug(
-                f"QueryExecutionStreamer flush: {len(records)} records in {elapsed_ms:.0f}ms"
-            )
-        else:
-            self._dropped_batches += 1
-            self._run_partial = True
-            logger.warning(
-                f"QueryExecutionStreamer dropped batch: {len(records)} records after retry"
-            )
+        return records
 
     async def _persist_records(
         self, records: list[dict[str, Any]], *, retry: bool = True

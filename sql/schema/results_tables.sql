@@ -153,7 +153,50 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     -- Post-processing enrichment status (separate from test execution status)
     -- Values: NULL (legacy), PENDING, COMPLETED, FAILED, SKIPPED
     enrichment_status VARCHAR(20),
-    enrichment_error TEXT
+    enrichment_error TEXT,
+
+    -- ==========================================================================
+    -- Postgres pg_stat_statements enrichment (Phase 2)
+    -- Captured during MEASUREMENT phase only (excludes warmup)
+    -- ==========================================================================
+    
+    -- pg_stat_statements aggregate metrics for measurement phase
+    pg_total_calls BIGINT,                    -- Total query executions
+    pg_total_exec_time_ms FLOAT,              -- Total server execution time (ms)
+    pg_mean_exec_time_ms FLOAT,               -- Mean server execution time (ms)
+    pg_cache_hit_ratio FLOAT,                 -- Shared buffer cache hit ratio (0.0-1.0)
+    pg_shared_blks_hit BIGINT,                -- Shared buffer hits
+    pg_shared_blks_read BIGINT,               -- Shared buffer reads (from disk/OS)
+    pg_rows_returned BIGINT,                  -- Total rows returned
+    pg_query_pattern_count INTEGER,           -- Distinct query patterns captured
+    
+    -- I/O timing (requires track_io_timing=on)
+    pg_shared_blk_read_time_ms FLOAT,         -- Time spent reading blocks
+    pg_shared_blk_write_time_ms FLOAT,        -- Time spent writing blocks
+    
+    -- WAL statistics (write tests)
+    pg_wal_records BIGINT,                    -- WAL records generated
+    pg_wal_bytes BIGINT,                      -- WAL bytes generated
+    
+    -- Temp I/O (large sorts/joins)
+    pg_temp_blks_read BIGINT,
+    pg_temp_blks_written BIGINT,
+    
+    -- Breakdown by UB_KIND query type (VARIANT containing by-kind stats)
+    -- Keys: POINT_LOOKUP, RANGE_SCAN, INSERT, UPDATE, DELETE, CUSTOM, UNKNOWN
+    -- Values: {calls, total_exec_time, mean_exec_time, cache_hit_ratio, rows, ...}
+    pg_stats_by_kind VARIANT,
+    
+    -- Full delta details (VARIANT for debugging/advanced analysis)
+    -- Contains: by_queryid, by_query_kind, totals, settings, timestamps
+    pg_delta_measurement VARIANT,
+    pg_delta_warmup VARIANT,
+    pg_delta_total VARIANT,
+    
+    -- Postgres capabilities captured at test start
+    pg_stat_statements_available BOOLEAN,     -- Was extension available?
+    pg_track_io_timing BOOLEAN,               -- Was I/O timing enabled?
+    pg_version VARCHAR(50)                    -- Postgres version string
 );
 
 -- =============================================================================

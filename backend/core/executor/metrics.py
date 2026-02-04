@@ -8,7 +8,7 @@ import math
 import os
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 if TYPE_CHECKING:
     from backend.models import Metrics
@@ -27,6 +27,7 @@ class MetricsMixin:
     _last_snapshot_time: Optional[datetime]
     _last_snapshot_mono: Optional[float]
     _last_snapshot_ops: int
+    _measurement_start_time: Optional[datetime]
     _qps_smoothed: Optional[float]
     _qps_windowed: Optional[float]
     _qps_window_seconds: float
@@ -64,6 +65,7 @@ class MetricsMixin:
         async with self._metrics_lock:
             now = datetime.now(UTC)
             now_mono = time.monotonic()
+            metrics_any = cast(Any, self.metrics)
 
             # Calculate QPS from operations delta
             if self._last_snapshot_mono is not None:
@@ -77,7 +79,9 @@ class MetricsMixin:
                     if self._qps_smoothed is None:
                         self._qps_smoothed = instant_qps
                     else:
-                        self._qps_smoothed = alpha * instant_qps + (1 - alpha) * self._qps_smoothed
+                        self._qps_smoothed = (
+                            alpha * instant_qps + (1 - alpha) * self._qps_smoothed
+                        )
 
                     # Windowed QPS for controller stability
                     self._qps_samples.append((now_mono, self.metrics.total_operations))
@@ -89,7 +93,9 @@ class MetricsMixin:
                         newest_time, newest_ops = self._qps_samples[-1]
                         window_elapsed = newest_time - oldest_time
                         if window_elapsed > 0:
-                            self._qps_windowed = (newest_ops - oldest_ops) / window_elapsed
+                            self._qps_windowed = (
+                                newest_ops - oldest_ops
+                            ) / window_elapsed
 
                     self.metrics.current_qps = self._qps_smoothed or 0.0
 
@@ -101,42 +107,48 @@ class MetricsMixin:
             if self._latencies_ms:
                 sorted_lat = sorted(self._latencies_ms)
                 n = len(sorted_lat)
-                self.metrics.p50_latency_ms = sorted_lat[int(n * 0.50)]
-                self.metrics.p95_latency_ms = sorted_lat[int(n * 0.95)]
-                self.metrics.p99_latency_ms = sorted_lat[min(int(n * 0.99), n - 1)]
+                metrics_any.p50_latency_ms = sorted_lat[int(n * 0.50)]
+                metrics_any.p95_latency_ms = sorted_lat[int(n * 0.95)]
+                metrics_any.p99_latency_ms = sorted_lat[min(int(n * 0.99), n - 1)]
 
             # Calculate average QPS over measurement window
-            if hasattr(self, "_measurement_start_time") and self._measurement_start_time:
-                measurement_elapsed = (now - self._measurement_start_time).total_seconds()
+            start_time = self._measurement_start_time
+            if start_time is not None:
+                measurement_elapsed = (now - start_time).total_seconds()
                 if measurement_elapsed > 0:
-                    self.metrics.avg_qps = self.metrics.total_operations / measurement_elapsed
+                    self.metrics.avg_qps = (
+                        self.metrics.total_operations / measurement_elapsed
+                    )
 
             # System resource metrics
             self._collect_system_metrics()
 
             # Attach controller state for WebSocket
-            self.metrics.qps_controller_state = dict(self._qps_controller_state)
-            self.metrics.find_max_controller_state = dict(self._find_max_controller_state)
-            self.metrics.warehouse_query_status = dict(self._warehouse_query_status)
+            metrics_any.qps_controller_state = dict(self._qps_controller_state)
+            metrics_any.find_max_controller_state = dict(
+                self._find_max_controller_state
+            )
+            metrics_any.warehouse_query_status = dict(self._warehouse_query_status)
             self.metrics.target_workers = self._target_workers
 
             # Latency breakdown (SF execution vs network overhead)
             if self._latency_sf_execution_ms:
                 sf_sorted = sorted(self._latency_sf_execution_ms)
                 n = len(sf_sorted)
-                self.metrics.sf_execution_p50_ms = sf_sorted[int(n * 0.50)]
-                self.metrics.sf_execution_p95_ms = sf_sorted[int(n * 0.95)]
+                metrics_any.sf_execution_p50_ms = sf_sorted[int(n * 0.50)]
+                metrics_any.sf_execution_p95_ms = sf_sorted[int(n * 0.95)]
             if self._latency_network_overhead_ms:
                 net_sorted = sorted(self._latency_network_overhead_ms)
                 n = len(net_sorted)
-                self.metrics.network_overhead_p50_ms = net_sorted[int(n * 0.50)]
-                self.metrics.network_overhead_p95_ms = net_sorted[int(n * 0.95)]
+                metrics_any.network_overhead_p50_ms = net_sorted[int(n * 0.50)]
+                metrics_any.network_overhead_p95_ms = net_sorted[int(n * 0.95)]
 
     def _collect_system_metrics(self) -> None:
         """Collect system resource metrics (CPU, memory)."""
         if self._psutil is None or self._process is None:
             return
 
+        metrics_any = cast(Any, self.metrics)
         try:
             # Process CPU (non-blocking, returns delta since last call)
             cpu_pct = self._process.cpu_percent(interval=None)
@@ -151,15 +163,15 @@ class MetricsMixin:
             # Host CPU (for container awareness)
             host_cpu = self._psutil.cpu_percent(interval=None)
             if host_cpu is not None and math.isfinite(host_cpu):
-                self.metrics.host_cpu_percent = host_cpu
+                metrics_any.host_cpu_percent = host_cpu
 
             # cgroup limits (for container environments)
             cgroup = self._read_cgroup_limits()
             if cgroup:
-                self.metrics.cgroup_cpu_quota_cores = cgroup.get("cpu_quota_cores")
-                self.metrics.cgroup_memory_limit_mb = cgroup.get("memory_limit_mb")
+                metrics_any.cgroup_cpu_quota_cores = cgroup.get("cpu_quota_cores")
+                metrics_any.cgroup_memory_limit_mb = cgroup.get("memory_limit_mb")
                 if cgroup.get("memory_mb") and cgroup.get("memory_limit_mb"):
-                    self.metrics.cgroup_memory_percent = (
+                    metrics_any.cgroup_memory_percent = (
                         cgroup["memory_mb"] / cgroup["memory_limit_mb"] * 100.0
                     )
                 # Calculate cgroup CPU percent from usage delta
@@ -169,7 +181,7 @@ class MetricsMixin:
                     cpu_cores=cgroup.get("cpu_quota_cores"),
                 )
                 if cgroup_cpu_pct is not None:
-                    self.metrics.cgroup_cpu_percent = cgroup_cpu_pct
+                    metrics_any.cgroup_cpu_percent = cgroup_cpu_pct
 
         except Exception as e:
             logger.debug("System metrics collection error: %s", e)

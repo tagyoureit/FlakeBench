@@ -171,9 +171,7 @@ def check_alerts(skill_name: str, mode: str, duration_sec: float) -> list:
     return alerts
 
 
-def compare_to_baseline(
-    skill_name: str, mode: str, model: str, duration_sec: float
-) -> dict | None:
+def compare_to_baseline(skill_name: str, mode: str, model: str, duration_sec: float) -> dict | None:
     """Compare duration against baseline if available."""
     baselines_file = get_baselines_file()
     if not baselines_file.exists():
@@ -228,9 +226,7 @@ def update_registry(skill_name: str, agent_id: str, run_id: str, target_file: st
     registry_file = get_registry_file()
 
     try:
-        registry = (
-            json.loads(registry_file.read_text()) if registry_file.exists() else {}
-        )
+        registry = json.loads(registry_file.read_text()) if registry_file.exists() else {}
     except Exception:
         registry = {}
 
@@ -277,11 +273,7 @@ def recover_run_id(skill_name: str, agent_id: str) -> str | None:
 
 
 def print_stdout_summary(
-    data: dict,
-    checkpoints: list,
-    tokens: dict | None,
-    baseline: dict | None,
-    alerts: list,
+    data: dict, checkpoints: list, tokens: dict | None, baseline: dict | None, alerts: list
 ):
     """Print timing summary to STDOUT."""
     print()
@@ -314,9 +306,7 @@ def print_stdout_summary(
         for i, cp in enumerate(checkpoints):
             prefix = "└──" if i == len(checkpoints) - 1 else "├──"
             pct = (cp["elapsed_seconds"] / data["duration_seconds"]) * 100
-            print(
-                f"{prefix} {cp['name']:<20} {cp['elapsed_seconds']:.1f}s ({pct:.1f}%)"
-            )
+            print(f"{prefix} {cp['name']:<20} {cp['elapsed_seconds']:.1f}s ({pct:.1f}%)")
 
     if alerts:
         print()
@@ -433,9 +423,7 @@ def cmd_end(args):
         return
 
     if duration_sec < 1:
-        print(
-            f"WARNING: Duration under 1 second ({duration_sec}s) - possible race condition"
-        )
+        print(f"WARNING: Duration under 1 second ({duration_sec}s) - possible race condition")
         data["status"] = "warning"
     else:
         data["status"] = "completed"
@@ -496,9 +484,7 @@ def cmd_baseline_set(args):
 
     durations = []
     if timing_data_dir.exists():
-        for filepath in glob.glob(
-            str(timing_data_dir / "skill-timing-*-complete.json")
-        ):
+        for filepath in glob.glob(str(timing_data_dir / "skill-timing-*-complete.json")):
             try:
                 data = json.loads(Path(filepath).read_text())
                 if (
@@ -514,9 +500,7 @@ def cmd_baseline_set(args):
     min_required = getattr(args, "min_samples", 5)  # Configurable minimum samples
 
     if len(durations) < min_required:
-        print(
-            f"ERROR: Not enough data points ({len(durations)}). Need at least {min_required}."
-        )
+        print(f"ERROR: Not enough data points ({len(durations)}). Need at least {min_required}.")
         print("Tip: Use --min-samples N to lower threshold for testing/debugging.")
         sys.exit(1)
 
@@ -532,9 +516,7 @@ def cmd_baseline_set(args):
     baselines_file.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        baselines = (
-            json.loads(baselines_file.read_text()) if baselines_file.exists() else {}
-        )
+        baselines = json.loads(baselines_file.read_text()) if baselines_file.exists() else {}
     except Exception:
         baselines = {}
 
@@ -576,24 +558,18 @@ def cmd_baseline_compare(args):
     )
 
     if comparison is None:
-        print(
-            f"No baseline found for {data['skill_name']}/{data['review_mode']}/{data['model']}"
-        )
+        print(f"No baseline found for {data['skill_name']}/{data['review_mode']}/{data['model']}")
         sys.exit(1)
 
     # Type narrowing: comparison is now guaranteed to be non-None
     assert comparison is not None
     sign = "+" if comparison["delta_percent"] >= 0 else ""
     print(f"Baseline Comparison for {args.run_id}:")
-    print(
-        f"  Current: {format_duration(data['duration_seconds'])} ({data['duration_seconds']}s)"
-    )
+    print(f"  Current: {format_duration(data['duration_seconds'])} ({data['duration_seconds']}s)")
     print(
         f"  Baseline: {format_duration(comparison['baseline_avg_seconds'])} ({comparison['baseline_avg_seconds']}s avg)"
     )
-    print(
-        f"  Delta: {sign}{comparison['delta_seconds']}s ({sign}{comparison['delta_percent']}%)"
-    )
+    print(f"  Delta: {sign}{comparison['delta_seconds']}s ({sign}{comparison['delta_percent']}%)")
     print(f"  Status: {comparison['status'].replace('_', ' ')}")
 
 
@@ -604,9 +580,7 @@ def cmd_analyze(args):
 
     runs = []
     if timing_data_dir.exists():
-        for filepath in glob.glob(
-            str(timing_data_dir / "skill-timing-*-complete.json")
-        ):
+        for filepath in glob.glob(str(timing_data_dir / "skill-timing-*-complete.json")):
             try:
                 data = json.loads(Path(filepath).read_text())
                 if data.get("end_epoch", 0) < cutoff:
@@ -712,33 +686,21 @@ For detailed documentation, see skills/skill-timing/README.md
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # start command
-    start_parser = subparsers.add_parser(
-        "start", help="Start timing for a skill execution"
-    )
-    start_parser.add_argument(
-        "--skill", required=True, help="Skill name (e.g., rule-reviewer)"
-    )
+    start_parser = subparsers.add_parser("start", help="Start timing for a skill execution")
+    start_parser.add_argument("--skill", required=True, help="Skill name (e.g., rule-reviewer)")
     start_parser.add_argument("--target", required=True, help="Target file path")
-    start_parser.add_argument(
-        "--model", required=True, help="Model slug (e.g., claude-sonnet-45)"
-    )
+    start_parser.add_argument("--model", required=True, help="Model slug (e.g., claude-sonnet-45)")
     start_parser.add_argument(
         "--mode", default="FULL", help="Review mode (FULL, FOCUSED, STALENESS)"
     )
     start_parser.add_argument(
-        "--agent",
-        default=None,
-        help="Agent name (defaults to CORTEX_AGENT_NAME env var)",
+        "--agent", default=None, help="Agent name (defaults to CORTEX_AGENT_NAME env var)"
     )
     start_parser.set_defaults(func=cmd_start)
 
     # checkpoint command
-    checkpoint_parser = subparsers.add_parser(
-        "checkpoint", help="Record a timing checkpoint"
-    )
-    checkpoint_parser.add_argument(
-        "--run-id", required=True, help="Run ID from timing start"
-    )
+    checkpoint_parser = subparsers.add_parser("checkpoint", help="Record a timing checkpoint")
+    checkpoint_parser.add_argument("--run-id", required=True, help="Run ID from timing start")
     checkpoint_parser.add_argument(
         "--name", required=True, help="Checkpoint name (e.g., schema_validated)"
     )
@@ -747,9 +709,7 @@ For detailed documentation, see skills/skill-timing/README.md
     # end command
     end_parser = subparsers.add_parser("end", help="End timing and compute duration")
     end_parser.add_argument(
-        "--run-id",
-        required=True,
-        help='Run ID from timing start (or "none" for recovery)',
+        "--run-id", required=True, help='Run ID from timing start (or "none" for recovery)'
     )
     end_parser.add_argument("--output-file", required=True, help="Path to output file")
     end_parser.add_argument("--skill", required=True, help="Skill name (for recovery)")
@@ -790,35 +750,25 @@ For detailed documentation, see skills/skill-timing/README.md
     baseline_compare_parser = baseline_subparsers.add_parser(
         "compare", help="Compare a run against baseline"
     )
-    baseline_compare_parser.add_argument(
-        "--run-id", required=True, help="Run ID to compare"
-    )
+    baseline_compare_parser.add_argument("--run-id", required=True, help="Run ID to compare")
     baseline_compare_parser.set_defaults(func=cmd_baseline_compare)
 
     # analyze command
-    analyze_parser = subparsers.add_parser(
-        "analyze", help="Analyze timing data across runs"
-    )
+    analyze_parser = subparsers.add_parser("analyze", help="Analyze timing data across runs")
     analyze_parser.add_argument("--skill", default=None, help="Filter by skill name")
     analyze_parser.add_argument("--model", default=None, help="Filter by model")
     analyze_parser.add_argument(
         "--days", default=7, type=int, help="Days of data to analyze (default: 7)"
     )
-    analyze_parser.add_argument(
-        "--output", default=None, help="Output file path (JSON format)"
-    )
+    analyze_parser.add_argument("--output", default=None, help="Output file path (JSON format)")
     analyze_parser.set_defaults(func=cmd_analyze)
 
     # aggregate command
     aggregate_parser = subparsers.add_parser(
         "aggregate", help="Aggregate timing data from review files"
     )
-    aggregate_parser.add_argument(
-        "files", nargs="*", help="Review files to parse for timing data"
-    )
-    aggregate_parser.add_argument(
-        "--output", required=True, help="Output file path (JSON format)"
-    )
+    aggregate_parser.add_argument("files", nargs="*", help="Review files to parse for timing data")
+    aggregate_parser.add_argument("--output", required=True, help="Output file path (JSON format)")
     aggregate_parser.set_defaults(func=cmd_aggregate)
 
     args = parser.parse_args()

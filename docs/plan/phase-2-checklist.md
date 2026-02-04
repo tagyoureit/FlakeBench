@@ -235,3 +235,115 @@ See [refactor-bugs.md](refactor-bugs.md) for detailed analysis and implementatio
 - Issue 2: Startup delay (MEDIUM) - ✅ Resolved (4s vs 60s)
 - Issue 3: QPS rolling average (MEDIUM) - Fix applied
 - Issue 4: WebSocket completion (MEDIUM) - ✅ Resolved
+
+## 2.22 Dashboard Enhancements ⬜
+
+See [dashboard-enhancements.md](dashboard-enhancements.md) for detailed implementation tasks.
+
+**Summary**: Add missing metrics to comparison views (queue time, cache hit rate, clusters, cost), statistical summaries, error rate timelines, and UI polish.
+
+**Key Features**:
+- Statistical summary panel (avg/min/max/stddev)
+- Queue time and cache hit rate in comparisons
+- Error rate over time chart
+- Cost/credits tracking
+- Chart label and title improvements
+
+## 2.23 Comprehensive Cost Metrics ⬜
+
+See [cost-metrics.md](cost-metrics.md) for detailed implementation tasks.
+
+**Summary**: Add comprehensive cost analysis for architect decision-making across all comparison views.
+
+**Key Features**:
+- Deep Compare: Add cost rows (Estimated Cost, Cost/1K Ops, Credits Used, Credit Rate) with delta calculations
+- Deep Compare: Add Cost Efficiency Analysis card (QPS/$, hourly cost difference)
+- Single Run Detail: Add Cost Summary card
+- Wire up existing but unused `calcCostDelta()`/`formatCostDelta()` functions
+
+**Acceptance**:
+- Deep Compare page shows full cost comparison with savings/increase percentages
+- Single run detail displays cost breakdown
+- Architects can compare TCO across Hybrid Tables vs Postgres configurations
+
+## 2.24 PostgreSQL Statistics Enrichment ⬜
+
+See [postgres-enrichment.md](postgres-enrichment.md) for detailed implementation tasks.
+
+**Summary**: Capture aggregate-level test enrichment using `pg_stat_statements` before/after snapshots.
+
+**Current State**: Postgres tests skip enrichment entirely (`orchestrator.py:1421-1431`) because `pg_stat_statements` provides aggregate stats per query pattern, not per-execution history like Snowflake's `QUERY_HISTORY`.
+
+**Proposed Solution**: Capture snapshots BEFORE and AFTER test execution, compute deltas for test-level metrics.
+
+**Key Metrics (Different from Snowflake)**:
+| Metric | Snowflake | Postgres |
+|--------|-----------|----------|
+| Execution Time | ✅ Per-query | ✅ Mean/min/max/stddev aggregate |
+| Planning Time | ✅ Per-query | ✅ If track_planning enabled |
+| Queuing Time | ✅ Per-query | ❌ N/A |
+| Buffer Cache Hits | ❌ N/A | ✅ **Unique insight** |
+| Disk I/O Time | ❌ N/A | ✅ **If track_io_timing** |
+| Temp File Usage | ❌ N/A | ✅ **Unique insight** |
+| WAL Generation | ❌ N/A | ✅ **Write workload indicator** |
+
+**Implementation Phases**:
+
+### Phase 1: Infrastructure ⬜
+- [ ] Create `backend/core/postgres_stats.py` module
+  - [ ] `check_pg_stat_statements_available()`
+  - [ ] `capture_pg_stat_snapshot()`
+  - [ ] `compute_snapshot_delta()`
+  - [ ] `extract_query_kind()` - parse `UB_KIND=` marker
+  - [ ] `aggregate_by_query_kind()`
+- [ ] Integrate snapshot capture in `test_executor.py`
+  - [ ] Capture BEFORE snapshot at test start (~line 1078)
+  - [ ] Store snapshot in test context for enrichment phase
+- [ ] Replace skip logic in `orchestrator.py:1421-1431`
+  - [ ] Call `enrich_postgres_test()` instead of skipping
+
+### Phase 2: Schema & Persistence ⬜
+- [ ] Add `pg_*` columns to `TEST_RESULTS`:
+  - [ ] `pg_enrichment_status` VARCHAR(20)
+  - [ ] `pg_total_exec_time_ms` FLOAT
+  - [ ] `pg_mean_exec_time_ms` FLOAT
+  - [ ] `pg_total_plan_time_ms` FLOAT
+  - [ ] `pg_total_calls` BIGINT
+  - [ ] `pg_total_rows` BIGINT
+  - [ ] `pg_shared_blks_hit` BIGINT
+  - [ ] `pg_shared_blks_read` BIGINT
+  - [ ] `pg_cache_hit_ratio` FLOAT
+  - [ ] `pg_blk_read_time_ms` FLOAT
+  - [ ] `pg_blk_write_time_ms` FLOAT
+  - [ ] `pg_temp_blks_read` BIGINT
+  - [ ] `pg_temp_blks_written` BIGINT
+  - [ ] `pg_wal_records` BIGINT
+  - [ ] `pg_wal_bytes` BIGINT
+  - [ ] `pg_stats_before` VARIANT
+  - [ ] `pg_stats_after` VARIANT
+  - [ ] `pg_stats_delta` VARIANT
+- [ ] Create `enrich_postgres_test()` in `results_store.py`
+
+### Phase 3: API & Frontend ⬜
+- [ ] Add `pg_*` fields to test results API response
+- [ ] Display Postgres metrics in dashboard:
+  - [ ] Buffer Cache Hit Ratio (with visual indicator)
+  - [ ] I/O Time breakdown (when available)
+  - [ ] Temp file usage warning (if high)
+- [ ] Update comparison view for Postgres vs Snowflake
+
+### Phase 4: Testing & Docs ⬜
+- [ ] Unit tests for snapshot/delta computation
+- [ ] Integration test with actual Postgres
+- [ ] Update `docs/data-flow-and-lifecycle.md`
+
+**Open Questions**:
+1. Is `pg_stat_statements` enabled by default on Snowflake Postgres?
+2. Is `track_io_timing` enabled by default?
+3. How to handle multi-worker Postgres tests (snapshot from orchestrator vs workers)?
+
+**Acceptance**:
+- [ ] Postgres tests show `ENRICHMENT_STATUS = 'SUCCESS'` (not 'SKIPPED')
+- [ ] Dashboard displays cache hit ratio for Postgres tests
+- [ ] Graceful degradation when pg_stat_statements unavailable
+- [ ] Comparison view shows appropriate metrics for each table type

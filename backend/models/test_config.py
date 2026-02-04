@@ -18,7 +18,8 @@ class TableType(str, Enum):
 
     STANDARD = "standard"
     HYBRID = "hybrid"
-    INTERACTIVE = "interactive"
+    INTERACTIVE = "interactive"  # True Interactive Tables (Unistore/HTAP) - requires Interactive Warehouse
+    DYNAMIC = "dynamic"  # Dynamic Tables (materialized views with auto-refresh) - NOT Interactive Tables
     POSTGRES = "postgres"
     SNOWFLAKE_POSTGRES = "snowflake_postgres"
 

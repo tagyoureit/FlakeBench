@@ -4,7 +4,7 @@ Worker management for test executor.
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -15,6 +15,18 @@ logger = logging.getLogger(__name__)
 
 class WorkersMixin:
     """Mixin providing worker management functionality for TestExecutor."""
+
+    if TYPE_CHECKING:
+
+        async def _execute_read(self, worker_id: int, warmup: bool = False) -> None: ...
+
+        async def _execute_write(
+            self, worker_id: int, warmup: bool = False
+        ) -> None: ...
+
+        async def _execute_custom(
+            self, worker_id: int, warmup: bool = False
+        ) -> None: ...
 
     # These attributes are defined in the main TestExecutor class
     scenario: Any
@@ -108,9 +120,13 @@ class WorkersMixin:
                     WorkloadType.WRITE_HEAVY,
                     WorkloadType.MIXED,
                 ):
-                    await self._execute_mixed(worker_id, workload_type, warmup=is_warmup_op)
+                    await self._execute_mixed(
+                        worker_id, workload_type, warmup=is_warmup_op
+                    )
                 else:
-                    await self._execute_mixed(worker_id, WorkloadType.MIXED, warmup=is_warmup_op)
+                    await self._execute_mixed(
+                        worker_id, WorkloadType.MIXED, warmup=is_warmup_op
+                    )
 
                 # Think time between operations
                 if self.scenario.think_time_ms > 0:
@@ -139,9 +155,7 @@ class WorkersMixin:
         # Spawn warmup workers
         warmup_workers: list[asyncio.Task] = []
         for worker_id in range(self.scenario.total_threads):
-            task = asyncio.create_task(
-                self._controlled_worker(worker_id, warmup=True)
-            )
+            task = asyncio.create_task(self._controlled_worker(worker_id, warmup=True))
             warmup_workers.append(task)
 
         # Run for warmup duration

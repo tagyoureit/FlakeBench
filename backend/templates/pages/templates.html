@@ -13,12 +13,24 @@
         <p>Manage reusable test templates. All tests run from templates.</p>
         
         <div class="flex justify-between items-center mt-4">
-            <div class="form-group mb-0 flex-1 max-w-md">
-                <input type="text" 
-                       class="form-input" 
-                       x-model="searchQuery" 
-                       placeholder="Search templates..."
-                       @input="filterTemplates">
+            <div class="flex gap-3 flex-1 max-w-2xl items-center">
+                <div class="form-group mb-0" style="min-width: 140px;">
+                    <select class="form-select" x-model="typeFilter" @change="filterTemplates">
+                        <option value="">All Types</option>
+                        <option value="STANDARD">Standard</option>
+                        <option value="HYBRID">Hybrid</option>
+                        <option value="INTERACTIVE">Interactive</option>
+                        <option value="VIEW">View</option>
+                        <option value="POSTGRES">Postgres</option>
+                    </select>
+                </div>
+                <div class="form-group mb-0 flex-1">
+                    <input type="text" 
+                           class="form-input" 
+                           x-model="searchQuery" 
+                           placeholder="Search templates..."
+                           @input="filterTemplates">
+                </div>
             </div>
             
             <div class="btn-group mb-0 items-center">
@@ -73,14 +85,15 @@
                 <table>
                     <thead>
                         <tr>
-                            <th style="width: 26%;">Name</th>
-                            <th style="width: 7%;">Type</th>
-                            <th style="width: 23%;">Table</th>
-                            <th style="width: 10%;">Workload</th>
-                            <th style="width: 8%;">Duration</th>
-                            <th style="width: 12%;">Load</th>
-                            <th style="width: 6%;">Used</th>
-                            <th style="width: 18%;">Actions</th>
+                            <th style="width: 22%;">Name</th>
+                            <th style="width: 5%;">Type</th>
+                            <th style="width: 18%;">Table</th>
+                            <th style="width: 12%;">Warehouse</th>
+                            <th style="width: 14%;">Workload</th>
+                            <th style="width: 10%;">Duration</th>
+                            <th style="width: 14%;">Scaling</th>
+                            <th style="width: 4%;">Used</th>
+                            <th style="width: 11%;">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -100,25 +113,10 @@
                                     >
                                 </td>
                                 <td class="templates-mono" x-text="tableFqn(template)"></td>
-                                <td x-text="deriveWorkloadLabel(template.config)"></td>
-                                <td
-                                    x-text="(template.config?.load_mode === 'FIND_MAX_CONCURRENCY') ? '—' : ((template.config?.duration || '') + 's')"
-                                ></td>
-                                <td>
-                                    <div>
-                                        <span x-text="(template.config?.load_mode === 'QPS') ? 'Target QPS' : ((template.config?.load_mode === 'FIND_MAX_CONCURRENCY') ? 'Find Max' : 'Fixed Workers')"></span>
-                                        <span x-show="(template.config?.load_mode || 'CONCURRENCY') === 'CONCURRENCY'">
-                                            • <span x-text="template.config?.concurrent_connections"></span>
-                                        </span>
-                                        <span x-show="template.config?.load_mode === 'QPS'">
-                                            • <span x-text="template.config?.target_qps"></span>
-                                        </span>
-                                        <span x-show="template.config?.load_mode === 'FIND_MAX_CONCURRENCY'">
-                                            • Start: <span x-text="template.config?.start_concurrency || 5"></span>
-                                            +<span x-text="template.config?.concurrency_increment || 10"></span>
-                                        </span>
-                                    </div>
-                                </td>
+                                <td x-text="warehouseDisplay(template)"></td>
+                                <td x-html="workloadMixDisplay(template.config)"></td>
+                                <td x-html="durationDisplay(template.config)"></td>
+                                <td x-html="scalingDisplay(template.config)"></td>
                                 <td x-text="template.usage_count || 0"></td>
                                 <td>
                                     <div class="templates-actions">
@@ -161,7 +159,7 @@
                                             @click="prepareTest(template)"
                                         >
                                             <span class="loading-spinner" x-show="preparingTemplateId === template.template_id"></span>
-                                            <span x-text="preparingTemplateId === template.template_id ? 'Preparing…' : 'Prepare'"></span>
+                                            <span x-text="preparingTemplateId === template.template_id ? 'Loading…' : 'Run'"></span>
                                         </button>
                                         <button
                                             type="button"

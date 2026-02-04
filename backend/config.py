@@ -175,6 +175,24 @@ class Settings(BaseSettings):
     ENABLE_COST_ESTIMATION: bool = True
     ENABLE_QUERY_PROFILING: bool = True
 
+    # ========================================================================
+    # Cost Estimation Settings
+    # ========================================================================
+    # Default cost per Snowflake credit (Enterprise tier typical pricing)
+    COST_DOLLARS_PER_CREDIT: float = 4.00
+    # Display currency (USD only for now)
+    COST_DISPLAY_CURRENCY: str = "USD"
+    # Whether to show raw credits alongside dollar amounts
+    COST_SHOW_CREDITS: bool = True
+
+    # Snowflake Postgres Compute defaults
+    # Instance sizes use Postgres-specific naming from Table 1(i):
+    # STANDARD_M, STANDARD_L, STANDARD_XL, STANDARD_2X, STANDARD_4XL, etc.
+    # HIGHMEM_L, HIGHMEM_XL, HIGHMEM_2XL, etc.
+    # BURST_XS, BURST_S, BURST_M
+    # You can also use traditional warehouse-size aliases: SMALL, MEDIUM, LARGE, etc.
+    POSTGRES_INSTANCE_SIZE: str = "STANDARD_M"  # Default instance size for cost estimation
+
 
 # Create global settings instance
 settings = Settings()

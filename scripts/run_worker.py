@@ -17,7 +17,7 @@ from uuid import uuid4
 from urllib.request import Request, urlopen
 
 from backend.config import settings
-from backend.connectors import snowflake_pool
+from backend.connectors import postgres_pool, snowflake_pool
 from backend.core import results_store
 from backend.core.query_execution_streamer import QueryExecutionStreamer
 from backend.core.test_executor import TestExecutor
@@ -633,6 +633,52 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             pool_name="benchmark",
         )
         executor._snowflake_pool_override = per_test_pool  # type: ignore[attr-defined]
+    else:
+        # =========================================================================
+        # Postgres pool creation: Size pool to match per-worker connection target.
+        # Without this, Postgres workers use default pool size (5-20) regardless
+        # of the requested concurrency, severely limiting throughput.
+        # =========================================================================
+        max_workers = int(per_worker_cap)
+        initial_pool = max(1, min(max_workers, max(1, int(initial_target or 1))))
+        logger.info(
+            "[benchmark] Postgres pool sizing: total_connections=%d, initial_target=%d, "
+            "per_worker_cap=%d, max_workers=%d, initial_pool=%d, load_mode=%s",
+            total_connections,
+            initial_target,
+            per_worker_cap,
+            max_workers,
+            initial_pool,
+            load_mode,
+        )
+
+        # Determine pool type and database from template config
+        pg_pool_type = (
+            "snowflake_postgres"
+            if table_type == TableType.SNOWFLAKE_POSTGRES.value.upper()
+            else "default"
+        )
+        pg_database = str(template_config.get("database") or "").strip()
+        if not pg_database:
+            pg_database = (
+                settings.SNOWFLAKE_POSTGRES_DATABASE
+                if pg_pool_type == "snowflake_postgres"
+                else settings.POSTGRES_DATABASE
+            )
+
+        # Get connection params and create a properly-sized pool for this worker
+        pg_params = postgres_pool.get_postgres_connection_params(pg_pool_type)
+        per_test_pg_pool = postgres_pool.PostgresConnectionPool(
+            host=pg_params["host"],
+            port=pg_params["port"],
+            database=pg_database,
+            user=pg_params["user"],
+            password=pg_params["password"],
+            min_size=initial_pool,
+            max_size=max_workers,
+            pool_name="benchmark",
+        )
+        executor._postgres_pool_override = per_test_pg_pool  # type: ignore[attr-defined]
 
     current_phase = run_status_phase or "PREPARING"
     current_target = int(initial_target)
@@ -693,6 +739,25 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             last_error = str(exc)
             await _safe_heartbeat("DEAD")
             return 2
+    else:
+        # Initialize Postgres pool before START
+        try:
+            pg_pool_override = getattr(executor, "_postgres_pool_override", None)
+            if pg_pool_override is not None:
+                await _safe_heartbeat("INITIALIZING")
+                logger.info("Initializing Postgres benchmark connection pool...")
+                await pg_pool_override.initialize()
+                logger.info(
+                    "Postgres benchmark pool initialized (min=%d, max=%d)",
+                    pg_pool_override.min_size,
+                    pg_pool_override.max_size,
+                )
+                health.record_success()
+        except Exception as exc:
+            logger.error("Postgres benchmark pool initialization failed: %s", exc)
+            last_error = str(exc)
+            await _safe_heartbeat("DEAD")
+            return 2
 
     # Setup executor (table profiling, value pools, etc.) before START
     logger.info("Setting up executor...")
@@ -723,6 +788,27 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 return
 
         task.add_done_callback(_done)
+
+    async def _drain_background_tasks(timeout_seconds: float = 10.0) -> None:
+        pending = [task for task in list(background_tasks) if not task.done()]
+        if not pending:
+            background_tasks.clear()
+            return
+
+        for task in pending:
+            task.cancel()
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Background tasks still pending after %.1fs; continuing shutdown.",
+                timeout_seconds,
+            )
+        background_tasks.clear()
 
     test_id_str = str(executor.test_id)
     CURRENT_TEST_ID.set(test_id_str)
@@ -800,7 +886,9 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         logging.getLogger().removeHandler(log_handler)
 
     def _metrics_callback(metrics: Metrics) -> None:
-        nonlocal current_phase
+        nonlocal current_phase, stop_requested
+        if stop_requested:
+            return
         custom = dict(metrics.custom_metrics or {})
         custom["phase"] = current_phase
         metrics.custom_metrics = custom
@@ -856,7 +944,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             if status_row:
                 status = str(status_row.get("status") or "").upper()
                 phase = str(status_row.get("phase") or "").upper()
-                logger.info("_wait_for_start: status=%s, phase=%s", status, phase)
+                logger.debug("_wait_for_start: status=%s, phase=%s", status, phase)
                 if phase:
                     current_phase = phase
                 if status == "RUNNING":
@@ -1273,6 +1361,13 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     else:
         await _safe_heartbeat("DEAD")
 
+    # Drain any in-flight background tasks before closing pools to avoid
+    # scheduling work on a shut down executor during asyncio shutdown.
+    try:
+        await _drain_background_tasks()
+    except Exception as exc:
+        logger.warning("Failed to drain background tasks: %s", exc)
+
     # Explicitly close connection pools to avoid 50+ second GC cleanup delay.
     # Without this, Python's event loop shutdown closes 100 connections serially.
     try:
@@ -1322,7 +1417,12 @@ async def _run_worker(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format=settings.LOG_FORMAT)
+
+    # Suppress verbose Snowflake connector logging (matches backend/main.py)
+    logging.getLogger("snowflake.connector.connection").setLevel(logging.WARNING)
+    logging.getLogger("snowflake.connector.network").setLevel(logging.WARNING)
+
     try:
         return asyncio.run(_run_worker(args))
     except KeyboardInterrupt:

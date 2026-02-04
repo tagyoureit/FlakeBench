@@ -92,6 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- fix(worker): drain background metrics tasks before closing pools to avoid
+  executor shutdown errors during worker teardown.
+- fix(logging): enable colored level prefixes in console output.
+- Remove unused imports and locals flagged by Ruff.
+- Normalize console log formatting to match Uvicorn's level-prefix style.
 - fix(ws): stream all live log updates over WebSocket (no server limit) and
   drop live HTTP log fetches while keeping enrichment/warehouse updates streaming.
 - perf(api): parallelize initial queries in `GET /api/tests/{test_id}` endpoint.

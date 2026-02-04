@@ -1026,59 +1026,6 @@ async def insert_worker_metrics_snapshot(
     await pool.execute_query(snapshot_query, params=params)
 
 
-async def insert_metrics_snapshot(*, test_id: str, metrics: Metrics) -> None:
-    pool = snowflake_pool.get_default_pool()
-    snapshot_id = str(uuid4())
-
-    snapshot_query = f"""
-    INSERT INTO {_results_prefix()}.METRICS_SNAPSHOTS (
-        SNAPSHOT_ID,
-        TEST_ID,
-        TIMESTAMP,
-        ELAPSED_SECONDS,
-        TOTAL_QUERIES,
-        QPS,
-        P50_LATENCY_MS,
-        P95_LATENCY_MS,
-        P99_LATENCY_MS,
-        AVG_LATENCY_MS,
-        READ_COUNT,
-        WRITE_COUNT,
-        ERROR_COUNT,
-        BYTES_PER_SECOND,
-        ROWS_PER_SECOND,
-        ACTIVE_CONNECTIONS,
-        TARGET_WORKERS,
-        CUSTOM_METRICS
-    )
-    SELECT
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?)
-    """
-
-    params = [
-        snapshot_id,
-        test_id,
-        metrics.timestamp.isoformat(),
-        metrics.elapsed_seconds,
-        metrics.total_operations,
-        metrics.current_qps,
-        metrics.overall_latency.p50,
-        metrics.overall_latency.p95,
-        metrics.overall_latency.p99,
-        metrics.overall_latency.avg,
-        metrics.read_metrics.count,
-        metrics.write_metrics.count,
-        metrics.failed_operations,
-        metrics.bytes_per_second,
-        metrics.rows_per_second,
-        metrics.active_connections,
-        metrics.target_workers,
-        json.dumps(metrics.custom_metrics or {}),
-    ]
-
-    await pool.execute_query(snapshot_query, params=params)
-
-
 async def insert_query_executions(
     *,
     test_id: str,
@@ -1853,6 +1800,103 @@ async def update_enrichment_status(
     await pool.execute_query(query, params=[status, error, test_id])
 
 
+async def update_postgres_enrichment(
+    *,
+    test_id: str,
+    pg_delta_measurement: dict[str, Any] | None = None,
+    pg_delta_warmup: dict[str, Any] | None = None,
+    pg_delta_total: dict[str, Any] | None = None,
+    pg_capabilities: dict[str, Any] | None = None,
+) -> None:
+    """
+    Update TEST_RESULTS with Postgres pg_stat_statements enrichment data.
+
+    Args:
+        test_id: The test ID (parent run ID)
+        pg_delta_measurement: Delta for measurement phase only (excludes warmup)
+        pg_delta_warmup: Delta for warmup phase only
+        pg_delta_total: Delta for entire test (warmup + measurement)
+        pg_capabilities: Server capabilities at test start
+    """
+    pool = snowflake_pool.get_default_pool()
+    prefix = _results_prefix()
+
+    # Extract totals from measurement delta for denormalized columns
+    totals = (pg_delta_measurement or {}).get("totals", {})
+    by_kind = (pg_delta_measurement or {}).get("by_query_kind", {})
+
+    query = f"""
+    UPDATE {prefix}.TEST_RESULTS
+    SET
+        -- Aggregate metrics (measurement phase)
+        PG_TOTAL_CALLS = ?,
+        PG_TOTAL_EXEC_TIME_MS = ?,
+        PG_MEAN_EXEC_TIME_MS = ?,
+        PG_CACHE_HIT_RATIO = ?,
+        PG_SHARED_BLKS_HIT = ?,
+        PG_SHARED_BLKS_READ = ?,
+        PG_ROWS_RETURNED = ?,
+        PG_QUERY_PATTERN_COUNT = ?,
+        -- I/O timing
+        PG_SHARED_BLK_READ_TIME_MS = ?,
+        PG_SHARED_BLK_WRITE_TIME_MS = ?,
+        -- WAL statistics
+        PG_WAL_RECORDS = ?,
+        PG_WAL_BYTES = ?,
+        -- Temp I/O
+        PG_TEMP_BLKS_READ = ?,
+        PG_TEMP_BLKS_WRITTEN = ?,
+        -- By-kind breakdown (VARIANT)
+        PG_STATS_BY_KIND = PARSE_JSON(?),
+        -- Full deltas (VARIANT)
+        PG_DELTA_MEASUREMENT = PARSE_JSON(?),
+        PG_DELTA_WARMUP = PARSE_JSON(?),
+        PG_DELTA_TOTAL = PARSE_JSON(?),
+        -- Capabilities
+        PG_STAT_STATEMENTS_AVAILABLE = ?,
+        PG_TRACK_IO_TIMING = ?,
+        PG_VERSION = ?,
+        -- Timestamp
+        UPDATED_AT = CURRENT_TIMESTAMP()
+    WHERE RUN_ID = ?
+    """
+
+    params = [
+        # Aggregate metrics
+        totals.get("calls"),
+        totals.get("total_exec_time"),
+        totals.get("mean_exec_time"),
+        totals.get("cache_hit_ratio"),
+        totals.get("shared_blks_hit"),
+        totals.get("shared_blks_read"),
+        totals.get("rows"),
+        totals.get("query_pattern_count"),
+        # I/O timing
+        totals.get("shared_blk_read_time"),
+        totals.get("shared_blk_write_time"),
+        # WAL
+        totals.get("wal_records"),
+        totals.get("wal_bytes"),
+        # Temp
+        totals.get("temp_blks_read"),
+        totals.get("temp_blks_written"),
+        # VARIANT columns (JSON strings)
+        json.dumps(by_kind) if by_kind else None,
+        json.dumps(pg_delta_measurement) if pg_delta_measurement else None,
+        json.dumps(pg_delta_warmup) if pg_delta_warmup else None,
+        json.dumps(pg_delta_total) if pg_delta_total else None,
+        # Capabilities
+        pg_capabilities.get("pg_stat_statements_available") if pg_capabilities else None,
+        pg_capabilities.get("track_io_timing") if pg_capabilities else None,
+        pg_capabilities.get("pg_version") if pg_capabilities else None,
+        # WHERE clause
+        test_id,
+    ]
+
+    await pool.execute_query(query, params=params)
+    logger.info("Persisted Postgres enrichment data for test %s", test_id)
+
+
 async def get_enrichment_status(*, test_id: str) -> dict[str, Any] | None:
     """
     Get the enrichment status for a test, including query stats.
@@ -1884,3 +1928,315 @@ async def get_enrichment_status(*, test_id: str) -> dict[str, Any] | None:
         "enriched_queries": stats.enriched_queries,
         "enrichment_ratio": stats.enrichment_ratio,
     }
+
+
+# -----------------------------------------------------------------------------
+# Orphan Cleanup
+# -----------------------------------------------------------------------------
+
+
+class OrphanCleanupResult(NamedTuple):
+    """Result of orphan cleanup operation."""
+
+    run_status_cleaned: int
+    test_results_cleaned: int
+    enrichment_cleaned: int
+    cleaned_run_ids: list[str]
+    cleaned_test_ids: list[str]
+    cleaned_enrichment_ids: list[str]
+
+
+async def cleanup_orphaned_tests(
+    *,
+    stale_minutes_prepared: int = 60,
+    stale_minutes_active: int = 10,
+    dry_run: bool = False,
+) -> OrphanCleanupResult:
+    """
+    Clean up orphaned tests that are stuck in non-terminal states.
+
+    Orphaned tests occur when the app restarts mid-run, leaving tests in
+    PREPARED, STARTING, RUNNING, or CANCELLING states with no active
+    orchestrator to complete them.
+
+    Detection criteria:
+    - PREPARED/STARTING: start_time is NULL or older than stale_minutes_prepared
+    - RUNNING/CANCELLING: updated_at older than stale_minutes_active
+
+    Args:
+        stale_minutes_prepared: Minutes after which PREPARED/STARTING tests are orphans (default: 60)
+        stale_minutes_active: Minutes after which RUNNING/CANCELLING tests are orphans (default: 10)
+        dry_run: If True, only detect orphans without cleaning them
+
+    Returns:
+        OrphanCleanupResult with counts and IDs of cleaned tests
+    """
+    pool = snowflake_pool.get_default_pool()
+    prefix = _results_prefix()
+    cancellation_reason = "App restart - test orphaned (automatic cleanup)"
+    now = datetime.now(UTC)
+
+    # Find orphaned runs in RUN_STATUS
+    orphan_runs_query = f"""
+        SELECT RUN_ID, STATUS, START_TIME, UPDATED_AT
+        FROM {prefix}.RUN_STATUS
+        WHERE STATUS NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')
+          AND (
+            -- PREPARED/STARTING: never started or very old
+            (STATUS IN ('PREPARED', 'STARTING') AND (
+                START_TIME IS NULL
+                OR TIMESTAMPDIFF('minute', START_TIME, CURRENT_TIMESTAMP()) > ?
+            ))
+            OR
+            -- RUNNING/CANCELLING: no recent activity
+            (STATUS IN ('RUNNING', 'CANCELLING') AND (
+                UPDATED_AT IS NULL
+                OR TIMESTAMPDIFF('minute', UPDATED_AT, CURRENT_TIMESTAMP()) > ?
+            ))
+          )
+    """
+    orphan_run_rows = await pool.execute_query(
+        orphan_runs_query,
+        params=[stale_minutes_prepared, stale_minutes_active],
+    )
+    orphan_run_ids = [str(row[0]) for row in orphan_run_rows] if orphan_run_rows else []
+
+    # Find orphaned tests in TEST_RESULTS
+    orphan_tests_query = f"""
+        SELECT TEST_ID, STATUS, START_TIME, UPDATED_AT
+        FROM {prefix}.TEST_RESULTS
+        WHERE STATUS NOT IN ('COMPLETED', 'CANCELLED', 'FAILED')
+          AND (
+            -- PREPARED/STARTING: never started or very old
+            (STATUS IN ('PREPARED', 'STARTING') AND (
+                START_TIME IS NULL
+                OR TIMESTAMPDIFF('minute', START_TIME, CURRENT_TIMESTAMP()) > ?
+            ))
+            OR
+            -- RUNNING/CANCELLING: no recent activity
+            (STATUS IN ('RUNNING', 'CANCELLING') AND (
+                UPDATED_AT IS NULL
+                OR TIMESTAMPDIFF('minute', UPDATED_AT, CURRENT_TIMESTAMP()) > ?
+            ))
+          )
+    """
+    orphan_test_rows = await pool.execute_query(
+        orphan_tests_query,
+        params=[stale_minutes_prepared, stale_minutes_active],
+    )
+    orphan_test_ids = [str(row[0]) for row in orphan_test_rows] if orphan_test_rows else []
+
+    if dry_run:
+        logger.info(
+            "Orphan cleanup dry run: %d runs, %d tests would be cleaned",
+            len(orphan_run_ids),
+            len(orphan_test_ids),
+        )
+        return OrphanCleanupResult(
+            run_status_cleaned=0,
+            test_results_cleaned=0,
+            cleaned_run_ids=orphan_run_ids,
+            cleaned_test_ids=orphan_test_ids,
+        )
+
+    runs_cleaned = 0
+    tests_cleaned = 0
+
+    # Clean up RUN_STATUS orphans
+    if orphan_run_ids:
+        # Use parameterized IN clause
+        placeholders = ", ".join(["?"] * len(orphan_run_ids))
+        update_runs_query = f"""
+            UPDATE {prefix}.RUN_STATUS
+            SET STATUS = 'CANCELLED',
+                END_TIME = CURRENT_TIMESTAMP(),
+                CANCELLATION_REASON = ?,
+                UPDATED_AT = CURRENT_TIMESTAMP()
+            WHERE RUN_ID IN ({placeholders})
+        """
+        await pool.execute_query(
+            update_runs_query,
+            params=[cancellation_reason] + orphan_run_ids,
+        )
+        runs_cleaned = len(orphan_run_ids)
+        logger.info(
+            "Cleaned %d orphaned runs: %s",
+            runs_cleaned,
+            orphan_run_ids[:5],  # Log first 5
+        )
+
+    # Clean up TEST_RESULTS orphans
+    if orphan_test_ids:
+        placeholders = ", ".join(["?"] * len(orphan_test_ids))
+        update_tests_query = f"""
+            UPDATE {prefix}.TEST_RESULTS
+            SET STATUS = 'CANCELLED',
+                END_TIME = CURRENT_TIMESTAMP(),
+                UPDATED_AT = CURRENT_TIMESTAMP()
+            WHERE TEST_ID IN ({placeholders})
+        """
+        await pool.execute_query(
+            update_tests_query,
+            params=orphan_test_ids,
+        )
+        tests_cleaned = len(orphan_test_ids)
+        logger.info(
+            "Cleaned %d orphaned tests: %s",
+            tests_cleaned,
+            orphan_test_ids[:5],  # Log first 5
+        )
+
+    return OrphanCleanupResult(
+        run_status_cleaned=runs_cleaned,
+        test_results_cleaned=tests_cleaned,
+        enrichment_cleaned=0,
+        cleaned_run_ids=orphan_run_ids,
+        cleaned_test_ids=orphan_test_ids,
+        cleaned_enrichment_ids=[],
+    )
+
+
+async def cleanup_stale_enrichment(
+    *,
+    stale_minutes: int = 60,
+    dry_run: bool = False,
+) -> tuple[int, int, list[str], list[str]]:
+    """
+    Clean up tests with stale ENRICHMENT_STATUS = 'PENDING'.
+
+    For parent tests (TEST_ID = RUN_ID) with STATUS = COMPLETED:
+      - Retry enrichment in background
+
+    For child tests (TEST_ID != RUN_ID) or non-COMPLETED tests:
+      - Mark ENRICHMENT_STATUS as SKIPPED (enrichment not applicable)
+
+    Args:
+        stale_minutes: Minutes after which pending enrichment is considered stale (default: 60)
+        dry_run: If True, only detect stale enrichment without cleaning
+
+    Returns:
+        Tuple of (retried_count, skipped_count, retried_ids, skipped_ids)
+    """
+    pool = snowflake_pool.get_default_pool()
+    prefix = _results_prefix()
+
+    # Find stale enrichment - parents (COMPLETED, can retry)
+    parent_query = f"""
+        SELECT TEST_ID, RUN_ID, STATUS, TEST_CONFIG
+        FROM {prefix}.TEST_RESULTS
+        WHERE ENRICHMENT_STATUS = 'PENDING'
+          AND TEST_ID = RUN_ID  -- Parent tests only
+          AND STATUS = 'COMPLETED'
+          AND TIMESTAMPDIFF('minute', UPDATED_AT, CURRENT_TIMESTAMP()) > ?
+    """
+    parent_rows = await pool.execute_query(parent_query, params=[stale_minutes])
+    parent_tests = [(str(r[0]), r[3]) for r in parent_rows] if parent_rows else []
+
+    # Find stale enrichment - children or non-completed (skip)
+    child_query = f"""
+        SELECT TEST_ID
+        FROM {prefix}.TEST_RESULTS
+        WHERE ENRICHMENT_STATUS = 'PENDING'
+          AND (TEST_ID != RUN_ID OR STATUS != 'COMPLETED')
+          AND TIMESTAMPDIFF('minute', UPDATED_AT, CURRENT_TIMESTAMP()) > ?
+    """
+    child_rows = await pool.execute_query(child_query, params=[stale_minutes])
+    child_ids = [str(r[0]) for r in child_rows] if child_rows else []
+
+    if dry_run:
+        logger.info(
+            "Stale enrichment dry run: %d parents to retry, %d children/non-completed to skip",
+            len(parent_tests),
+            len(child_ids),
+        )
+        return (0, 0, [t[0] for t in parent_tests], child_ids)
+
+    retried_count = 0
+    skipped_count = 0
+    retried_ids: list[str] = []
+    skipped_ids: list[str] = []
+
+    # Retry enrichment for parent tests (in background)
+    for test_id, test_config in parent_tests:
+        try:
+            # Check if collect_query_history was enabled
+            if isinstance(test_config, str):
+                import json
+                test_config = json.loads(test_config)
+
+            scenario_config = test_config.get("scenario") if test_config else {}
+            if not isinstance(scenario_config, dict):
+                scenario_config = {}
+            collect_query_history = bool(scenario_config.get("collect_query_history", False))
+
+            if not collect_query_history:
+                # Can't retry - mark as skipped
+                await update_enrichment_status(
+                    test_id=test_id,
+                    status="SKIPPED",
+                    error="collect_query_history not enabled",
+                )
+                skipped_ids.append(test_id)
+                skipped_count += 1
+                continue
+
+            # Trigger enrichment retry in background
+            import asyncio
+            asyncio.create_task(_retry_enrichment_background(test_id))
+            retried_ids.append(test_id)
+            retried_count += 1
+
+        except Exception as e:
+            logger.warning("Failed to retry enrichment for %s: %s", test_id, e)
+            await update_enrichment_status(
+                test_id=test_id,
+                status="FAILED",
+                error=f"Startup retry failed: {e}",
+            )
+
+    # Skip enrichment for child tests and non-completed
+    if child_ids:
+        placeholders = ", ".join(["?"] * len(child_ids))
+        skip_query = f"""
+            UPDATE {prefix}.TEST_RESULTS
+            SET ENRICHMENT_STATUS = 'SKIPPED',
+                ENRICHMENT_ERROR = 'Not applicable (child test or non-completed)',
+                UPDATED_AT = CURRENT_TIMESTAMP()
+            WHERE TEST_ID IN ({placeholders})
+        """
+        await pool.execute_query(skip_query, params=child_ids)
+        skipped_ids.extend(child_ids)
+        skipped_count += len(child_ids)
+
+    if retried_count > 0:
+        logger.info("Retrying enrichment for %d stale parent tests: %s", retried_count, retried_ids[:5])
+    if skipped_count > 0:
+        logger.info("Skipped enrichment for %d stale tests: %s", skipped_count, skipped_ids[:5])
+
+    return (retried_count, skipped_count, retried_ids, skipped_ids)
+
+
+async def _retry_enrichment_background(test_id: str) -> None:
+    """Background task to retry enrichment for a single test."""
+    try:
+        logger.info("Retrying enrichment for test %s", test_id)
+        await update_enrichment_status(test_id=test_id, status="PENDING", error=None)
+
+        stats = await enrich_query_executions_with_retry(
+            test_id=test_id,
+            target_ratio=0.90,
+            max_wait_seconds=240,
+            poll_interval_seconds=10,
+        )
+        await update_test_overhead_percentiles(test_id=test_id)
+        await update_enrichment_status(test_id=test_id, status="COMPLETED", error=None)
+        logger.info(
+            "Enrichment retry complete for %s: %d/%d queries (%.1f%%)",
+            test_id,
+            stats.enriched_queries,
+            stats.total_queries,
+            stats.enrichment_ratio * 100,
+        )
+    except Exception as e:
+        logger.warning("Enrichment retry failed for %s: %s", test_id, e)
+        await update_enrichment_status(test_id=test_id, status="FAILED", error=str(e))

@@ -102,7 +102,7 @@ root.DashboardMixins.testActions = {
     if (!id) return;
     const confirmed = await window.toast.confirm(
       "Re-run this test with the same configuration?",
-      { confirmText: "Re-run", confirmVariant: "primary", timeoutMs: 10_000 }
+      { confirmText: "Run Again", confirmVariant: "primary", timeoutMs: 10_000 }
     );
     if (!confirmed) return;
 

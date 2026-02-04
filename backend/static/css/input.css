@@ -120,6 +120,46 @@
     @apply resize-y min-h-[100px];
   }
 
+  /* Disabled form inputs - gray text for read-only state */
+  .form-input:disabled,
+  .form-select:disabled,
+  .form-textarea:disabled,
+  fieldset:disabled .form-input,
+  fieldset:disabled .form-select,
+  fieldset:disabled .form-textarea,
+  .read-only-form .form-input,
+  .read-only-form .form-select,
+  .read-only-form .form-textarea {
+    @apply bg-gray-50 text-gray-400 cursor-not-allowed opacity-100;
+  }
+
+  /* Also style labels and text within disabled fieldsets */
+  fieldset:disabled .form-label,
+  fieldset:disabled .form-text,
+  fieldset:disabled label,
+  fieldset:disabled td,
+  fieldset:disabled th,
+  fieldset:disabled pre,
+  fieldset:disabled .card-title,
+  fieldset:disabled p,
+  .read-only-form .form-label,
+  .read-only-form .form-text,
+  .read-only-form label,
+  .read-only-form td,
+  .read-only-form th,
+  .read-only-form pre,
+  .read-only-form .card-title,
+  .read-only-form p,
+  .read-only-form small {
+    @apply text-gray-400;
+  }
+
+  /* Disabled alert styling */
+  fieldset:disabled .alert,
+  .read-only-form .alert {
+    @apply opacity-70;
+  }
+
   /* Status badges */
   .status-badge {
     @apply inline-block py-1 px-3 rounded-full text-sm font-medium;
@@ -804,6 +844,22 @@
   
   .log-control {
     @apply flex flex-col gap-1 min-w-[140px];
+  }
+  
+  .log-control .form-select[multiple] {
+    @apply p-2 border border-gray-200 rounded-md bg-white cursor-pointer;
+  }
+  
+  .log-control .form-select[multiple] option {
+    @apply py-1.5 px-2 rounded cursor-pointer;
+  }
+  
+  .log-control .form-select[multiple] option:checked {
+    @apply bg-blue-100 text-blue-800;
+  }
+  
+  .log-control .form-select[multiple] option:hover {
+    @apply bg-gray-100;
   }
   
   .log-control-toggle {

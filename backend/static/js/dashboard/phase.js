@@ -250,9 +250,19 @@ window.DashboardMixins.phase = {
   phaseBadgeClassNew(phaseName) {
     const state = this.phaseState(phaseName);
     const status = (this.status || "").toString().toUpperCase();
-    if (state === "completed") return "phase-badge--completed";
+    const isTerminalFailure = ["FAILED", "CANCELLED", "STOPPED"].includes(status);
+    
+    if (state === "completed") {
+      if (isTerminalFailure) {
+        return "phase-badge--completed phase-badge--terminal-failure";
+      }
+      return "phase-badge--completed";
+    }
     if (state === "current") {
       if (status === "CANCELLING") return "phase-badge--active phase-badge--cancelling";
+      if (isTerminalFailure && phaseName === "COMPLETED") {
+        return "phase-badge--active phase-badge--failed";
+      }
       const phaseClass = `phase-${phaseName.toLowerCase()}`;
       return `phase-badge--active ${phaseClass}`;
     }

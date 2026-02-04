@@ -119,7 +119,9 @@ async def fetch_run_status(pool: Any, run_id: str) -> dict[str, Any] | None:
         "start_time": start_time,
         "end_time": end_time,
         "find_max_state": find_max_state,
-        "cancellation_reason": str(cancellation_reason) if cancellation_reason else None,
+        "cancellation_reason": str(cancellation_reason)
+        if cancellation_reason
+        else None,
         "elapsed_seconds": float(elapsed_secs) if elapsed_secs is not None else None,
     }
 
@@ -299,8 +301,12 @@ def compute_aggregated_find_max(worker_results: list[dict]) -> dict:
 
     return {
         "step_history": aggregated_steps,
-        "baseline_p95_latency_ms": max(all_baselines_p95) if all_baselines_p95 else None,
-        "baseline_p99_latency_ms": max(all_baselines_p99) if all_baselines_p99 else None,
+        "baseline_p95_latency_ms": max(all_baselines_p95)
+        if all_baselines_p95
+        else None,
+        "baseline_p99_latency_ms": max(all_baselines_p99)
+        if all_baselines_p99
+        else None,
         "final_best_concurrency": best_step["concurrency"] if best_step else None,
         "final_best_qps": best_step["qps"] if best_step else None,
         "total_workers": total_workers,

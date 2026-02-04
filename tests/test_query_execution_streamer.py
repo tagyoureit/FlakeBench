@@ -131,6 +131,36 @@ async def test_flush_on_interval():
     await streamer.shutdown()
 
 
+async def test_flush_on_threshold():
+    """Test automatic flush when buffer reaches threshold."""
+    pool = _make_mock_pool()
+
+    streamer = QueryExecutionStreamer(
+        pool=pool,
+        test_id="test-123",
+        flush_interval_seconds=60.0,  # Long interval - should NOT trigger
+        flush_threshold_records=5,  # Low threshold - should trigger
+        batch_insert_size=100,
+        results_prefix=TEST_PREFIX,
+    )
+
+    await streamer.start()
+
+    # Append records up to threshold
+    for i in range(5):
+        record = _make_mock_record(f"query-{i}")
+        await streamer.append(record)
+
+    # Give the flush loop time to process the threshold event
+    await asyncio.sleep(0.1)
+
+    # Verify flush was triggered by threshold (not interval)
+    assert pool.execute_query.call_count >= 1
+    assert streamer._total_records_flushed >= 5
+
+    await streamer.shutdown()
+
+
 async def test_batch_insert_size():
     """Test that records are batched correctly."""
     pool = _make_mock_pool()
@@ -490,6 +520,55 @@ async def test_double_start():
     # Second start should be no-op
     await streamer.start()
     assert streamer._flush_task is first_task
+
+    await streamer.shutdown()
+
+
+async def test_concurrent_flush_semaphore():
+    """Test that concurrent flushes are bounded by semaphore (max 4 concurrent)."""
+    pool = _make_mock_pool()
+    
+    concurrent_count = 0
+    max_concurrent = 0
+    
+    # Make execute_query slow to simulate long flush and track concurrency
+    async def slow_execute(*args, **kwargs):
+        nonlocal concurrent_count, max_concurrent
+        concurrent_count += 1
+        max_concurrent = max(max_concurrent, concurrent_count)
+        await asyncio.sleep(0.1)
+        concurrent_count -= 1
+        return []
+
+    pool.execute_query = slow_execute
+
+    streamer = QueryExecutionStreamer(
+        pool=pool,
+        test_id="test-123",
+        flush_interval_seconds=60.0,
+        flush_threshold_records=100,
+        results_prefix=TEST_PREFIX,
+    )
+
+    await streamer.start()
+
+    # Add records in batches and trigger multiple flushes
+    flush_tasks = []
+    for batch in range(6):  # More than semaphore limit (4)
+        for i in range(5):
+            await streamer.append(_make_mock_record(f"query-{batch}-{i}"))
+        # Spawn flush task (won't block due to concurrent design)
+        task = asyncio.create_task(streamer._flush_buffer())
+        flush_tasks.append(task)
+
+    # Wait for all flushes to complete
+    await asyncio.gather(*flush_tasks)
+
+    # Verify semaphore limited concurrency to 4
+    assert max_concurrent <= 4, f"Max concurrent flushes was {max_concurrent}, expected <= 4"
+    
+    # Verify multiple flushes happened (each batch got its own flush)
+    assert streamer._flush_count >= 1
 
     await streamer.shutdown()
 

@@ -9,7 +9,7 @@ run and validate Unistore Benchmark.
 
 ### Start the app (local)
 
-- Server: `uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000`
+- Server: `uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-config logging_config.yaml`
 - Pages: start at `/` (templates)
 - Health: `/health`
 - API docs: `/api/docs` and `/api/redoc`
@@ -110,6 +110,50 @@ All smoke test parameters can be overridden via environment variables:
    - STOP event appears in `RUN_CONTROL_EVENTS`.
    - `RUN_STATUS` transitions to `CANCELLING` and then `CANCELLED`.
 5. Verify all worker processes exit and the parent `TEST_RESULTS` rollup updates.
+
+## Front-end development (Tailwind CSS)
+
+The UI uses Tailwind CSS v4 (via `pytailwindcss`). Styles are defined in
+`backend/static/css/input.css` and compiled to `backend/static/css/tailwind.css`.
+
+### Taskfile commands
+
+| Task | Description |
+|------|-------------|
+| `task css:watch` | Watch mode — auto-rebuilds on changes (recommended for dev) |
+| `task css:build` | One-time build, minified (for production) |
+| `task css:dev` | One-time build, unminified (for debugging) |
+
+### When to rebuild
+
+Rebuild CSS after modifying:
+- `backend/static/css/input.css` (Tailwind source with `@apply` directives)
+- `backend/templates/**/*.html` (if adding new Tailwind utility classes)
+
+### Development workflow
+
+1. Start the CSS watcher in one terminal:
+   ```bash
+   task css:watch
+   ```
+
+2. Start the app server in another terminal:
+   ```bash
+   uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-config logging_config.yaml
+   ```
+
+3. Edit `input.css` or templates — CSS rebuilds automatically.
+
+### Browser caching
+
+If CSS changes don't appear, hard-refresh the browser (Cmd+Shift+R / Ctrl+Shift+R)
+or open DevTools and disable caching.
+
+### File structure
+
+- `backend/static/css/input.css` — Tailwind source (edit this)
+- `backend/static/css/tailwind.css` — Compiled output (loaded by `base.html`)
+- `backend/static/css/app.css` — Legacy file (not loaded, kept for reference)
 
 ## Python tests
 

@@ -16,12 +16,16 @@ window.DashboardMixins.logs = {
   },
 
   logLevelOptions() {
+    // Ordered from least verbose to most verbose
+    // ERROR+ = ERROR and CRITICAL only
+    // WARNING+ = WARNING, ERROR, CRITICAL
+    // INFO+ = INFO, WARNING, ERROR, CRITICAL
+    // ALL = all logs including DEBUG
     return [
-      { value: "ALL", label: "ALL" },
-      { value: "DEBUG", label: "DEBUG+" },
-      { value: "INFO", label: "INFO+" },
+      { value: "ERROR", label: "ERROR+" },
       { value: "WARNING", label: "WARNING+" },
-      { value: "ERROR", label: "ERROR" },
+      { value: "INFO", label: "INFO+" },
+      { value: "ALL", label: "ALL" },
     ];
   },
 
@@ -34,6 +38,15 @@ window.DashboardMixins.logs = {
         (target) =>
           String(target.target_id || target.test_id || "") === wanted,
       ) || null
+    );
+  },
+
+  _getLogTargetsByIds(targetIds) {
+    if (!Array.isArray(targetIds) || !targetIds.length) return [];
+    const targets = Array.isArray(this.logTargets) ? this.logTargets : [];
+    const wantedSet = new Set(targetIds.map(id => String(id)));
+    return targets.filter(
+      (target) => wantedSet.has(String(target.target_id || target.test_id || ""))
     );
   },
 
@@ -61,6 +74,19 @@ window.DashboardMixins.logs = {
     this.logWorkerFilter = workerId ? this._normalizeWorkerId(workerId) : "";
   },
 
+  _getSelectedWorkerFilters() {
+    const ids = Array.isArray(this.logSelectedTargetIds) ? this.logSelectedTargetIds : [];
+    if (!ids.length) return [];
+    const targets = this._getLogTargetsByIds(ids);
+    if (targets.some(t => String(t.kind || "") === "all" || String(t.target_id || "") === "all")) {
+      return [];
+    }
+    return targets.map(t => {
+      const workerId = t.worker_id != null ? String(t.worker_id) : "";
+      return workerId ? this._normalizeWorkerId(workerId) : "";
+    }).filter(Boolean);
+  },
+
   updateLogTargetsFromWorkers(workers) {
     if (this.mode !== "live") return;
     const list = Array.isArray(workers) ? workers : [];
@@ -81,6 +107,15 @@ window.DashboardMixins.logs = {
     }
 
     const targets = [];
+    targets.push({
+      target_id: "all",
+      test_id: this.testId || null,
+      worker_id: null,
+      worker_group_id: 0,
+      worker_group_count: 1,
+      label: "All",
+      kind: "all",
+    });
     for (const source of ["ORCHESTRATOR", "CONTROLLER", "UNKNOWN"]) {
       targets.push({
         target_id: `parent:${source}`,
@@ -92,15 +127,6 @@ window.DashboardMixins.logs = {
         kind: "parent",
       });
     }
-    targets.push({
-      target_id: "all",
-      test_id: this.testId || null,
-      worker_id: null,
-      worker_group_id: 0,
-      worker_group_count: 1,
-      label: "All",
-      kind: "all",
-    });
 
     const workerItems = Array.from(workerMap.values());
     workerItems.sort((a, b) => {
@@ -124,27 +150,29 @@ window.DashboardMixins.logs = {
     }
 
     this.logTargets = targets;
-    if (!this.logSelectedTargetId && this.logTargets.length) {
+    const currentIds = Array.isArray(this.logSelectedTargetIds) ? this.logSelectedTargetIds : [];
+    if (!currentIds.length && this.logTargets.length) {
       const fallback = this._getDefaultLogTarget();
       if (fallback) {
         const targetId = fallback.target_id || fallback.test_id || "";
         if (targetId) {
-          this.logSelectedTargetId = String(targetId);
+          this.logSelectedTargetIds = [String(targetId)];
           this._applyLogTargetSelection(fallback);
         }
       }
-    } else if (
-      this.logSelectedTargetId &&
-      !this._getLogTargetById(this.logSelectedTargetId) &&
-      this.logTargets.length
-    ) {
-      const fallback = this._getDefaultLogTarget();
-      if (fallback) {
-        const targetId = fallback.target_id || fallback.test_id || "";
-        if (targetId) {
-          this.logSelectedTargetId = String(targetId);
-          this._applyLogTargetSelection(fallback);
+    } else if (currentIds.length) {
+      const validIds = currentIds.filter(id => this._getLogTargetById(id));
+      if (!validIds.length && this.logTargets.length) {
+        const fallback = this._getDefaultLogTarget();
+        if (fallback) {
+          const targetId = fallback.target_id || fallback.test_id || "";
+          if (targetId) {
+            this.logSelectedTargetIds = [String(targetId)];
+            this._applyLogTargetSelection(fallback);
+          }
         }
+      } else {
+        this.logSelectedTargetIds = validIds;
       }
     }
   },
@@ -171,27 +199,29 @@ window.DashboardMixins.logs = {
       if (Array.isArray(targets)) {
         this.logTargets = targets;
       }
-      if (!this.logSelectedTargetId && this.logTargets.length) {
+      const currentIds = Array.isArray(this.logSelectedTargetIds) ? this.logSelectedTargetIds : [];
+      if (!currentIds.length && this.logTargets.length) {
         const fallback = this._getDefaultLogTarget();
         if (fallback) {
           const targetId = fallback.target_id || fallback.test_id || "";
           if (targetId) {
-            this.logSelectedTargetId = String(targetId);
+            this.logSelectedTargetIds = [String(targetId)];
             this._applyLogTargetSelection(fallback);
           }
         }
-      } else if (
-        this.logSelectedTargetId &&
-        !this._getLogTargetById(this.logSelectedTargetId) &&
-        this.logTargets.length
-      ) {
-        const fallback = this._getDefaultLogTarget();
-        if (fallback) {
-          const targetId = fallback.target_id || fallback.test_id || "";
-          if (targetId) {
-            this.logSelectedTargetId = String(targetId);
-            this._applyLogTargetSelection(fallback);
+      } else if (currentIds.length) {
+        const validIds = currentIds.filter(id => this._getLogTargetById(id));
+        if (!validIds.length && this.logTargets.length) {
+          const fallback = this._getDefaultLogTarget();
+          if (fallback) {
+            const targetId = fallback.target_id || fallback.test_id || "";
+            if (targetId) {
+              this.logSelectedTargetIds = [String(targetId)];
+              this._applyLogTargetSelection(fallback);
+            }
           }
+        } else {
+          this.logSelectedTargetIds = validIds;
         }
       }
       const logs = data && Array.isArray(data.logs) ? data.logs : [];
@@ -202,14 +232,8 @@ window.DashboardMixins.logs = {
   },
 
   onLogTargetChange() {
-    const target = this._getLogTargetById(this.logSelectedTargetId);
-    if (target) {
-      this._applyLogTargetSelection(target);
-    } else {
-      this.logSelectedTestId = this.testId;
-      this.logWorkerFilter = "";
-    }
-    // Filtering is done client-side via filteredLogs() - no need to reload
+    // Multi-select: filtering is handled directly in filteredLogs() using logSelectedTargetIds
+    // This method is kept for any additional side effects if needed
   },
 
   appendLogs(logs) {
@@ -375,14 +399,16 @@ window.DashboardMixins.logs = {
     const levelFilter = this._normalizeLogLevel(this.logLevelFilter || "INFO");
     const minWeight =
       levelFilter === "ALL" ? 0 : this._logLevelWeight(levelFilter);
-    const workerFilter = String(this.logWorkerFilter || "");
+    const workerFilters = this._getSelectedWorkerFilters();
+    const hasWorkerFilters = workerFilters.length > 0;
+    const workerFilterSet = new Set(workerFilters);
     return logs.filter((log) => {
       if (levelFilter !== "ALL") {
         if (this._logLevelWeight(log.level) < minWeight) return false;
       }
-      if (workerFilter) {
+      if (hasWorkerFilters) {
         const worker = this._normalizeWorkerId(log.worker_id);
-        if (worker !== workerFilter) return false;
+        if (!workerFilterSet.has(worker)) return false;
       }
       return true;
     });

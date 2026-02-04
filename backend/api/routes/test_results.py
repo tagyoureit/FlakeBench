@@ -27,10 +27,83 @@ from backend.connectors import postgres_pool, snowflake_pool
 from backend.core.orchestrator import orchestrator
 from backend.core.results_store import update_parent_run_aggregate
 from backend.core.test_registry import registry
+from backend.core.cost_calculator import calculate_estimated_cost, calculate_cost_efficiency
 from backend.api.error_handling import http_exception
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _build_cost_fields(
+    duration_seconds: float,
+    warehouse_size: str | None,
+    total_operations: int = 0,
+    qps: float = 0.0,
+    table_type: str | None = None,
+    postgres_instance_size: str | None = None,
+) -> dict[str, Any]:
+    """
+    Build cost-related fields for API responses.
+
+    Args:
+        duration_seconds: Test duration in seconds
+        warehouse_size: Warehouse size string (e.g., "XSMALL", "MEDIUM")
+        total_operations: Total operations executed (for efficiency metrics)
+        qps: Queries per second (for efficiency metrics)
+        table_type: Table type (e.g., "HYBRID", "SNOWFLAKE_POSTGRES")
+                   Postgres uses instance-based pricing, not warehouse credits
+        postgres_instance_size: For Postgres, explicit instance size override.
+                               If not provided, looks up from configured Postgres host.
+
+    Returns:
+        Dictionary with cost fields to merge into response
+    """
+    from backend.core.cost_calculator import get_postgres_instance_size_by_host
+    
+    # For Postgres, look up the actual instance size from the configured host
+    effective_postgres_size = postgres_instance_size
+    if not effective_postgres_size and table_type:
+        table_type_upper = table_type.upper().strip()
+        if table_type_upper in ("POSTGRES", "SNOWFLAKE_POSTGRES"):
+            # Try to get actual instance size from configured Postgres host
+            actual_size = get_postgres_instance_size_by_host(settings.SNOWFLAKE_POSTGRES_HOST)
+            if actual_size:
+                effective_postgres_size = actual_size
+            else:
+                # Fall back to default
+                effective_postgres_size = settings.POSTGRES_INSTANCE_SIZE
+    
+    cost_info = calculate_estimated_cost(
+        duration_seconds=duration_seconds,
+        warehouse_size=warehouse_size,
+        dollars_per_credit=settings.COST_DOLLARS_PER_CREDIT,
+        table_type=table_type,
+        postgres_instance_size=effective_postgres_size,
+    )
+
+    result: dict[str, Any] = {
+        "credits_used": cost_info["credits_used"],
+        "estimated_cost_usd": cost_info["estimated_cost_usd"],
+        "cost_per_hour": cost_info["cost_per_hour"],
+        "credits_per_hour": cost_info.get("credits_per_hour", 0.0),
+        "cost_calculation_method": cost_info["calculation_method"],
+        "postgres_instance_size": effective_postgres_size if table_type and table_type.upper().strip() in ("POSTGRES", "SNOWFLAKE_POSTGRES") else None,
+    }
+
+    # Add efficiency metrics if we have operation data AND have a cost to work with
+    if (total_operations > 0 or qps > 0) and cost_info["estimated_cost_usd"] > 0:
+        efficiency = calculate_cost_efficiency(
+            total_cost=cost_info["estimated_cost_usd"],
+            total_operations=total_operations,
+            qps=qps,
+            duration_seconds=duration_seconds,
+        )
+        result["cost_per_operation"] = efficiency["cost_per_operation"]
+        result["cost_per_1000_ops"] = efficiency["cost_per_1000_ops"]
+        result["cost_per_1k_ops"] = efficiency["cost_per_1000_ops"]  # Alias for frontend
+        result["cost_per_1000_qps"] = efficiency["cost_per_1000_qps"]
+
+    return result
 
 _TXN_RE = re.compile(r"\btransaction\s+\d+\b", re.IGNORECASE)
 _SF_QUERY_ID_PREFIX_RE = re.compile(
@@ -348,6 +421,36 @@ def _to_float_or_none(v: Any) -> float | None:
         return None
 
 
+def _compute_latency_spread(p50: float | None, p95: float | None) -> dict[str, Any]:
+    """
+    Compute latency spread ratio (P95/P50) and warning flag.
+
+    The spread ratio indicates latency variance - a high ratio means tail latencies
+    are much worse than typical (median) latencies. This is common with hybrid tables
+    under load, while interactive tables tend to have more consistent latencies.
+
+    Args:
+        p50: P50 (median) latency in milliseconds
+        p95: P95 latency in milliseconds
+
+    Returns:
+        Dictionary with:
+        - latency_spread_ratio: P95/P50 ratio (None if not computable)
+        - latency_spread_warning: True if ratio > 5x (high variance)
+    """
+    if not p50 or not p95 or p50 <= 0:
+        return {
+            "latency_spread_ratio": None,
+            "latency_spread_warning": False,
+        }
+
+    ratio = p95 / p50
+    return {
+        "latency_spread_ratio": round(ratio, 1),
+        "latency_spread_warning": ratio > 5.0,
+    }
+
+
 async def _fetch_warehouse_metrics(*, pool: Any, test_id: str) -> dict[str, Any]:
     """
     Fetch test-level warehouse queueing + MCW metrics.
@@ -460,6 +563,122 @@ async def _fetch_postgres_stats(
             "active_connections": (
                 int(active_connections) if active_connections is not None else None
             ),
+        },
+    }
+
+
+async def _fetch_pg_enrichment(*, pool: Any, test_id: str) -> dict[str, Any]:
+    """
+    Fetch pg_stat_statements enrichment data for a Postgres test.
+    
+    Returns server-side execution metrics captured via pg_stat_statements
+    during the measurement phase of the test.
+    """
+    prefix = _prefix()
+    
+    query = f"""
+    SELECT
+        PG_TOTAL_CALLS,
+        PG_TOTAL_EXEC_TIME_MS,
+        PG_MEAN_EXEC_TIME_MS,
+        PG_CACHE_HIT_RATIO,
+        PG_SHARED_BLKS_HIT,
+        PG_SHARED_BLKS_READ,
+        PG_ROWS_RETURNED,
+        PG_QUERY_PATTERN_COUNT,
+        PG_SHARED_BLK_READ_TIME_MS,
+        PG_SHARED_BLK_WRITE_TIME_MS,
+        PG_WAL_RECORDS,
+        PG_WAL_BYTES,
+        PG_TEMP_BLKS_READ,
+        PG_TEMP_BLKS_WRITTEN,
+        PG_STATS_BY_KIND,
+        PG_STAT_STATEMENTS_AVAILABLE,
+        PG_TRACK_IO_TIMING,
+        PG_VERSION
+    FROM {prefix}.TEST_RESULTS
+    WHERE TEST_ID = ?
+    """
+    
+    rows = await pool.execute_query(query, params=[test_id])
+    
+    if not rows:
+        return {"pg_enrichment_available": False}
+    
+    row = rows[0]
+    (
+        total_calls,
+        total_exec_time_ms,
+        mean_exec_time_ms,
+        cache_hit_ratio,
+        shared_blks_hit,
+        shared_blks_read,
+        rows_returned,
+        query_pattern_count,
+        blk_read_time_ms,
+        blk_write_time_ms,
+        wal_records,
+        wal_bytes,
+        temp_blks_read,
+        temp_blks_written,
+        stats_by_kind,
+        pg_stat_available,
+        track_io_timing,
+        pg_version,
+    ) = row
+    
+    # If pg_stat_statements availability was never checked (old test), return no capabilities
+    if pg_stat_available is None:
+        return {"pg_enrichment_available": False}
+    
+    # If pg_stat_statements was checked but wasn't available
+    if not pg_stat_available:
+        return {
+            "pg_enrichment_available": False,
+            "pg_capabilities": {
+                "pg_stat_statements_available": False,
+                "track_io_timing": bool(track_io_timing),
+                "pg_version": pg_version,
+            },
+        }
+    
+    # Parse stats_by_kind JSON if present
+    by_kind = None
+    if stats_by_kind:
+        try:
+            import json
+            by_kind = json.loads(stats_by_kind) if isinstance(stats_by_kind, str) else stats_by_kind
+        except Exception:
+            by_kind = None
+    
+    return {
+        "pg_enrichment_available": True,
+        "pg_enrichment": {
+            "total_calls": int(total_calls or 0),
+            "total_exec_time_ms": _to_float_or_none(total_exec_time_ms),
+            "mean_exec_time_ms": _to_float_or_none(mean_exec_time_ms),
+            "cache_hit_ratio": _to_float_or_none(cache_hit_ratio),
+            "cache_hit_pct": (
+                round(float(cache_hit_ratio) * 100, 2) 
+                if cache_hit_ratio is not None 
+                else None
+            ),
+            "shared_blks_hit": int(shared_blks_hit or 0),
+            "shared_blks_read": int(shared_blks_read or 0),
+            "rows_returned": int(rows_returned or 0),
+            "query_pattern_count": int(query_pattern_count or 0),
+            "blk_read_time_ms": _to_float_or_none(blk_read_time_ms),
+            "blk_write_time_ms": _to_float_or_none(blk_write_time_ms),
+            "wal_records": int(wal_records or 0) if wal_records else None,
+            "wal_bytes": int(wal_bytes or 0) if wal_bytes else None,
+            "temp_blks_read": int(temp_blks_read or 0) if temp_blks_read else None,
+            "temp_blks_written": int(temp_blks_written or 0) if temp_blks_written else None,
+            "by_kind": by_kind,
+        },
+        "pg_capabilities": {
+            "pg_stat_statements_available": True,
+            "track_io_timing": bool(track_io_timing),
+            "pg_version": pg_version,
         },
     }
 
@@ -1419,7 +1638,8 @@ async def list_tests(
             CONCURRENT_CONNECTIONS,
             DURATION_SECONDS,
             FAILURE_REASON,
-            ENRICHMENT_STATUS
+            ENRICHMENT_STATUS,
+            TEST_CONFIG:template_config:postgres_instance_size::STRING AS POSTGRES_INSTANCE_SIZE
         FROM {_prefix()}.TEST_RESULTS
         {where_sql}
         ORDER BY START_TIME DESC
@@ -1450,6 +1670,7 @@ async def list_tests(
                 duration,
                 failure_reason,
                 enrichment_status,
+                postgres_instance_size,
             ) = row
 
             # For in-memory tests, get the current phase from the registry
@@ -1490,6 +1711,14 @@ async def list_tests(
                     "concurrent_connections": int(concurrency or 0),
                     "duration": float(duration or 0),
                     "failure_reason": failure_reason,
+                    **_build_cost_fields(
+                        float(duration or 0),
+                        wh_size,
+                        total_operations=int(float(ops or 0) * float(duration or 0)),
+                        qps=float(ops or 0),
+                        table_type=table_type_db,
+                        postgres_instance_size=postgres_instance_size,
+                    ),
                 }
             )
 
@@ -1518,7 +1747,9 @@ async def search_tests(q: str) -> dict[str, Any]:
             P50_LATENCY_MS,
             P95_LATENCY_MS,
             P99_LATENCY_MS,
-            ERROR_RATE
+            ERROR_RATE,
+            DURATION_SECONDS,
+            TEST_CONFIG:template_config:postgres_instance_size::STRING AS POSTGRES_INSTANCE_SIZE
         FROM {_prefix()}.TEST_RESULTS
         WHERE (
             LOWER(TEST_NAME) LIKE ?
@@ -1549,6 +1780,8 @@ async def search_tests(q: str) -> dict[str, Any]:
                 p95,
                 p99,
                 err_rate,
+                duration,
+                postgres_instance_size,
             ) = row
             results.append(
                 {
@@ -1564,7 +1797,15 @@ async def search_tests(q: str) -> dict[str, Any]:
                     "p95_latency": float(p95 or 0),
                     "p99_latency": float(p99 or 0),
                     "error_rate": float(err_rate or 0) * 100.0,
-                    "duration": 0,
+                    "duration": float(duration or 0),
+                    **_build_cost_fields(
+                        float(duration or 0),
+                        wh_size,
+                        total_operations=int(float(ops or 0) * float(duration or 0)),
+                        qps=float(ops or 0),
+                        table_type=table_type_db,
+                        postgres_instance_size=postgres_instance_size,
+                    ),
                 }
             )
         return {"results": results}
@@ -2074,6 +2315,15 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     "total_expected_seconds": total_expected,
                     "elapsed_display_seconds": round(elapsed_secs, 1),
                 }
+                # Add cost estimation for running tests (based on elapsed time)
+                payload.update(
+                    _build_cost_fields(
+                        duration_seconds=elapsed_secs,
+                        warehouse_size=cfg.get("warehouse_size"),
+                        table_type=table_type_u,
+                        postgres_instance_size=cfg.get("postgres_instance_size"),
+                    )
+                )
                 if is_postgres:
                     try:
                         payload.update(
@@ -2084,6 +2334,13 @@ async def get_test(test_id: str) -> dict[str, Any]:
                         )
                     except Exception as e:
                         logger.debug("Postgres stats unavailable: %s", e)
+                # Compute latency spread ratio (P95/P50) - will be null for running tests
+                payload.update(
+                    _compute_latency_spread(
+                        p50=payload.get("p50_latency_ms") or payload.get("p50_latency"),
+                        p95=payload.get("p95_latency_ms") or payload.get("p95_latency"),
+                    )
+                )
                 return payload
             raise HTTPException(status_code=404, detail="Test not found")
 
@@ -2301,8 +2558,29 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "end_time": end_time_live.isoformat()
             if end_time_live and hasattr(end_time_live, "isoformat")
             else None,
-            "duration_seconds": float(duration_seconds or 0),
-            "duration": float(duration_seconds or 0),
+            # Use configured duration from template, not actual elapsed time
+            "duration_seconds": int(
+                float(
+                    (cfg.get("scenario", {}) if isinstance(cfg, dict) else {}).get("duration_seconds")
+                    or (cfg.get("duration") if isinstance(cfg, dict) else 0)
+                    or 0
+                )
+            ),
+            "duration": int(
+                float(
+                    (cfg.get("scenario", {}) if isinstance(cfg, dict) else {}).get("duration_seconds")
+                    or (cfg.get("duration") if isinstance(cfg, dict) else 0)
+                    or 0
+                )
+            ),
+            "elapsed_seconds": float(duration_seconds or 0),  # Actual elapsed time
+            "warmup_seconds": int(
+                float(
+                    (cfg.get("scenario", {}) if isinstance(cfg, dict) else {}).get("warmup_seconds")
+                    or (cfg.get("warmup") if isinstance(cfg, dict) else 0)
+                    or 0
+                )
+            ),
             "concurrent_connections": int(concurrency or 0),
             "load_mode": load_mode,
             "target_qps": target_qps if load_mode == "QPS" else None,
@@ -2439,6 +2717,15 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 and str(status_db or "").upper() == "COMPLETED"
                 and str(enrichment_status_live or "").upper() == "FAILED"
             ),
+            # Cost estimation fields
+            **_build_cost_fields(
+                duration_seconds=float(duration_seconds or 0),
+                warehouse_size=warehouse_size,
+                total_operations=int(total_operations or 0),
+                qps=float(qps or 0),
+                table_type=table_type,
+                postgres_instance_size=cfg.get("template_config", {}).get("postgres_instance_size") if isinstance(cfg, dict) else None,
+            ),
         }
 
         if phase_live:
@@ -2543,6 +2830,13 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     ),
                 )
             )
+            # 8. pg_stat_statements enrichment (postgres tables only)
+            parallel_tasks.append(
+                (
+                    "pg_enrichment",
+                    _fetch_pg_enrichment(pool=pool, test_id=test_id),
+                )
+            )
 
         # Execute all queries in parallel
         task_names = [name for name, _ in parallel_tasks]
@@ -2616,6 +2910,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     "warehouse_metrics",
                     "cluster_breakdown",
                     "postgres_stats",
+                    "pg_enrichment",
                 ):
                     payload.update(result)
 
@@ -2787,6 +3082,22 @@ async def get_test(test_id: str) -> dict[str, Any]:
         final_enrichment = str(enrichment_status_live or "").upper()
         if final_status == "COMPLETED" and final_enrichment == "PENDING":
             payload["phase"] = "PROCESSING"
+
+        # Compute latency spread ratio (P95/P50) to highlight variance
+        # End-to-end (app-side) spread
+        e2e_spread = _compute_latency_spread(
+            p50=payload.get("p50_latency_ms"),
+            p95=payload.get("p95_latency_ms"),
+        )
+        payload.update(e2e_spread)
+
+        # SF execution spread (for enriched queries from QUERY_HISTORY)
+        sf_spread = _compute_latency_spread(
+            p50=payload.get("sf_p50_latency_ms"),
+            p95=payload.get("sf_p95_latency_ms"),
+        )
+        payload["sf_latency_spread_ratio"] = sf_spread.get("latency_spread_ratio")
+        payload["sf_latency_spread_warning"] = sf_spread.get("latency_spread_warning")
 
         return payload
     except HTTPException:
@@ -2981,6 +3292,9 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
         WHERE TEST_ID = ?
         """
         rows = await pool.execute_query(query, params=[test_id])
+        qtag = None
+        start_time = None
+        end_time = None
         if not rows:
             # Best-effort: allow this endpoint for running tests (registry) too.
             running = await registry.get(test_id)
@@ -2991,16 +3305,10 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
                 if running
                 else None
             )
-            return ErrorSummaryResponse(
-                test_id=test_id, query_tag=qtag, available=False, rows=[]
-            )
-
-        (query_tag, start_time, end_time) = rows[0]
-        qtag = str(query_tag or "").strip() or None
-        if not qtag:
-            return ErrorSummaryResponse(
-                test_id=test_id, query_tag=None, available=False, rows=[]
-            )
+            # Continue anyway - we can still query QUERY_EXECUTIONS
+        else:
+            (query_tag, start_time, end_time) = rows[0]
+            qtag = str(query_tag or "").strip() or None
 
         # Build a bounded time window around the test.
         start_iso = None
@@ -3041,30 +3349,10 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
               END_TIME_RANGE_END => CURRENT_TIMESTAMP(),
             """
 
-        # 1) Snowflake-side errors (QUERY_HISTORY)
-        sf_query = f"""
-        SELECT
-          QUERY_TYPE,
-          ERROR_CODE,
-          ERROR_MESSAGE,
-          COUNT(*) AS N
-        FROM TABLE(
-          INFORMATION_SCHEMA.QUERY_HISTORY(
-            {time_window_sql}
-            RESULT_LIMIT => 10000
-          )
-        )
-        WHERE QUERY_TAG = ?
-          AND COALESCE(ERROR_CODE, 0) <> 0
-        GROUP BY 1, 2, 3
-        ORDER BY N DESC
-        LIMIT 1000
-        """
-        sf_rows = await pool.execute_query(sf_query, params=[*time_params, qtag])
-        if not sf_rows:
-            # Defensive fallback: if timestamp bounds are inconsistent (e.g. NTZ drift) or
-            # the bounded window misses rows, fall back to a simple recent scan.
-            sf_query_fallback = """
+        # 1) Snowflake-side errors (QUERY_HISTORY) - only if we have a query_tag
+        sf_rows: list[Any] = []
+        if qtag:
+            sf_query = f"""
             SELECT
               QUERY_TYPE,
               ERROR_CODE,
@@ -3072,22 +3360,47 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
               COUNT(*) AS N
             FROM TABLE(
               INFORMATION_SCHEMA.QUERY_HISTORY(
-                END_TIME_RANGE_START => DATEADD('hour', -12, CURRENT_TIMESTAMP()),
-                END_TIME_RANGE_END => CURRENT_TIMESTAMP(),
+                {time_window_sql}
                 RESULT_LIMIT => 10000
               )
             )
             WHERE QUERY_TAG = ?
-              AND (COALESCE(ERROR_CODE, 0) <> 0 OR NULLIF(TRIM(ERROR_MESSAGE), '') IS NOT NULL)
+              AND COALESCE(ERROR_CODE, 0) <> 0
             GROUP BY 1, 2, 3
             ORDER BY N DESC
             LIMIT 1000
             """
-            sf_rows = await pool.execute_query(sf_query_fallback, params=[qtag])
+            sf_rows = await pool.execute_query(sf_query, params=[*time_params, qtag])
+            if not sf_rows:
+                # Defensive fallback: if timestamp bounds are inconsistent (e.g. NTZ drift) or
+                # the bounded window misses rows, fall back to a simple recent scan.
+                sf_query_fallback = """
+                SELECT
+                  QUERY_TYPE,
+                  ERROR_CODE,
+                  ERROR_MESSAGE,
+                  COUNT(*) AS N
+                FROM TABLE(
+                  INFORMATION_SCHEMA.QUERY_HISTORY(
+                    END_TIME_RANGE_START => DATEADD('hour', -12, CURRENT_TIMESTAMP()),
+                    END_TIME_RANGE_END => CURRENT_TIMESTAMP(),
+                    RESULT_LIMIT => 10000
+                  )
+                )
+                WHERE QUERY_TAG = ?
+                  AND (COALESCE(ERROR_CODE, 0) <> 0 OR NULLIF(TRIM(ERROR_MESSAGE), '') IS NOT NULL)
+                GROUP BY 1, 2, 3
+                ORDER BY N DESC
+                LIMIT 1000
+                """
+                sf_rows = await pool.execute_query(sf_query_fallback, params=[qtag])
 
         sf_available = bool(sf_rows)
 
-        # 2) App/local errors (QUERY_EXECUTIONS, LOCAL_ only to avoid double-counting Snowflake errors)
+        # 2) App/local errors from QUERY_EXECUTIONS
+        # If QUERY_HISTORY is available (sf_available), only query LOCAL_ to avoid double-counting.
+        # If QUERY_HISTORY is unavailable (no query_tag), query ALL failed executions.
+        local_filter = "AND QUERY_ID LIKE 'LOCAL\\_%'" if sf_available else ""
         app_query = f"""
         SELECT
           COALESCE(WARMUP, FALSE) AS WARMUP,
@@ -3097,7 +3410,7 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
         FROM {prefix}.QUERY_EXECUTIONS
         WHERE TEST_ID = ?
           AND SUCCESS = FALSE
-          AND QUERY_ID LIKE 'LOCAL\\_%'
+          {local_filter}
         GROUP BY 1, 2, 3
         ORDER BY N DESC
         LIMIT 1000
@@ -3320,6 +3633,17 @@ async def get_test_logs(
                     group_count_val=metrics_group_count,
                 )
 
+            targets.append(
+                {
+                    "target_id": "all",
+                    "test_id": str(test_id),
+                    "worker_id": None,
+                    "worker_group_id": 0,
+                    "worker_group_count": 1,
+                    "label": "All",
+                    "kind": "all",
+                }
+            )
             for source in ["ORCHESTRATOR", "CONTROLLER", "UNKNOWN"]:
                 targets.append(
                     {
@@ -3332,17 +3656,6 @@ async def get_test_logs(
                         "kind": "parent",
                     }
                 )
-            targets.append(
-                {
-                    "target_id": "all",
-                    "test_id": str(test_id),
-                    "worker_id": None,
-                    "worker_group_id": 0,
-                    "worker_group_count": 1,
-                    "label": "All",
-                    "kind": "all",
-                }
-            )
 
             worker_items = list(worker_targets.values())
             worker_items.sort(
@@ -3538,7 +3851,17 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
     try:
         pool = snowflake_pool.get_default_pool()
         latency_aggregation_method = None
-        query = f"""
+        rows: list[tuple[Any, ...]] = []
+
+        # All runs store metrics in WORKER_METRICS_SNAPSHOTS with PHASE column.
+        # Query using run_id (which equals test_id for parent runs).
+        run_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {_prefix()}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_rows[0][0] if run_rows else test_id
+
+        worker_query = f"""
         SELECT
             TIMESTAMP,
             ELAPSED_SECONDS,
@@ -3547,210 +3870,197 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
             P95_LATENCY_MS,
             P99_LATENCY_MS,
             ACTIVE_CONNECTIONS,
-            TARGET_WORKERS,
-            CUSTOM_METRICS
-        FROM {_prefix()}.METRICS_SNAPSHOTS
-        WHERE TEST_ID = ?
+            TARGET_CONNECTIONS,
+            CUSTOM_METRICS,
+            PHASE
+        FROM {_prefix()}.WORKER_METRICS_SNAPSHOTS
+        WHERE RUN_ID = ?
         ORDER BY TIMESTAMP ASC
         """
-        rows = await pool.execute_query(query, params=[test_id])
-        if not rows:
-            run_rows = await pool.execute_query(
-                f"SELECT RUN_ID FROM {_prefix()}.TEST_RESULTS WHERE TEST_ID = ?",
-                params=[test_id],
-            )
-            run_id = run_rows[0][0] if run_rows else None
-            if run_id and str(run_id) == str(test_id):
-                worker_query = f"""
-                SELECT
-                    TIMESTAMP,
-                    ELAPSED_SECONDS,
-                    QPS,
-                    P50_LATENCY_MS,
-                    P95_LATENCY_MS,
-                    P99_LATENCY_MS,
-                    ACTIVE_CONNECTIONS,
-                    TARGET_CONNECTIONS,
-                    CUSTOM_METRICS,
-                    PHASE
-                FROM {_prefix()}.WORKER_METRICS_SNAPSHOTS
-                WHERE RUN_ID = ?
-                ORDER BY TIMESTAMP ASC
-                """
-                worker_rows = await pool.execute_query(
-                    worker_query, params=[str(run_id)]
+        worker_rows = await pool.execute_query(worker_query, params=[str(run_id)])
+        global_warmup_end_elapsed: float | None = None
+        if worker_rows:
+            latency_aggregation_method = LATENCY_AGGREGATION_METHOD
+
+            @dataclass
+            class _Bucket:
+                timestamp: Any
+                elapsed_seconds: float
+                ops_per_sec: float
+                p50_latency_ms: list[float]
+                p95_latency_ms: list[float]
+                p99_latency_ms: list[float]
+                active_connections: int
+                target_workers: int
+                custom_metrics: list[Any]
+                has_warmup: bool
+                has_measurement: bool
+
+            buckets: dict[float, _Bucket] = {}
+            first_warmup_timestamp: Any = None
+            first_measurement_timestamp: Any = None
+            for (
+                timestamp,
+                elapsed,
+                ops_per_sec,
+                p50,
+                p95,
+                p99,
+                active_connections,
+                target_connections,
+                custom_metrics,
+                phase,
+            ) in worker_rows:
+                phase_value = str(phase or "").strip().upper()
+                is_warmup = phase_value == "WARMUP"
+                is_measurement = phase_value == "MEASUREMENT"
+                if phase_value and phase_value not in ("WARMUP", "MEASUREMENT"):
+                    continue
+                if is_warmup and first_warmup_timestamp is None and timestamp:
+                    first_warmup_timestamp = timestamp
+                if is_measurement and first_measurement_timestamp is None and timestamp:
+                    first_measurement_timestamp = timestamp
+                try:
+                    # Aggregate to whole-second buckets for history charts.
+                    bucket = round(float(elapsed or 0), 0)
+                except Exception:
+                    bucket = 0.0
+                agg = buckets.get(bucket)
+                if not agg:
+                    agg = _Bucket(
+                        timestamp=timestamp,
+                        elapsed_seconds=float(elapsed or 0),
+                        ops_per_sec=0.0,
+                        p50_latency_ms=[],
+                        p95_latency_ms=[],
+                        p99_latency_ms=[],
+                        active_connections=0,
+                        target_workers=0,
+                        custom_metrics=[],
+                        has_warmup=is_warmup,
+                        has_measurement=is_measurement,
+                    )
+                    buckets[bucket] = agg
+                if is_warmup:
+                    agg.has_warmup = True
+                if is_measurement:
+                    agg.has_measurement = True
+                if timestamp and agg.timestamp and timestamp < agg.timestamp:
+                    agg.timestamp = timestamp
+                agg.elapsed_seconds = max(float(elapsed or 0), agg.elapsed_seconds)
+                agg.ops_per_sec += float(ops_per_sec or 0)
+                agg.p50_latency_ms.append(float(p50 or 0))
+                agg.p95_latency_ms.append(float(p95 or 0))
+                agg.p99_latency_ms.append(float(p99 or 0))
+                agg.active_connections = max(
+                    agg.active_connections, int(active_connections or 0)
                 )
-                if worker_rows:
-                    latency_aggregation_method = LATENCY_AGGREGATION_METHOD
+                agg.target_workers = max(
+                    agg.target_workers, int(target_connections or 0)
+                )
+                if custom_metrics:
+                    agg.custom_metrics.append(custom_metrics)
 
-                    @dataclass
-                    class _Bucket:
-                        timestamp: Any
-                        elapsed_seconds: float
-                        ops_per_sec: float
-                        p50_latency_ms: list[float]
-                        p95_latency_ms: list[float]
-                        p99_latency_ms: list[float]
-                        active_connections: int
-                        target_workers: int
-                        custom_metrics: list[Any]
-                        has_warmup: bool
-                        has_measurement: bool
+            def _avg(values: list[float]) -> float:
+                if not values:
+                    return 0.0
+                return float(sum(values) / len(values))
 
-                    buckets: dict[float, _Bucket] = {}
-                    for (
-                        timestamp,
-                        elapsed,
-                        ops_per_sec,
-                        p50,
-                        p95,
-                        p99,
-                        active_connections,
-                        target_connections,
-                        custom_metrics,
-                        phase,
-                    ) in worker_rows:
-                        phase_value = str(phase or "").strip().upper()
-                        is_warmup = phase_value == "WARMUP"
-                        is_measurement = phase_value == "MEASUREMENT"
-                        if phase_value and phase_value not in ("WARMUP", "MEASUREMENT"):
-                            continue
+            def _max(values: list[float]) -> float:
+                if not values:
+                    return 0.0
+                return float(max(values))
+
+            def _sum_dicts(
+                dicts: list[dict[str, Any]],
+            ) -> dict[str, float]:
+                out: dict[str, float] = {}
+                for d in dicts:
+                    for key, value in d.items():
                         try:
-                            # Aggregate to whole-second buckets for history charts.
-                            bucket = round(float(elapsed or 0), 0)
+                            out[key] = out.get(key, 0.0) + float(value or 0)
                         except Exception:
-                            bucket = 0.0
-                        agg = buckets.get(bucket)
-                        if not agg:
-                            agg = _Bucket(
-                                timestamp=timestamp,
-                                elapsed_seconds=float(elapsed or 0),
-                                ops_per_sec=0.0,
-                                p50_latency_ms=[],
-                                p95_latency_ms=[],
-                                p99_latency_ms=[],
-                                active_connections=0,
-                                target_workers=0,
-                                custom_metrics=[],
-                                has_warmup=is_warmup,
-                                has_measurement=is_measurement,
-                            )
-                            buckets[bucket] = agg
-                        if is_warmup:
-                            agg.has_warmup = True
-                        if is_measurement:
-                            agg.has_measurement = True
-                        if timestamp and agg.timestamp and timestamp < agg.timestamp:
-                            agg.timestamp = timestamp
-                        agg.elapsed_seconds = max(
-                            float(elapsed or 0), agg.elapsed_seconds
-                        )
-                        agg.ops_per_sec += float(ops_per_sec or 0)
-                        agg.p50_latency_ms.append(float(p50 or 0))
-                        agg.p95_latency_ms.append(float(p95 or 0))
-                        agg.p99_latency_ms.append(float(p99 or 0))
-                        agg.active_connections = max(
-                            agg.active_connections, int(active_connections or 0)
-                        )
-                        agg.target_workers = max(
-                            agg.target_workers, int(target_connections or 0)
-                        )
-                        if custom_metrics:
-                            agg.custom_metrics.append(custom_metrics)
+                            continue
+                return out
 
-                    def _avg(values: list[float]) -> float:
-                        if not values:
-                            return 0.0
-                        return float(sum(values) / len(values))
+            def _avg_dicts(
+                dicts: list[dict[str, Any]],
+            ) -> dict[str, float]:
+                if not dicts:
+                    return {}
+                summed = _sum_dicts(dicts)
+                return {key: value / len(dicts) for key, value in summed.items()}
 
-                    def _max(values: list[float]) -> float:
-                        if not values:
-                            return 0.0
-                        return float(max(values))
+            def _normalize_metrics(raw: Any) -> dict[str, Any]:
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except Exception:
+                        return {}
+                return raw if isinstance(raw, dict) else {}
 
-                    def _sum_dicts(
-                        dicts: list[dict[str, Any]],
-                    ) -> dict[str, float]:
-                        out: dict[str, float] = {}
-                        for d in dicts:
-                            for key, value in d.items():
-                                try:
-                                    out[key] = out.get(key, 0.0) + float(value or 0)
-                                except Exception:
-                                    continue
-                        return out
+            global_warmup_end_elapsed = None
+            if first_warmup_timestamp and first_measurement_timestamp:
+                try:
+                    delta = first_measurement_timestamp - first_warmup_timestamp
+                    global_warmup_end_elapsed = delta.total_seconds()
+                except Exception:
+                    pass
 
-                    def _avg_dicts(
-                        dicts: list[dict[str, Any]],
-                    ) -> dict[str, float]:
-                        if not dicts:
-                            return {}
-                        summed = _sum_dicts(dicts)
-                        return {
-                            key: value / len(dicts) for key, value in summed.items()
-                        }
-
-                    def _normalize_metrics(raw: Any) -> dict[str, Any]:
-                        if isinstance(raw, str):
-                            try:
-                                raw = json.loads(raw)
-                            except Exception:
-                                return {}
-                        return raw if isinstance(raw, dict) else {}
-
-                    aggregated_rows: list[tuple[Any, ...]] = []
-                    for agg in buckets.values():
-                        custom_list = [
-                            _normalize_metrics(cm) for cm in agg.custom_metrics
-                        ]
-                        app_ops_list = [
-                            cm.get("app_ops_breakdown", {})
-                            for cm in custom_list
-                            if isinstance(cm.get("app_ops_breakdown"), dict)
-                        ]
-                        sf_bench_list = [
-                            cm.get("sf_bench", {})
-                            for cm in custom_list
-                            if isinstance(cm.get("sf_bench"), dict)
-                        ]
-                        warehouse_list = [
-                            cm.get("warehouse", {})
-                            for cm in custom_list
-                            if isinstance(cm.get("warehouse"), dict)
-                        ]
-                        resources_list = [
-                            cm.get("resources", {})
-                            for cm in custom_list
-                            if isinstance(cm.get("resources"), dict)
-                        ]
-                        custom_agg = {
-                            "app_ops_breakdown": _sum_dicts(app_ops_list),
-                            "sf_bench": _sum_dicts(sf_bench_list),
-                            "warehouse": _sum_dicts(warehouse_list),
-                            "resources": _avg_dicts(resources_list),
-                        }
-                        # A bucket is warmup only if it has warmup data AND no measurement data.
-                        # This handles the case where elapsed_seconds resets when transitioning
-                        # to measurement phase, causing bucket overlap with warmup.
+            aggregated_rows: list[tuple[Any, ...]] = []
+            for agg in buckets.values():
+                custom_list = [_normalize_metrics(cm) for cm in agg.custom_metrics]
+                app_ops_list = [
+                    cm.get("app_ops_breakdown", {})
+                    for cm in custom_list
+                    if isinstance(cm.get("app_ops_breakdown"), dict)
+                ]
+                sf_bench_list = [
+                    cm.get("sf_bench", {})
+                    for cm in custom_list
+                    if isinstance(cm.get("sf_bench"), dict)
+                ]
+                warehouse_list = [
+                    cm.get("warehouse", {})
+                    for cm in custom_list
+                    if isinstance(cm.get("warehouse"), dict)
+                ]
+                resources_list = [
+                    cm.get("resources", {})
+                    for cm in custom_list
+                    if isinstance(cm.get("resources"), dict)
+                ]
+                custom_agg = {
+                    "app_ops_breakdown": _sum_dicts(app_ops_list),
+                    "sf_bench": _sum_dicts(sf_bench_list),
+                    "warehouse": _sum_dicts(warehouse_list),
+                    "resources": _avg_dicts(resources_list),
+                }
+                if first_measurement_timestamp is not None and agg.timestamp:
+                    try:
+                        is_warmup_bucket = agg.timestamp < first_measurement_timestamp
+                    except Exception:
                         is_warmup_bucket = agg.has_warmup and not agg.has_measurement
-                        aggregated_rows.append(
-                            (
-                                agg.timestamp,
-                                agg.elapsed_seconds,
-                                agg.ops_per_sec,
-                                _avg(agg.p50_latency_ms),
-                                _max(agg.p95_latency_ms),
-                                _max(agg.p99_latency_ms),
-                                agg.active_connections,
-                                agg.target_workers,
-                                custom_agg,
-                                is_warmup_bucket,
-                            )
-                        )
-                    rows = sorted(aggregated_rows, key=lambda item: item[1] or 0)
+                else:
+                    is_warmup_bucket = agg.has_warmup and not agg.has_measurement
+                aggregated_rows.append(
+                    (
+                        agg.timestamp,
+                        agg.elapsed_seconds,
+                        agg.ops_per_sec,
+                        _avg(agg.p50_latency_ms),
+                        _max(agg.p95_latency_ms),
+                        _max(agg.p99_latency_ms),
+                        agg.active_connections,
+                        agg.target_workers,
+                        custom_agg,
+                        is_warmup_bucket,
+                    )
+                )
+            rows = sorted(aggregated_rows, key=lambda item: item[1] or 0)
 
         snapshots = []
-        warmup_end_elapsed_seconds: float | None = None
+        warmup_end_elapsed_seconds: float | None = global_warmup_end_elapsed if worker_rows else None
         for row in rows:
             is_warmup = False
             if len(row) == 10:
@@ -3766,8 +4076,6 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     custom_metrics,
                     is_warmup,
                 ) = row
-                if not is_warmup and warmup_end_elapsed_seconds is None:
-                    warmup_end_elapsed_seconds = float(elapsed or 0)
             else:
                 (
                     timestamp,
@@ -3823,6 +4131,24 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 except Exception:
                     return 0.0
 
+            def _compute_breakdown_rate(
+                ops_per_sec: float, app_ops: dict[str, Any], count_key: str
+            ) -> float:
+                """Compute instantaneous breakdown rate from total ops_per_sec.
+
+                The workers report cumulative average rates (count/elapsed), not
+                instantaneous rates. To get instantaneous breakdown rates, we
+                distribute ops_per_sec according to the proportion of counts.
+                """
+                try:
+                    total_count = float(app_ops.get("total_count") or 0)
+                    type_count = float(app_ops.get(count_key) or 0)
+                    if total_count <= 0:
+                        return 0.0
+                    return ops_per_sec * (type_count / total_count)
+                except Exception:
+                    return 0.0
+
             snapshots.append(
                 {
                     "timestamp": timestamp.isoformat()
@@ -3858,17 +4184,28 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     "sf_queued_bench": _to_int(sf_bench.get("queued")),
                     # Per-test blocked query count from QUERY_HISTORY (lock contention).
                     "sf_blocked": _to_int(sf_bench.get("blocked")),
-                    # App-side QPS breakdown (from internal counters).
-                    "app_point_lookup_ops_sec": float(
-                        app_ops.get("point_lookup_ops_sec") or 0
+                    # App-side QPS breakdown: compute instantaneous rates by distributing
+                    # ops_per_sec according to the proportion of operation counts.
+                    # The raw *_ops_sec from workers are cumulative averages (count/elapsed),
+                    # not instantaneous rates, so we recalculate here.
+                    "app_point_lookup_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "point_lookup_count"
                     ),
-                    "app_range_scan_ops_sec": float(
-                        app_ops.get("range_scan_ops_sec") or 0
+                    "app_range_scan_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "range_scan_count"
                     ),
-                    "app_insert_ops_sec": float(app_ops.get("insert_ops_sec") or 0),
-                    "app_update_ops_sec": float(app_ops.get("update_ops_sec") or 0),
-                    "app_read_ops_sec": float(app_ops.get("read_ops_sec") or 0),
-                    "app_write_ops_sec": float(app_ops.get("write_ops_sec") or 0),
+                    "app_insert_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "insert_count"
+                    ),
+                    "app_update_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "update_count"
+                    ),
+                    "app_read_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "read_count"
+                    ),
+                    "app_write_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "write_count"
+                    ),
                     "resources_cpu_percent": _to_float(resources.get("cpu_percent")),
                     "resources_memory_mb": _to_float(resources.get("memory_mb")),
                     "resources_process_cpu_percent": _to_float(
@@ -4695,6 +5032,20 @@ async def delete_test(test_id: str) -> None:
                 f"DELETE FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?",
                 params=[test_id],
             )
+
+            # Delete from Hybrid control tables (children first due to FK constraints)
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.WORKER_HEARTBEATS WHERE RUN_ID = ?",
+                params=[test_id],
+            )
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.RUN_CONTROL_EVENTS WHERE RUN_ID = ?",
+                params=[test_id],
+            )
+            await pool.execute_query(
+                f"DELETE FROM {prefix}.RUN_STATUS WHERE RUN_ID = ?",
+                params=[test_id],
+            )
         else:
             # Single test delete (child or standalone test)
             await pool.execute_query(
@@ -5052,6 +5403,78 @@ async def _fetch_relevant_logs(
     return "\n".join(relevant_logs)
 
 
+def _build_latency_variance_text(
+    *,
+    e2e_p50: float | None,
+    e2e_p95: float | None,
+    e2e_spread_ratio: float | None,
+    sf_p50: float | None,
+    sf_p95: float | None,
+    sf_spread_ratio: float | None,
+) -> str:
+    """
+    Build latency variance analysis text for AI prompts.
+
+    The spread ratio (P95/P50) indicates latency variance:
+    - <3x: Low variance, consistent performance
+    - 3-5x: Moderate variance, some tail latency
+    - >5x: High variance, significant tail latency issues
+
+    Comparing end-to-end vs SF execution spread helps identify WHERE variance occurs:
+    - High E2E, Low SF: Network/client-side issues
+    - Low E2E, High SF: Snowflake execution variance (contention, cache, scaling)
+    - High both: Problems at multiple layers
+    """
+    lines = ["LATENCY VARIANCE ANALYSIS:"]
+
+    # End-to-end spread
+    if e2e_spread_ratio is not None:
+        severity = (
+            "LOW (consistent)"
+            if e2e_spread_ratio < 3
+            else "MODERATE" if e2e_spread_ratio < 5 else "HIGH (variable tail latency)"
+        )
+        lines.append(
+            f"- End-to-end spread: {e2e_spread_ratio:.1f}x (P95={e2e_p95:.1f}ms / P50={e2e_p50:.1f}ms) - {severity}"
+        )
+    else:
+        lines.append("- End-to-end spread: N/A")
+
+    # SF execution spread
+    if sf_spread_ratio is not None:
+        severity = (
+            "LOW (consistent)"
+            if sf_spread_ratio < 3
+            else "MODERATE" if sf_spread_ratio < 5 else "HIGH (variable tail latency)"
+        )
+        lines.append(
+            f"- SF execution spread: {sf_spread_ratio:.1f}x (P95={sf_p95:.1f}ms / P50={sf_p50:.1f}ms) - {severity}"
+        )
+    else:
+        lines.append("- SF execution spread: N/A (enrichment data unavailable)")
+
+    # Diagnostic interpretation
+    if e2e_spread_ratio is not None and sf_spread_ratio is not None:
+        if e2e_spread_ratio > 5 and sf_spread_ratio < 3:
+            lines.append(
+                "- DIAGNOSIS: High variance in app/network layer, Snowflake execution is consistent. "
+                "Check network latency, client processing, or connection pool issues."
+            )
+        elif e2e_spread_ratio < 3 and sf_spread_ratio > 5:
+            lines.append(
+                "- DIAGNOSIS: High variance in Snowflake execution, app layer is consistent. "
+                "Check warehouse contention, multi-cluster scaling, cold cache hits, or query compilation."
+            )
+        elif e2e_spread_ratio > 5 and sf_spread_ratio > 5:
+            lines.append(
+                "- DIAGNOSIS: High variance at both layers. "
+                "Multiple bottlenecks - address Snowflake execution variance first, then app/network."
+            )
+        elif e2e_spread_ratio < 3 and sf_spread_ratio < 3:
+            lines.append("- DIAGNOSIS: Consistent latency at all layers. Good performance profile.")
+
+    return "\n".join(lines)
+
 def _build_concurrency_prompt(
     *,
     test_name: str,
@@ -5074,6 +5497,7 @@ def _build_concurrency_prompt(
     wh_text: str,
     context: str | None,
     execution_logs: str,
+    latency_variance_text: str,
 ) -> str:
     """Build prompt for CONCURRENCY mode (fixed worker count)."""
     error_pct = (failed_ops / total_ops * 100) if total_ops > 0 else 0
@@ -5102,6 +5526,8 @@ TEST SUMMARY:
 - Throughput: {ops_per_sec:.1f} ops/sec
 - Latency: p50={p50:.1f}ms, p95={p95:.1f}ms, p99={p99:.1f}ms
 
+{latency_variance_text}
+
 {breakdown_text}
 
 {qps_info}
@@ -5121,17 +5547,22 @@ Provide analysis structured as:
    - Read vs write performance differences?
    - Queue wait times indicating saturation?
 
-3. **Bottleneck Analysis**: What's limiting performance?
+3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
+   - Is variance coming from Snowflake execution or app/network layer?
+   - If high SF spread: warehouse contention, cold cache, multi-cluster scaling?
+   - If high E2E but low SF: network latency, client processing, connection pooling?
+
+4. **Bottleneck Analysis**: What's limiting performance?
    - Compute bound (high CPU, low queue times)?
    - Queue bound (high queue_overload_ms)?
    - Data bound (high bytes_scanned)?
 
-4. **Recommendations**: Specific suggestions:
+5. **Recommendations**: Specific suggestions:
    - Should concurrency be increased or decreased?
    - Would a larger warehouse help?
    - Any query optimization opportunities?
 
-5. **Overall Grade**: A/B/C/D/F with brief justification.
+6. **Overall Grade**: A/B/C/D/F with brief justification.
 
 Keep analysis concise and actionable. Use bullet points with specific numbers."""
 
@@ -5160,6 +5591,7 @@ def _build_qps_prompt(
     wh_text: str,
     context: str | None,
     execution_logs: str,
+    latency_variance_text: str,
 ) -> str:
     """Build prompt for QPS mode (auto-scaling to target)."""
     error_pct = (failed_ops / total_ops * 100) if total_ops > 0 else 0
@@ -5190,6 +5622,8 @@ TEST SUMMARY:
 - Failed Operations: {failed_ops} ({error_pct:.2f}%)
 - Latency: p50={p50:.1f}ms, p95={p95:.1f}ms, p99={p99:.1f}ms
 
+{latency_variance_text}
+
 {breakdown_text}
 
 {qps_info}
@@ -5209,10 +5643,10 @@ Provide analysis structured as:
    - Were there oscillations or instability? (Check the logs for scaling decisions)
    - Queue times indicating the controller couldn't keep up?
 
-3. **Latency Under Load**: How did latency change as load increased?
-   - p50={p50:.1f}ms, p95={p95:.1f}ms, p99={p99:.1f}ms
-   - Any latency degradation signs?
-   - Acceptable latency vs throughput tradeoff?
+3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
+   - Is variance coming from Snowflake execution or app/network layer?
+   - If high SF spread: warehouse contention, cold cache, multi-cluster scaling?
+   - If high E2E but low SF: network latency, client processing, connection pooling?
 
 4. **Bottleneck Analysis**: What limited target achievement?
    - Max workers reached?
@@ -5258,6 +5692,7 @@ def _build_find_max_prompt(
     max_error_rate_pct: float,
     qps_stability_pct: float,
     execution_logs: str,
+    latency_variance_text: str,
 ) -> str:
     """Build prompt for FIND_MAX_CONCURRENCY mode (step-load test)."""
     error_pct = (failed_ops / total_ops * 100) if total_ops > 0 else 0
@@ -5330,6 +5765,8 @@ TEST SUMMARY:
 - Overall Throughput: {ops_per_sec:.1f} ops/sec
 - Overall Latency: p50={p50:.1f}ms, p95={p95:.1f}ms, p99={p99:.1f}ms
 
+{latency_variance_text}
+
 {step_history_text}
 
 {breakdown_text}
@@ -5352,23 +5789,28 @@ Provide analysis structured as:
    - Where did diminishing returns begin?
    - At what point did latency start degrading?
 
-3. **Degradation Point**: What caused the system to stop scaling?
+3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
+   - Is variance coming from Snowflake execution or app/network layer?
+   - If high SF spread: warehouse contention, cold cache, multi-cluster scaling?
+   - If high E2E but low SF: network latency, client processing, connection pooling?
+
+4. **Degradation Point**: What caused the system to stop scaling?
    - Latency spike (compare baseline vs final p95)?
    - Error rate increase?
    - Queue saturation?
    - Check logs for specific degradation messages
 
-4. **Bottleneck Identification**: What resource was exhausted?
+5. **Bottleneck Identification**: What resource was exhausted?
    - Warehouse compute capacity?
    - Connection/query queue limits?
    - Data access contention?
 
-5. **Recommendations**:
+6. **Recommendations**:
    - Optimal operating point (usually 70-80% of max)?
    - Would larger warehouse increase max concurrency?
    - Any configuration changes to improve scalability?
 
-6. **Overall Grade**: A/B/C/D/F based on:
+7. **Overall Grade**: A/B/C/D/F based on:
    - How well did max concurrency match expectations for {warehouse_size} warehouse?
    - Was degradation graceful or sudden?
    - Is the recommended operating point practical?
@@ -5587,6 +6029,25 @@ async def ai_analysis(
                     f"- Cache hit rate: {_format_stat(wm.get('read_cache_hit_pct'), '.1f')}%"
                 )
 
+        # Fetch SF execution latency for spread analysis
+        sf_latency = await _fetch_sf_execution_latency_summary(pool=pool, test_id=test_id)
+        sf_p50 = sf_latency.get("sf_p50_latency_ms")
+        sf_p95 = sf_latency.get("sf_p95_latency_ms")
+
+        # Compute latency spread ratios (P95/P50) for both views
+        e2e_spread = _compute_latency_spread(p50=p50, p95=p95)
+        sf_spread = _compute_latency_spread(p50=sf_p50, p95=sf_p95)
+
+        # Build latency variance text for prompt
+        latency_variance_text = _build_latency_variance_text(
+            e2e_p50=p50,
+            e2e_p95=p95,
+            e2e_spread_ratio=e2e_spread.get("latency_spread_ratio"),
+            sf_p50=sf_p50,
+            sf_p95=sf_p95,
+            sf_spread_ratio=sf_spread.get("latency_spread_ratio"),
+        )
+
         context = req.context if req else None
 
         # Fetch relevant execution logs for AI analysis
@@ -5626,6 +6087,7 @@ async def ai_analysis(
                 max_error_rate_pct=max_error_rate_pct,
                 qps_stability_pct=qps_stability_pct,
                 execution_logs=execution_logs,
+                latency_variance_text=latency_variance_text,
             )
         elif load_mode == "QPS":
             prompt = _build_qps_prompt(
@@ -5651,6 +6113,7 @@ async def ai_analysis(
                 wh_text=wh_text,
                 context=context,
                 execution_logs=execution_logs,
+                latency_variance_text=latency_variance_text,
             )
         else:
             # Default to CONCURRENCY mode
@@ -5675,6 +6138,7 @@ async def ai_analysis(
                 wh_text=wh_text,
                 context=context,
                 execution_logs=execution_logs,
+                latency_variance_text=latency_variance_text,
             )
 
         try:
@@ -5802,3 +6266,524 @@ If asked about data you don't have access to, say so and suggest what data would
         raise
     except Exception as e:
         raise http_exception("ai chat", e)
+
+
+@router.get("/{test_id}/statistics")
+async def get_test_statistics(test_id: str) -> dict[str, Any]:
+    """
+    Get statistical summary for a test including:
+    - Latency statistics (avg/min/max/stddev) overall and per query kind
+    - Queue time metrics (overload + provisioning)
+    - Cache hit rate statistics
+
+    For parent runs (multi-worker), aggregates data from all child runs.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        # Check if this is a parent run
+        run_id_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+        is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+        # Build the WHERE clause based on parent/child status
+        if is_parent:
+            # For parent runs, query all test IDs in the run
+            test_filter = f"""
+            qe.TEST_ID IN (
+                SELECT TEST_ID FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?
+            )
+            """
+            params = [test_id]
+        else:
+            test_filter = "qe.TEST_ID = ?"
+            params = [test_id]
+
+        # Main statistics query
+        query = f"""
+        SELECT
+            -- Overall latency statistics
+            COUNT(*) AS TOTAL_QUERIES,
+            AVG(qe.APP_ELAPSED_MS) AS AVG_LATENCY_MS,
+            MIN(qe.APP_ELAPSED_MS) AS MIN_LATENCY_MS,
+            MAX(qe.APP_ELAPSED_MS) AS MAX_LATENCY_MS,
+            STDDEV(qe.APP_ELAPSED_MS) AS STDDEV_LATENCY_MS,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY qe.APP_ELAPSED_MS) AS P50_LATENCY_MS,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY qe.APP_ELAPSED_MS) AS P95_LATENCY_MS,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY qe.APP_ELAPSED_MS) AS P99_LATENCY_MS,
+
+            -- Queue time statistics
+            AVG(COALESCE(qe.SF_QUEUED_OVERLOAD_MS, 0)) AS AVG_QUEUED_OVERLOAD_MS,
+            AVG(COALESCE(qe.SF_QUEUED_PROVISIONING_MS, 0)) AS AVG_QUEUED_PROVISIONING_MS,
+            SUM(COALESCE(qe.SF_QUEUED_OVERLOAD_MS, 0)) AS TOTAL_QUEUED_OVERLOAD_MS,
+            SUM(COALESCE(qe.SF_QUEUED_PROVISIONING_MS, 0)) AS TOTAL_QUEUED_PROVISIONING_MS,
+            SUM(CASE WHEN COALESCE(qe.SF_QUEUED_OVERLOAD_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_OVERLOAD_QUEUE,
+            SUM(CASE WHEN COALESCE(qe.SF_QUEUED_PROVISIONING_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_PROVISIONING_QUEUE,
+
+            -- Cache hit statistics
+            AVG(qe.SF_PCT_SCANNED_FROM_CACHE) AS AVG_CACHE_HIT_PCT,
+            MIN(qe.SF_PCT_SCANNED_FROM_CACHE) AS MIN_CACHE_HIT_PCT,
+            MAX(qe.SF_PCT_SCANNED_FROM_CACHE) AS MAX_CACHE_HIT_PCT,
+            SUM(CASE WHEN COALESCE(qe.SF_PCT_SCANNED_FROM_CACHE, 0) >= 100 THEN 1 ELSE 0 END) AS FULL_CACHE_HIT_QUERIES,
+
+            -- Error counts
+            SUM(CASE WHEN qe.SUCCESS = FALSE THEN 1 ELSE 0 END) AS ERROR_COUNT
+        FROM {prefix}.QUERY_EXECUTIONS qe
+        WHERE {test_filter}
+          AND COALESCE(qe.WARMUP, FALSE) = FALSE
+        """
+        rows = await pool.execute_query(query, params=params)
+
+        if not rows or rows[0][0] is None or int(rows[0][0] or 0) == 0:
+            return {
+                "test_id": test_id,
+                "available": False,
+                "message": "No query execution data available",
+            }
+
+        r = rows[0]
+        total_queries = int(r[0] or 0)
+
+        # Per-query-kind statistics
+        kind_query = f"""
+        SELECT
+            qe.QUERY_KIND,
+            COUNT(*) AS QUERY_COUNT,
+            AVG(qe.APP_ELAPSED_MS) AS AVG_LATENCY_MS,
+            MIN(qe.APP_ELAPSED_MS) AS MIN_LATENCY_MS,
+            MAX(qe.APP_ELAPSED_MS) AS MAX_LATENCY_MS,
+            STDDEV(qe.APP_ELAPSED_MS) AS STDDEV_LATENCY_MS,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY qe.APP_ELAPSED_MS) AS P50_LATENCY_MS,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY qe.APP_ELAPSED_MS) AS P95_LATENCY_MS,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY qe.APP_ELAPSED_MS) AS P99_LATENCY_MS,
+            AVG(COALESCE(qe.SF_QUEUED_OVERLOAD_MS, 0) + COALESCE(qe.SF_QUEUED_PROVISIONING_MS, 0)) AS AVG_TOTAL_QUEUE_MS,
+            AVG(qe.SF_PCT_SCANNED_FROM_CACHE) AS AVG_CACHE_HIT_PCT,
+            SUM(CASE WHEN qe.SUCCESS = FALSE THEN 1 ELSE 0 END) AS ERROR_COUNT
+        FROM {prefix}.QUERY_EXECUTIONS qe
+        WHERE {test_filter}
+          AND COALESCE(qe.WARMUP, FALSE) = FALSE
+        GROUP BY qe.QUERY_KIND
+        ORDER BY QUERY_COUNT DESC
+        """
+        kind_rows = await pool.execute_query(kind_query, params=params)
+
+        per_kind: list[dict[str, Any]] = []
+        for kr in kind_rows:
+            kind_count = int(kr[1] or 0)
+            per_kind.append({
+                "query_kind": kr[0],
+                "query_count": kind_count,
+                "avg_latency_ms": _to_float_or_none(kr[2]),
+                "min_latency_ms": _to_float_or_none(kr[3]),
+                "max_latency_ms": _to_float_or_none(kr[4]),
+                "stddev_latency_ms": _to_float_or_none(kr[5]),
+                "p50_latency_ms": _to_float_or_none(kr[6]),
+                "p95_latency_ms": _to_float_or_none(kr[7]),
+                "p99_latency_ms": _to_float_or_none(kr[8]),
+                "avg_total_queue_ms": _to_float_or_none(kr[9]),
+                "avg_cache_hit_pct": _to_float_or_none(kr[10]),
+                "error_count": int(kr[11] or 0),
+                "error_rate_pct": (int(kr[11] or 0) / kind_count * 100) if kind_count > 0 else 0.0,
+            })
+
+        # Updated indices after adding p50, p95, p99 at positions 5, 6, 7:
+        # 0: TOTAL_QUERIES, 1: AVG_LATENCY, 2: MIN_LATENCY, 3: MAX_LATENCY, 4: STDDEV
+        # 5: P50, 6: P95, 7: P99
+        # 8: AVG_QUEUED_OVERLOAD, 9: AVG_QUEUED_PROVISIONING
+        # 10: TOTAL_QUEUED_OVERLOAD, 11: TOTAL_QUEUED_PROVISIONING
+        # 12: QUERIES_WITH_OVERLOAD_QUEUE, 13: QUERIES_WITH_PROVISIONING_QUEUE
+        # 14: AVG_CACHE_HIT_PCT, 15: MIN_CACHE_HIT_PCT, 16: MAX_CACHE_HIT_PCT
+        # 17: FULL_CACHE_HIT_QUERIES, 18: ERROR_COUNT
+        error_count = int(r[18] or 0)
+        success_count = total_queries - error_count
+        success_rate = (success_count / total_queries * 100) if total_queries > 0 else 0.0
+
+        # Get test duration for throughput calculation
+        duration_query = f"""
+        SELECT
+            TIMESTAMPDIFF(SECOND, MIN(qe.START_TIME), MAX(qe.START_TIME)) AS DURATION_SECONDS
+        FROM {prefix}.QUERY_EXECUTIONS qe
+        WHERE {test_filter}
+          AND COALESCE(qe.WARMUP, FALSE) = FALSE
+        """
+        duration_rows = await pool.execute_query(duration_query, params=params)
+        duration_seconds = float(duration_rows[0][0] or 0) if duration_rows and duration_rows[0] else 0
+        avg_qps = (total_queries / duration_seconds) if duration_seconds > 0 else None
+
+        return {
+            "test_id": test_id,
+            "available": True,
+            "is_parent_run": is_parent,
+            "total_queries": total_queries,
+            "success_rate_pct": success_rate,
+            "throughput": {
+                "avg_qps": avg_qps,
+                "duration_seconds": duration_seconds,
+            },
+            "latency": {
+                "avg_ms": _to_float_or_none(r[1]),
+                "min_ms": _to_float_or_none(r[2]),
+                "max_ms": _to_float_or_none(r[3]),
+                "stddev_ms": _to_float_or_none(r[4]),
+                "p50_ms": _to_float_or_none(r[5]),
+                "p95_ms": _to_float_or_none(r[6]),
+                "p99_ms": _to_float_or_none(r[7]),
+            },
+            "queue_time": {
+                "avg_overload_ms": _to_float_or_none(r[8]),
+                "avg_provisioning_ms": _to_float_or_none(r[9]),
+                "total_overload_ms": _to_float_or_none(r[10]),
+                "total_provisioning_ms": _to_float_or_none(r[11]),
+                "queries_with_overload_queue": int(r[12] or 0),
+                "queries_with_provisioning_queue": int(r[13] or 0),
+                "pct_queries_queued": (int(r[12] or 0) / total_queries * 100) if total_queries > 0 else 0.0,
+            },
+            "cache": {
+                "avg_hit_pct": _to_float_or_none(r[14]),
+                "min_hit_pct": _to_float_or_none(r[15]),
+                "max_hit_pct": _to_float_or_none(r[16]),
+                "full_cache_hit_queries": int(r[17] or 0),
+                "full_cache_hit_pct": (int(r[17] or 0) / total_queries * 100) if total_queries > 0 else 0.0,
+            },
+            "errors": {
+                "error_count": error_count,
+                "error_rate_pct": (error_count / total_queries * 100) if total_queries > 0 else 0.0,
+            },
+            "per_query_kind": per_kind,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise http_exception("get test statistics", e)
+
+
+@router.get("/{test_id}/error-timeline")
+async def get_error_timeline(test_id: str) -> dict[str, Any]:
+    """
+    Get error counts bucketed by time for visualizing error trends.
+
+    Returns error counts per 5-second bucket along with total query counts,
+    allowing calculation of error rates over time.
+
+    For parent runs (multi-worker), aggregates data from all child runs.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        # Check if this is a parent run
+        run_id_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+        is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+        # Build the WHERE clause based on parent/child status
+        if is_parent:
+            test_filter = f"""
+            qe.TEST_ID IN (
+                SELECT TEST_ID FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?
+            )
+            """
+            params = [test_id]
+        else:
+            test_filter = "qe.TEST_ID = ?"
+            params = [test_id]
+
+        # Get the time range and bucket errors by 5-second intervals
+        query = f"""
+        WITH query_bounds AS (
+            SELECT
+                MIN(qe.START_TIME) AS FIRST_QUERY,
+                MAX(qe.START_TIME) AS LAST_QUERY,
+                MIN(CASE WHEN COALESCE(qe.WARMUP, FALSE) = FALSE THEN qe.START_TIME END) AS FIRST_MEASUREMENT
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            WHERE {test_filter}
+        ),
+        time_buckets AS (
+            SELECT
+                FLOOR(DATEDIFF('second', qb.FIRST_QUERY, qe.START_TIME) / 5) * 5 AS BUCKET_SECONDS,
+                COUNT(*) AS TOTAL_QUERIES,
+                SUM(CASE WHEN qe.SUCCESS = FALSE THEN 1 ELSE 0 END) AS ERROR_COUNT,
+                SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'POINT_LOOKUP' THEN 1 ELSE 0 END) AS POINT_LOOKUP_ERRORS,
+                SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'RANGE_SCAN' THEN 1 ELSE 0 END) AS RANGE_SCAN_ERRORS,
+                SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'INSERT' THEN 1 ELSE 0 END) AS INSERT_ERRORS,
+                SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'UPDATE' THEN 1 ELSE 0 END) AS UPDATE_ERRORS,
+                MAX(CASE WHEN qe.START_TIME < qb.FIRST_MEASUREMENT THEN 1 ELSE 0 END) AS IS_WARMUP
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            CROSS JOIN query_bounds qb
+            WHERE {test_filter.replace('qe.TEST_ID', 'qe.TEST_ID')}
+            GROUP BY FLOOR(DATEDIFF('second', qb.FIRST_QUERY, qe.START_TIME) / 5) * 5
+        )
+        SELECT
+            BUCKET_SECONDS,
+            TOTAL_QUERIES,
+            ERROR_COUNT,
+            POINT_LOOKUP_ERRORS,
+            RANGE_SCAN_ERRORS,
+            INSERT_ERRORS,
+            UPDATE_ERRORS,
+            IS_WARMUP
+        FROM time_buckets
+        ORDER BY BUCKET_SECONDS ASC
+        """
+        # Double the params for the two test_filter usages
+        rows = await pool.execute_query(query, params=params + params)
+
+        if not rows:
+            return {
+                "test_id": test_id,
+                "available": False,
+                "message": "No query execution data available",
+                "points": [],
+            }
+
+        points: list[dict[str, Any]] = []
+        total_errors = 0
+        total_queries = 0
+        warmup_end_bucket: int | None = None
+
+        for row in rows:
+            bucket_seconds = int(row[0] or 0)
+            bucket_total = int(row[1] or 0)
+            bucket_errors = int(row[2] or 0)
+            is_warmup = bool(row[7])
+
+            total_queries += bucket_total
+            total_errors += bucket_errors
+
+            # Track where warmup ends
+            if not is_warmup and warmup_end_bucket is None:
+                warmup_end_bucket = bucket_seconds
+
+            error_rate_pct = (bucket_errors / bucket_total * 100) if bucket_total > 0 else 0.0
+
+            points.append({
+                "elapsed_seconds": bucket_seconds,
+                "total_queries": bucket_total,
+                "error_count": bucket_errors,
+                "error_rate_pct": round(error_rate_pct, 2),
+                "point_lookup_errors": int(row[3] or 0),
+                "range_scan_errors": int(row[4] or 0),
+                "insert_errors": int(row[5] or 0),
+                "update_errors": int(row[6] or 0),
+                "warmup": is_warmup,
+            })
+
+        overall_error_rate = (total_errors / total_queries * 100) if total_queries > 0 else 0.0
+
+        return {
+            "test_id": test_id,
+            "available": True,
+            "is_parent_run": is_parent,
+            "bucket_size_seconds": 5,
+            "total_queries": total_queries,
+            "total_errors": total_errors,
+            "overall_error_rate_pct": round(overall_error_rate, 2),
+            "warmup_end_elapsed_seconds": warmup_end_bucket,
+            "points": points,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise http_exception("get error timeline", e)
+
+
+@router.get("/{test_id}/latency-breakdown")
+async def get_latency_breakdown(test_id: str) -> dict[str, Any]:
+    """
+    Get detailed latency breakdown for a test including:
+    - Read vs Write operations summary (count, ops/s, P50/P95/P99/min/max)
+    - Per-query-type latency breakdown (Point Lookup, Range Scan, Insert, Update)
+    For parent runs (multi-worker), aggregates data from all child runs.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        # Determine if this is a parent run (multi-worker aggregation)
+        run_id_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+        is_parent = bool(run_id) and str(run_id) == str(test_id)
+
+        if is_parent:
+            test_filter = f"TEST_ID IN (SELECT TEST_ID FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?)"
+        else:
+            test_filter = "TEST_ID = ?"
+
+        # Query for read/write breakdown with percentiles
+        # Reads = Point Lookup + Range Scan, Writes = Insert + Update
+        query = f"""
+        WITH raw_data AS (
+            SELECT
+                APP_ELAPSED_MS,
+                QUERY_KIND,
+                CASE
+                    WHEN UPPER(REPLACE(QUERY_KIND, '_', ' ')) IN ('POINT LOOKUP', 'RANGE SCAN', 'SELECT', 'READ') THEN 'READ'
+                    WHEN UPPER(REPLACE(QUERY_KIND, '_', ' ')) IN ('INSERT', 'UPDATE', 'DELETE', 'WRITE') THEN 'WRITE'
+                    ELSE 'OTHER'
+                END AS OPERATION_TYPE,
+                SUCCESS,
+                WARMUP,
+                START_TIME
+            FROM {_prefix()}.QUERY_EXECUTIONS
+            WHERE {test_filter}
+              AND WARMUP = FALSE
+              AND SUCCESS = TRUE
+              AND APP_ELAPSED_MS IS NOT NULL
+        ),
+        duration_info AS (
+            SELECT
+                TIMESTAMPDIFF('SECOND', MIN(START_TIME), MAX(START_TIME)) AS duration_seconds
+            FROM raw_data
+        ),
+        -- Read/Write aggregation
+        rw_stats AS (
+            SELECT
+                OPERATION_TYPE,
+                COUNT(*) AS query_count,
+                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS p50_ms,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS p95_ms,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS p99_ms,
+                MIN(APP_ELAPSED_MS) AS min_ms,
+                MAX(APP_ELAPSED_MS) AS max_ms,
+                AVG(APP_ELAPSED_MS) AS avg_ms
+            FROM raw_data
+            WHERE OPERATION_TYPE IN ('READ', 'WRITE')
+            GROUP BY OPERATION_TYPE
+        ),
+        -- Per query kind aggregation
+        qk_stats AS (
+            SELECT
+                QUERY_KIND,
+                COUNT(*) AS query_count,
+                PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS p50_ms,
+                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS p95_ms,
+                PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS p99_ms,
+                MIN(APP_ELAPSED_MS) AS min_ms,
+                MAX(APP_ELAPSED_MS) AS max_ms,
+                AVG(APP_ELAPSED_MS) AS avg_ms
+            FROM raw_data
+            GROUP BY QUERY_KIND
+        )
+        SELECT
+            'RW' AS stat_type,
+            OPERATION_TYPE AS category,
+            query_count,
+            p50_ms,
+            p95_ms,
+            p99_ms,
+            min_ms,
+            max_ms,
+            avg_ms,
+            (SELECT duration_seconds FROM duration_info) AS duration_seconds
+        FROM rw_stats
+
+        UNION ALL
+
+        SELECT
+            'QK' AS stat_type,
+            QUERY_KIND AS category,
+            query_count,
+            p50_ms,
+            p95_ms,
+            p99_ms,
+            min_ms,
+            max_ms,
+            avg_ms,
+            (SELECT duration_seconds FROM duration_info) AS duration_seconds
+        FROM qk_stats
+        ORDER BY stat_type, category
+        """
+
+        rows = await pool.execute_query(query, params=[test_id])
+
+        if not rows:
+            return {
+                "test_id": test_id,
+                "available": False,
+                "message": "No query execution data available",
+            }
+
+        read_ops: dict[str, Any] | None = None
+        write_ops: dict[str, Any] | None = None
+        per_query_type: list[dict[str, Any]] = []
+        duration_seconds: float = 0
+
+        for row in rows:
+            stat_type = row[0]
+            category = row[1]
+            count = int(row[2] or 0)
+            p50 = _to_float_or_none(row[3])
+            p95 = _to_float_or_none(row[4])
+            p99 = _to_float_or_none(row[5])
+            min_ms = _to_float_or_none(row[6])
+            max_ms = _to_float_or_none(row[7])
+            avg_ms = _to_float_or_none(row[8])
+            dur = _to_float_or_none(row[9])
+
+            if dur is not None and dur > duration_seconds:
+                duration_seconds = dur
+
+            stats = {
+                "count": count,
+                "p50_ms": round(p50, 2) if p50 is not None else None,
+                "p95_ms": round(p95, 2) if p95 is not None else None,
+                "p99_ms": round(p99, 2) if p99 is not None else None,
+                "min_ms": round(min_ms, 2) if min_ms is not None else None,
+                "max_ms": round(max_ms, 2) if max_ms is not None else None,
+                "avg_ms": round(avg_ms, 2) if avg_ms is not None else None,
+            }
+
+            if stat_type == "RW":
+                ops_per_second = count / duration_seconds if duration_seconds > 0 else 0
+                stats["ops_per_second"] = round(ops_per_second, 2)
+
+                if category == "READ":
+                    read_ops = stats
+                elif category == "WRITE":
+                    write_ops = stats
+            else:
+                # Per query kind
+                per_query_type.append({
+                    "query_type": category,
+                    **stats,
+                })
+
+        # Sort per_query_type: Reads first (Point Lookup, Range Scan), then Writes (Insert, Update)
+        query_type_order = {
+            "POINT LOOKUP": 1,
+            "RANGE SCAN": 2,
+            "SELECT": 3,
+            "INSERT": 4,
+            "UPDATE": 5,
+            "DELETE": 6,
+        }
+        per_query_type.sort(
+            key=lambda x: query_type_order.get(x["query_type"].upper(), 99)
+        )
+
+        total_ops = (read_ops["count"] if read_ops else 0) + (write_ops["count"] if write_ops else 0)
+
+        return {
+            "test_id": test_id,
+            "available": True,
+            "is_parent_run": is_parent,
+            "duration_seconds": duration_seconds,
+            "total_operations": total_ops,
+            "read_operations": read_ops,
+            "write_operations": write_ops,
+            "per_query_type": per_query_type,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise http_exception("get latency breakdown", e)

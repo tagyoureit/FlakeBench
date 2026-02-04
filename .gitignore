@@ -116,3 +116,4 @@ AGENTS.md
 
 # Tailwind CSS build output (run 'task css:build' to generate)
 backend/static/css/tailwind.css
+.images

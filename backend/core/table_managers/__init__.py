@@ -8,6 +8,7 @@ from backend.core.table_managers.base import TableManager
 from backend.core.table_managers.standard import StandardTableManager
 from backend.core.table_managers.hybrid import HybridTableManager
 from backend.core.table_managers.interactive import InteractiveTableManager
+from backend.core.table_managers.dynamic import DynamicTableManager
 from backend.core.table_managers.postgres import PostgresTableManager
 
 from backend.models.test_config import TableConfig, TableType
@@ -34,6 +35,8 @@ def create_table_manager(config: TableConfig) -> TableManager:
         return HybridTableManager(config)
     elif table_type == TableType.INTERACTIVE:
         return InteractiveTableManager(config)
+    elif table_type == TableType.DYNAMIC:
+        return DynamicTableManager(config)
     elif table_type in (
         TableType.POSTGRES,
         TableType.SNOWFLAKE_POSTGRES,
@@ -48,6 +51,7 @@ __all__ = [
     "StandardTableManager",
     "HybridTableManager",
     "InteractiveTableManager",
+    "DynamicTableManager",
     "PostgresTableManager",
     "create_table_manager",
 ]

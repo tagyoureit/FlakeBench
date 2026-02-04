@@ -3,6 +3,7 @@ function templatesManager() {
     templates: [],
     filteredTemplates: [],
     searchQuery: "",
+    typeFilter: "",
     loading: true,
     error: null,
     preparingTemplateId: null,
@@ -91,20 +92,30 @@ function templatesManager() {
     },
 
     filterTemplates() {
-      if (!this.searchQuery) {
-        this.filteredTemplates = this.templates;
-        return;
+      let filtered = this.templates;
+
+      // Apply type filter first
+      if (this.typeFilter) {
+        filtered = filtered.filter((t) => {
+          const label = this.tableTypeLabel(t);
+          return label === this.typeFilter;
+        });
       }
 
-      const query = this.searchQuery.toLowerCase();
-      this.filteredTemplates = this.templates.filter(
-        (t) =>
-          t.template_name.toLowerCase().includes(query) ||
-          (t.description && t.description.toLowerCase().includes(query)) ||
-          (this.deriveWorkloadLabel(t.config).toLowerCase().includes(query)) ||
-          (this.tableFqn(t).toLowerCase().includes(query)) ||
-          (this.tableTypeLabel(t).toLowerCase().includes(query)),
-      );
+      // Then apply search query
+      if (this.searchQuery) {
+        const query = this.searchQuery.toLowerCase();
+        filtered = filtered.filter(
+          (t) =>
+            t.template_name.toLowerCase().includes(query) ||
+            (t.description && t.description.toLowerCase().includes(query)) ||
+            this.deriveWorkloadLabel(t.config).toLowerCase().includes(query) ||
+            this.tableFqn(t).toLowerCase().includes(query) ||
+            this.tableTypeLabel(t).toLowerCase().includes(query),
+        );
+      }
+
+      this.filteredTemplates = filtered;
     },
 
     deriveWorkloadLabel(config) {
@@ -122,6 +133,106 @@ function templatesManager() {
       if (readPct >= 75) return "READ_HEAVY";
       if (writePct >= 75) return "WRITE_HEAVY";
       return "MIXED";
+    },
+
+    // Show actual workload mix with line breaks: "PL 90%<br>RS 10%"
+    workloadMixDisplay(config) {
+      const pl = Number(config?.custom_point_lookup_pct || 0);
+      const rs = Number(config?.custom_range_scan_pct || 0);
+      const ins = Number(config?.custom_insert_pct || 0);
+      const upd = Number(config?.custom_update_pct || 0);
+      const total = pl + rs + ins + upd;
+      if (total === 0) return "—";
+
+      const parts = [];
+      if (pl > 0) parts.push(`PL ${pl}%`);
+      if (rs > 0) parts.push(`RS ${rs}%`);
+      if (ins > 0) parts.push(`INS ${ins}%`);
+      if (upd > 0) parts.push(`UPD ${upd}%`);
+      return parts.join("<br>");
+    },
+
+    // Show duration with warmup breakdown on separate lines
+    durationDisplay(config) {
+      const loadMode = String(config?.load_mode || "CONCURRENCY").toUpperCase();
+      if (loadMode === "FIND_MAX_CONCURRENCY") return "—";
+
+      const duration = Number(config?.duration || 0);
+      const warmup = Number(config?.warmup || 0);
+      if (duration <= 0) return "—";
+
+      const total = warmup + duration;
+      if (warmup > 0) {
+        return `${total}s<br><span style="color: #6b7280; font-size: 0.85em;">${warmup}s + ${duration}s</span>`;
+      }
+      return `${duration}s`;
+    },
+
+    // Show load mode with key details
+    loadModeDisplay(config) {
+      const loadMode = String(config?.load_mode || "CONCURRENCY").toUpperCase();
+      
+      if (loadMode === "QPS") {
+        const targetQps = config?.target_qps || "—";
+        return `QPS: ${targetQps}`;
+      }
+      if (loadMode === "FIND_MAX_CONCURRENCY") {
+        const start = config?.start_concurrency || 5;
+        const inc = config?.concurrency_increment || 10;
+        return `Find Max: ${start}+${inc}`;
+      }
+      // CONCURRENCY mode
+      const threads = config?.concurrent_connections || "—";
+      return `Fixed: ${threads} threads`;
+    },
+
+    // Show scaling configuration with mode on top, config below
+    scalingDisplay(config) {
+      const scaling = config?.scaling;
+      if (!scaling) return "—";
+
+      const mode = String(scaling.mode || "AUTO").toUpperCase();
+      const minW = Number(scaling.min_workers ?? 1);
+      const maxW = scaling.max_workers != null ? Number(scaling.max_workers) : null;
+      const minC = Number(scaling.min_connections ?? 1);
+      const maxC = scaling.max_connections != null ? Number(scaling.max_connections) : null;
+
+      if (mode === "FIXED") {
+        // FIXED mode uses min_workers and min_connections as the fixed values
+        return `FIXED<br><span style="color: #6b7280; font-size: 0.85em;">${minW}w × ${minC}c</span>`;
+      }
+
+      if (mode === "AUTO") {
+        // AUTO with no meaningful bounds - just show AUTO
+        if (maxW === null || minW === maxW) {
+          return "AUTO";
+        }
+        // AUTO with bounds specified
+        return `AUTO<br><span style="color: #6b7280; font-size: 0.85em;">${minW}-${maxW}w</span>`;
+      }
+
+      // BOUNDED mode - show range with possible unbounded
+      const workerPart = maxW === null ? `${minW}+w` : (minW === maxW ? `${minW}w` : `${minW}-${maxW}w`);
+      const connPart = maxC === null ? `${minC}+c` : (minC === maxC ? `${minC}c` : `${minC}-${maxC}c`);
+      return `BOUNDED<br><span style="color: #6b7280; font-size: 0.85em;">${workerPart} × ${connPart}</span>`;
+    },
+
+    // Show warehouse info
+    warehouseDisplay(template) {
+      const config = template?.config;
+      if (!config) return "—";
+      
+      const tableType = String(config.table_type || "").toUpperCase();
+      if (tableType === "POSTGRES" || tableType === "SNOWFLAKE_POSTGRES") {
+        return "Postgres";
+      }
+
+      const name = config.warehouse_name || config.warehouse || "—";
+      const size = config.warehouse_size || "";
+      if (size) {
+        return `${name} (${size})`;
+      }
+      return name;
     },
 
     createNewTemplate() {

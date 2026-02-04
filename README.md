@@ -89,10 +89,10 @@ uv run python -m backend.setup_schema
 
 ```bash
 # Development mode (with auto-reload)
-uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-config logging_config.yaml
 
 # Production mode
-uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000 --log-config logging_config.yaml
 ```
 
 ### 5. Open Your Browser

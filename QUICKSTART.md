@@ -19,7 +19,7 @@ nano .env  # or use your favorite editor
 
 ```bash
 # Development mode (with auto-reload)
-uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-config logging_config.yaml
 ```
 
 The server will start at: <http://localhost:8000>
@@ -133,7 +133,7 @@ task test:variations:smoke:long
 lsof -ti:8000 | xargs kill -9
 
 # Or use a different port
-uv run uvicorn backend.main:app --port 8001
+uv run uvicorn backend.main:app --port 8001 --log-config logging_config.yaml
 ```
 
 ### Import Errors

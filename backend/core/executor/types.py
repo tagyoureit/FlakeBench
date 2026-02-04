@@ -2,9 +2,8 @@
 Type definitions and dataclasses for test executor.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from itertools import count
 from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 if TYPE_CHECKING:
@@ -18,6 +17,8 @@ class TableRuntimeState:
     profile: Optional["TableProfile"] = None
     next_insert_id: Optional[int] = None
     insert_id_seq: Optional[Iterator[int]] = None
+    # Per-worker insert sequences to avoid PK conflicts
+    insert_id_seqs: Optional[dict[int, Iterator[int]]] = None
 
 
 @dataclass

@@ -26,15 +26,18 @@ from backend.core.test_registry import registry
 from backend.connectors import snowflake_pool
 
 # Configure logging
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter(settings.LOG_FORMAT))
+
+handlers = [console_handler]
+if settings.LOG_FILE:
+    file_handler = logging.FileHandler(settings.LOG_FILE)
+    file_handler.setFormatter(logging.Formatter(settings.LOG_FORMAT))
+    handlers.append(file_handler)
+
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL),
-    format=settings.LOG_FORMAT,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(settings.LOG_FILE)
-        if settings.LOG_FILE
-        else logging.NullHandler(),
-    ],
+    handlers=handlers,
 )
 
 # Suppress verbose Snowflake connector internal logging (connection handshake details)
@@ -99,6 +102,56 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 
 
+async def _cleanup_orphaned_tests_background() -> None:
+    """
+    Background task to clean up orphaned tests on startup.
+
+    Runs asynchronously so it doesn't block app startup. Tests stuck in
+    PREPARED, STARTING, RUNNING, or CANCELLING states (with no recent activity)
+    are marked as CANCELLED.
+
+    Also handles stale enrichment:
+    - Parent tests with pending enrichment: retry enrichment
+    - Child tests or non-completed: mark enrichment as SKIPPED
+    """
+    try:
+        from backend.core.results_store import cleanup_orphaned_tests, cleanup_stale_enrichment
+
+        logger.info("🧹 Checking for orphaned tests...")
+        result = await cleanup_orphaned_tests(
+            stale_minutes_prepared=60,  # PREPARED/STARTING older than 1 hour
+            stale_minutes_active=10,    # RUNNING/CANCELLING with no activity for 10 min
+        )
+
+        total_cleaned = result.run_status_cleaned + result.test_results_cleaned
+        if total_cleaned > 0:
+            logger.info(
+                "🧹 Orphan cleanup complete: %d runs, %d tests marked as CANCELLED",
+                result.run_status_cleaned,
+                result.test_results_cleaned,
+            )
+        else:
+            logger.info("🧹 No orphaned tests found")
+
+        # Clean up stale enrichment
+        logger.info("🔄 Checking for stale enrichment...")
+        retried, skipped, retried_ids, skipped_ids = await cleanup_stale_enrichment(
+            stale_minutes=60,  # Enrichment pending for more than 1 hour
+        )
+        if retried > 0 or skipped > 0:
+            logger.info(
+                "🔄 Stale enrichment: %d retrying, %d skipped",
+                retried,
+                skipped,
+            )
+        else:
+            logger.info("🔄 No stale enrichment found")
+
+    except Exception as e:
+        # Don't fail startup if cleanup fails - just log and continue
+        logger.warning("⚠️  Orphan cleanup failed (non-fatal): %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -115,11 +168,23 @@ async def lifespan(app: FastAPI):
     # Initialize database connection pools
     try:
         from backend.connectors import snowflake_pool, postgres_pool
+        from backend.core.cost_calculator import load_postgres_instances
 
         logger.info("📊 Initializing Snowflake connection pool...")
         sf_pool = snowflake_pool.get_default_pool()
         await sf_pool.initialize()
         logger.info("✅ Snowflake pool initialized")
+
+        # Load Postgres instance info for cost calculations
+        try:
+            instances = await load_postgres_instances()
+            if instances:
+                logger.info(f"💰 Loaded {len(instances)} Postgres instance sizes for cost calculations")
+        except Exception as e:
+            logger.warning(f"⚠️  Could not load Postgres instances for cost calculations: {e}")
+
+        # Schedule orphan cleanup as background task (non-blocking)
+        asyncio.create_task(_cleanup_orphaned_tests_background())
 
         if settings.ENABLE_POSTGRES and settings.POSTGRES_CONNECT_ON_STARTUP:
             logger.info("🐘 Initializing Postgres connection pool...")
@@ -678,7 +743,8 @@ async def _fetch_run_status(run_id: str) -> dict[str, Any] | None:
                             rs.START_TIME,
                             CURRENT_TIMESTAMP()::TIMESTAMP_NTZ
                         )
-                END AS ELAPSED_SECONDS
+                END AS ELAPSED_SECONDS,
+                tr.FAILURE_REASON
             FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.RUN_STATUS rs
             LEFT JOIN {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEST_RESULTS tr
                 ON tr.TEST_ID = rs.RUN_ID
@@ -702,6 +768,7 @@ async def _fetch_run_status(run_id: str) -> dict[str, Any] | None:
             find_max_state,
             cancellation_reason,
             elapsed_seconds,
+            failure_reason,
         ) = rows[0]
         return {
             "status": str(status or "").upper(),
@@ -719,6 +786,9 @@ async def _fetch_run_status(run_id: str) -> dict[str, Any] | None:
             else None,
             "elapsed_seconds": float(elapsed_seconds)
             if elapsed_seconds is not None
+            else None,
+            "failure_reason": str(failure_reason)
+            if failure_reason
             else None,
         }
     except Exception:
@@ -1606,7 +1676,11 @@ async def _stream_run_metrics(websocket: WebSocket, test_id: str) -> None:
         }
         if run_status and run_status.get("cancellation_reason"):
             payload["cancellation_reason"] = run_status.get("cancellation_reason")
-        custom_metrics = metrics.get("custom_metrics")
+        if run_status and run_status.get("failure_reason"):
+            payload["error"] = {
+                "type": "setup_error",
+                "message": run_status.get("failure_reason"),
+            }
         # Warehouse MCW data comes from orchestrator's WAREHOUSE_POLL_SNAPSHOTS, not workers
         warehouse_snapshot = await results_store.fetch_latest_warehouse_poll_snapshot(
             run_id=test_id

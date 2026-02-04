@@ -180,18 +180,57 @@ window.DashboardMixins.display = {
     const mode = this.scalingMode();
     const sc = this.scalingConfig();
     if (!sc) return mode;
+
+    // Get connections per worker info
+    const minConn = Number(sc.min_connections ?? sc.minConnections ?? 1);
+    const maxConn = Number(sc.max_connections ?? sc.maxConnections ?? null);
+    const connPart = maxConn ? `${minConn}-${maxConn} conn/worker` : `${minConn} conn/worker`;
+
     if (mode === "AUTO") {
-      const min = Number(sc.min_workers ?? sc.minWorkers ?? 1);
-      const max = Number(sc.max_workers ?? sc.maxWorkers ?? 1);
-      return `AUTO (${min}-${max})`;
+      return "Auto";
     }
     if (mode === "BOUNDED") {
       const min = Number(sc.min_workers ?? sc.minWorkers ?? 1);
       const max = Number(sc.max_workers ?? sc.maxWorkers ?? 1);
-      return `BOUNDED (${min}-${max})`;
+      return `Bounded (${min}-${max} workers, ${connPart})`;
     }
     const fixed = Number(sc.fixed_workers ?? sc.fixedWorkers ?? 1);
-    return `FIXED (${fixed})`;
+    return `Fixed (${fixed} workers, ${connPart})`;
+  },
+
+  warmupDisplay() {
+    const info = this.templateInfo;
+    if (!info) return "";
+    const warmup = Number(info.warmup_seconds || 0);
+    if (warmup <= 0) return "";
+    return `${warmup}s`;
+  },
+
+  durationDisplay() {
+    const info = this.templateInfo;
+    if (!info) return "";
+    // duration_seconds is the RUN time (measurement period), not total
+    const runDuration = Number(info.duration_seconds || 0);
+    const warmup = Number(info.warmup_seconds || 0);
+    if (runDuration <= 0) return "";
+    
+    // Calculate total = warmup + run
+    const total = warmup + runDuration;
+    
+    // If warmup exists, show breakdown
+    if (warmup > 0) {
+      return `${total}s (${warmup}s warmup + ${runDuration}s measurement)`;
+    }
+    return `${runDuration}s`;
+  },
+
+  resourceConstraintDisplay() {
+    const details = this.warehouseDetails;
+    if (!details) return "";
+    const constraint = details.resource_constraint || "";
+    if (constraint === "STANDARD_GEN_2") return "Gen2";
+    if (constraint === "STANDARD_GEN_1" || constraint === "STANDARD") return "Gen1";
+    return constraint ? constraint : "";
   },
 
   boundsStatusText() {
@@ -252,5 +291,87 @@ window.DashboardMixins.display = {
       ? (this.templateInfo?.qps || 0)
       : (this.metrics.qps_avg_30s || 0);
     return (current / target) * 100;
+  },
+
+  // === LIVE COST CALCULATION ===
+
+  /**
+   * Calculate the live cost based on elapsed time and warehouse size.
+   */
+  liveCost() {
+    if (!window.CostUtils) return 0;
+    const warehouseSize = this.templateInfo?.warehouse_size || 'MEDIUM';
+    const elapsedSeconds = this.elapsed || 0;
+    if (elapsedSeconds <= 0) return 0;
+    
+    const result = window.CostUtils.calculateEstimatedCost(elapsedSeconds, warehouseSize);
+    return result.estimated_cost_usd || 0;
+  },
+
+  /**
+   * Calculate the live credits used based on elapsed time.
+   */
+  liveCredits() {
+    if (!window.CostUtils) return 0;
+    const warehouseSize = this.templateInfo?.warehouse_size || 'MEDIUM';
+    const elapsedSeconds = this.elapsed || 0;
+    if (elapsedSeconds <= 0) return 0;
+    
+    const result = window.CostUtils.calculateEstimatedCost(elapsedSeconds, warehouseSize);
+    return result.credits_used || 0;
+  },
+
+  /**
+   * Calculate the projected total cost based on full duration.
+   */
+  projectedCost() {
+    if (!window.CostUtils) return 0;
+    const warehouseSize = this.templateInfo?.warehouse_size || 'MEDIUM';
+    const totalDuration = this.templateInfo?.duration_seconds || 0;
+    if (totalDuration <= 0) return 0;
+    
+    const result = window.CostUtils.calculateEstimatedCost(totalDuration, warehouseSize);
+    return result.estimated_cost_usd || 0;
+  },
+
+  /**
+   * Format the live cost for display.
+   */
+  formatLiveCost() {
+    if (!window.CostUtils) return '$0.0000';
+    return window.CostUtils.formatCost(this.liveCost());
+  },
+
+  /**
+   * Format the live credits for display.
+   */
+  formatLiveCredits() {
+    if (!window.CostUtils) return '0.0000';
+    return window.CostUtils.formatCredits(this.liveCredits());
+  },
+
+  /**
+   * Format the projected cost for display.
+   */
+  formatProjectedCost() {
+    if (!window.CostUtils) return '$0.0000';
+    return window.CostUtils.formatCost(this.projectedCost());
+  },
+
+  /**
+   * Generate a detailed cost breakdown tooltip for live cost display.
+   */
+  formatLiveCostTooltip() {
+    if (!window.CostUtils) return '';
+    const warehouseSize = this.templateInfo?.warehouse_size || 'MEDIUM';
+    const tableType = this.templateInfo?.table_type || 'HYBRID';
+    const elapsedSeconds = this.elapsed || 0;
+    
+    return window.CostUtils.generateCostTooltip({
+      warehouseSize: warehouseSize,
+      tableType: tableType,
+      durationSeconds: elapsedSeconds,
+      dollarsPerCredit: window.CostUtils.getCostSettings().dollarsPerCredit
+    });
   },
 };

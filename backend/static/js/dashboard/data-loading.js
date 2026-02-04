@@ -361,7 +361,8 @@ window.DashboardMixins.dataLoading = {
             ? worker.snapshots
             : [];
           const latest = snapshots.length ? snapshots[snapshots.length - 1] : null;
-          return { ...worker, snapshots, latest };
+          const key = this.workerKey(worker);
+          return { ...worker, key, snapshots, latest };
         });
         this.workerMetricsAvailable = !!(data && data.available && workers.length);
         this.liveWorkerMetricsLoadedAt = Date.now();
@@ -484,7 +485,7 @@ window.DashboardMixins.dataLoading = {
       if (data && data.error) {
         throw new Error(String(data.error));
       }
-      this.errorSummaryRows = data && Array.isArray(data.errors) ? data.errors : [];
+      this.errorSummaryRows = data && Array.isArray(data.rows) ? data.rows : [];
     } catch (e) {
       console.warn("Failed to load error summary:", e);
       this.errorSummaryError = e && e.message ? e.message : String(e);

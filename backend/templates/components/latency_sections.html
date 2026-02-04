@@ -14,6 +14,9 @@
 <!-- Latency section wrapper for floating toolbar visibility detection -->
 <div data-section="latency">
 
+<!-- Tailwind safelist: ensure dynamic classes are included in CSS build -->
+<span class="hidden bg-green-100 text-green-800 bg-red-100 text-red-800"></span>
+
 <div
     x-show="mode === 'history' && latencyView === 'sf_execution' && sfEnrichmentLowWarning()"
     class="enrichment-warning bg-amber-100 border border-amber-500 rounded-md py-3 px-4 mb-4 flex items-start gap-2"
@@ -95,6 +98,23 @@
     </div>
 </div>
 
+<div
+    x-show="mode === 'history' && latencySpreadWarning()"
+    class="latency-spread-warning bg-amber-100 border border-amber-500 rounded-md py-3 px-4 mb-4 flex items-start gap-2"
+>
+    <span class="text-amber-700 text-lg">⚠</span>
+    <div class="text-sm text-amber-900">
+        <strong>High latency variance:</strong>
+        P95 is <span x-text="latencySpreadRatio()?.toFixed(1) || '?'"></span>x the median (P50).
+        <template x-if="latencyView === 'sf_execution'">
+            <span>Snowflake execution times are highly variable. Common causes: warehouse contention, multi-cluster scaling, cold cache hits, or query compilation overhead.</span>
+        </template>
+        <template x-if="latencyView !== 'sf_execution'">
+            <span>End-to-end response times are highly variable. Common causes: network latency spikes, client-side processing, or Snowflake queueing under load.</span>
+        </template>
+    </div>
+</div>
+
 <div class="metrics-grid">
     <div class="metric-card info">
         <div class="metric-label">
@@ -123,7 +143,16 @@
             <span class="metric-value-main" x-text="formatMsWithUnit(currentLatencyMs(95))"></span>
             <span class="metric-value-precise" x-text="formatMsPrecise(currentLatencyMs(95))"></span>
         </div>
-        <div class="metric-change" x-text="latencyViewLabel()"></div>
+        <div class="metric-change flex items-center gap-2">
+            <span x-text="latencyViewLabel()"></span>
+            <span
+                x-show="mode === 'history' && latencySpreadRatio() != null"
+                class="text-xs px-1.5 py-0.5 rounded font-medium"
+                :class="latencySpreadClass()"
+                :title="'Spread ratio: P95 is ' + (latencySpreadRatio()?.toFixed(1) || '?') + 'x P50. Low (<3x) = consistent, High (>5x) = variable tail latency.'"
+                x-text="latencySpreadRatio()?.toFixed(1) + 'x spread'"
+            ></span>
+        </div>
     </div>
 
     <div class="metric-card warning">
@@ -408,7 +437,7 @@
     </div>
 
     <div class="metrics-grid mt-4">
-        <div class="metric-card">
+        <div class="metric-card" x-show="(templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) > 0">
             <div class="metric-label">
                 <span>Read Operations</span>
                 <span
@@ -419,7 +448,7 @@
             <div class="metric-value" x-text="templateInfo?.read_operations || 0"></div>
             <div class="metric-change" x-text="(templateInfo?.reads_per_second || 0).toFixed(2) + ' ops/s'"></div>
         </div>
-        <div class="metric-card">
+        <div class="metric-card" x-show="(templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) > 0">
             <div class="metric-label">
                 <span>Write Operations</span>
                 <span
@@ -432,7 +461,14 @@
         </div>
     </div>
 
-    <h4 class="mt-6 mb-2 font-semibold">Read vs Write Latency</h4>
+    <h4 class="mt-6 mb-2 font-semibold" x-text="
+        ((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0)) > 0 && 
+        ((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0)) > 0 
+            ? 'Read vs Write Latency' 
+            : ((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0)) > 0 
+                ? 'Read Latency' 
+                : 'Write Latency'
+    "></h4>
     <table class="w-full border-collapse mt-2">
         <thead class="bg-gray-100">
             <tr>
@@ -447,7 +483,7 @@
             </tr>
         </thead>
         <tbody>
-            <tr>
+            <tr x-show="(templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) > 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Reads</td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0))"></td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p50_latency_ms'))"></td>
@@ -464,7 +500,7 @@
                     </a>
                 </td>
             </tr>
-            <tr>
+            <tr x-show="(templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) > 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Writes</td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0))"></td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p50_latency_ms'))"></td>
@@ -499,7 +535,7 @@
             </tr>
         </thead>
         <tbody>
-            <tr>
+            <tr x-show="(templateInfo?.point_lookup_count || 0) > 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Point Lookup</td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.point_lookup_count || 0)"></td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('point_lookup_p50_latency_ms'))"></td>
@@ -516,7 +552,7 @@
                     </a>
                 </td>
             </tr>
-            <tr>
+            <tr x-show="(templateInfo?.range_scan_count || 0) > 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Range Scan</td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.range_scan_count || 0)"></td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('range_scan_p50_latency_ms'))"></td>
@@ -533,7 +569,7 @@
                     </a>
                 </td>
             </tr>
-            <tr>
+            <tr x-show="(templateInfo?.insert_count || 0) > 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Insert</td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.insert_count || 0)"></td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('insert_p50_latency_ms'))"></td>
@@ -550,7 +586,7 @@
                     </a>
                 </td>
             </tr>
-            <tr>
+            <tr x-show="(templateInfo?.update_count || 0) > 0">
                 <td class="p-2 font-medium">Update</td>
                 <td class="p-2 text-right" x-text="formatCompact(templateInfo?.update_count || 0)"></td>
                 <td class="p-2 text-right" x-text="formatMs(detailLatency('update_p50_latency_ms'))"></td>

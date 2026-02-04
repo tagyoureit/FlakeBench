@@ -46,6 +46,12 @@ function testHistory() {
 
     const createdAt = t.created_at != null ? String(t.created_at) : "";
 
+    // Cost fields
+    const creditsUsed = Number(t.credits_used);
+    const estimatedCostUsd = Number(t.estimated_cost_usd);
+    const costPer1kOps = Number(t.cost_per_1k_ops || t.cost_per_1000_ops);
+    const costCalculationMethod = t.cost_calculation_method != null ? String(t.cost_calculation_method) : "";
+
     return {
       test_id: testId,
       test_name: testName,
@@ -62,6 +68,11 @@ function testHistory() {
         ? Math.trunc(concurrentConnections)
         : 0,
       duration: Number.isFinite(duration) ? duration : 0,
+      // Cost fields
+      credits_used: Number.isFinite(creditsUsed) ? creditsUsed : 0,
+      estimated_cost_usd: Number.isFinite(estimatedCostUsd) ? estimatedCostUsd : 0,
+      cost_per_1k_ops: Number.isFinite(costPer1kOps) ? costPer1kOps : 0,
+      cost_calculation_method: costCalculationMethod,
     };
   };
 
@@ -147,18 +158,33 @@ function testHistory() {
 
     // Loading states for individual buttons
     rerunningTestId: null,
-    deletingTestId: null,
+    deletingTestIds: {},
     viewingTestId: null,
     applyingFilters: false,
     deepCompareLoading: false,
+    togglingCompareIds: {},
+
+    // Cost settings
+    showCostSettings: false,
+    costSettings: window.CostUtils ? window.CostUtils.getCostSettings() : { dollarsPerCredit: 4.0, showCredits: true },
 
     // Check if any action is in progress for a specific test
     isTestActionInProgress(testId) {
       return (
         this.rerunningTestId === testId ||
-        this.deletingTestId === testId ||
+        this.isDeleting(testId) ||
         this.viewingTestId === testId
       );
+    },
+
+    isTogglingCompare(testId) {
+      const id = testId != null ? String(testId) : "";
+      return !!(this.togglingCompareIds && this.togglingCompareIds[id]);
+    },
+
+    isDeleting(testId) {
+      const id = testId != null ? String(testId) : "";
+      return !!(this.deletingTestIds && this.deletingTestIds[id]);
     },
 
     _refreshInterval: null,
@@ -170,6 +196,23 @@ function testHistory() {
       this.loadTests();
       // Start auto-refresh for running tests
       this._startAutoRefresh();
+    },
+
+    saveCostSettings() {
+      if (window.CostUtils) {
+        window.CostUtils.saveCostSettings(this.costSettings);
+        safeToastSuccess('Cost settings saved');
+      }
+      this.showCostSettings = false;
+      // Force re-render of cost displays by triggering a small state change
+      this.tests = [...this.tests];
+    },
+
+    resetCostSettings() {
+      this.costSettings = { dollarsPerCredit: 4.0, showCredits: true };
+      if (window.CostUtils) {
+        window.CostUtils.saveCostSettings(this.costSettings);
+      }
     },
 
     _startAutoRefresh() {
@@ -300,6 +343,7 @@ function testHistory() {
       if (!id) return;
 
       this.compareError = null;
+      this.togglingCompareIds[id] = true;
 
       // Remove if already selected.
       if (this.isCompared(id)) {
@@ -307,11 +351,13 @@ function testHistory() {
           (t) => String(t.test_id) !== id,
         );
         safeToastSuccess("Removed from compare.");
+        delete this.togglingCompareIds[id];
         return;
       }
 
       if (this.compareTests.length >= MAX_COMPARE) {
         safeToastError(`Compare is limited to ${MAX_COMPARE} tests for now.`);
+        delete this.togglingCompareIds[id];
         return;
       }
 
@@ -330,6 +376,8 @@ function testHistory() {
         console.error("Failed to add to compare:", err);
         this.compareError = err && err.message ? err.message : String(err);
         safeToastError(this.compareError);
+      } finally {
+        delete this.togglingCompareIds[id];
       }
     },
 
@@ -540,7 +588,7 @@ function testHistory() {
     async rerunTest(testId) {
       const confirmed = await window.toast.confirm(
         "Re-run this test with the same configuration?",
-        { confirmText: "Re-run", confirmVariant: "primary", timeoutMs: 10_000 }
+        { confirmText: "Run Again", confirmVariant: "primary", timeoutMs: 10_000 }
       );
       if (!confirmed) return;
 
@@ -566,7 +614,7 @@ function testHistory() {
       );
       if (!confirmed) return;
 
-      this.deletingTestId = testId;
+      this.deletingTestIds[testId] = true;
       try {
         await fetch(`/api/tests/${testId}`, {
           method: "DELETE",
@@ -577,7 +625,7 @@ function testHistory() {
         console.error("Failed to delete test:", error);
         window.toast.error("Failed to delete test");
       } finally {
-        this.deletingTestId = null;
+        delete this.deletingTestIds[testId];
       }
     },
 

@@ -753,6 +753,61 @@ function dashboard(opts) {
         }
       }
 
+      // Postgres Running Queries Chart (live view - for Postgres tests)
+      const pgRunningCanvas = document.getElementById("pgRunningChart");
+      if (!onlyWarehouse && !onlyOverhead) {
+        if (pgRunningCanvas && window.Chart && Chart.getChart) {
+          safeDestroy(Chart.getChart(pgRunningCanvas));
+        }
+
+        const pgRunningCtx =
+          pgRunningCanvas && pgRunningCanvas.getContext
+            ? pgRunningCanvas.getContext("2d")
+            : null;
+        if (pgRunningCtx) {
+          const byKind = this.pgRunningBreakdown === "by_kind";
+
+          pgRunningCanvas.__chart = new Chart(pgRunningCtx, {
+            type: "line",
+            data: {
+              labels: [],
+              datasets: [
+                { label: "Total (active)", data: [], borderColor: "rgb(59, 130, 246)", backgroundColor: "transparent", tension: 0.4 },
+                { label: "Reads (tagged)", data: [], borderColor: "rgb(34, 197, 94)", backgroundColor: "transparent", tension: 0.4, hidden: byKind },
+                { label: "Point Lookup", data: [], borderColor: "rgb(20, 184, 166)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
+                { label: "Range Scan", data: [], borderColor: "rgb(6, 182, 212)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
+                { label: "Writes (tagged)", data: [], borderColor: "rgb(249, 115, 22)", backgroundColor: "transparent", tension: 0.4, hidden: byKind },
+                { label: "Insert", data: [], borderColor: "rgb(245, 158, 11)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
+                { label: "Update", data: [], borderColor: "rgb(239, 68, 68)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
+                { label: "Waiting (locks)", data: [], borderColor: "rgb(168, 85, 247)", backgroundColor: "transparent", tension: 0.4, borderDash: [6, 4] },
+              ],
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: { duration: 0 },
+              interaction: { mode: "index", intersect: false },
+              scales: {
+                y: {
+                  beginAtZero: true,
+                  ticks: { callback: (value) => formatCompact(value) },
+                  title: { display: true, text: "Active Queries" },
+                },
+              },
+              plugins: {
+                tooltip: {
+                  mode: 'index',
+                  intersect: false,
+                  callbacks: {
+                    label: (ctx) => `${ctx.dataset.label}: ${formatCompact(ctx.parsed.y)}`,
+                  },
+                },
+              },
+            },
+          });
+        }
+      }
+
       // OPS/SEC Breakdown Chart (history view)
       const opsSecCanvas = document.getElementById("opsSecChart");
       if (!onlyWarehouse && !onlyOverhead) {
@@ -1053,16 +1108,7 @@ function dashboard(opts) {
         });
       }
 
-      // Handle cancellation with toast notification
-      if (status === "CANCELLING" || status === "CANCELLED") {
-        const displayReason = reason || "User requested";
-        if (window.toast && typeof window.toast.warning === "function") {
-          window.toast.warning(`Test cancelled: ${displayReason}`);
-        }
-        if (this.debug) {
-          console.log("[PHASE] CANCELLATION", { status, reason: displayReason });
-        }
-      }
+
 
       // Update status and phase
       if (status) this.setStatusIfAllowed(status);
@@ -1078,16 +1124,21 @@ function dashboard(opts) {
         }
       }
 
-      // Stop timer on terminal states
-      const isTerminal = ["COMPLETED", "FAILED", "CANCELLED", "STOPPED"].includes(statusUpper);
-      if (isTerminal) {
+      // Stop timer on terminal states, but keep running during PROCESSING phase
+      const isTerminalStatus = ["COMPLETED", "FAILED", "CANCELLED", "STOPPED"].includes(statusUpper);
+      const isProcessing = normalizedPhase === "PROCESSING";
+      if (isTerminalStatus && !isProcessing) {
         this.stopElapsedTimer();
         this.stopProcessingLogTimer();
       }
 
-      // Handle processing phase
-      if (normalizedPhase === "PROCESSING" && this.normalizePhase(prevPhase) !== "PROCESSING") {
+      // Handle processing phase - start processing log timer
+      if (isProcessing && this.normalizePhase(prevPhase) !== "PROCESSING") {
         this.startProcessingLogTimer();
+      }
+      // Stop elapsed timer only when phase is fully COMPLETED (not just status)
+      if (normalizedPhase === "COMPLETED" && this.normalizePhase(prevPhase) !== "COMPLETED") {
+        this.stopElapsedTimer();
       }
     },
 
@@ -1237,9 +1288,10 @@ function dashboard(opts) {
           ? this.normalizePhase(this.phase).toUpperCase() 
           : (this.phase || "").toString().toUpperCase();
         const statusUpper = (this.status || "").toString().toUpperCase();
+        const isProcessing = phaseUpper === "PROCESSING";
         const isTerminal =
           phaseUpper === "COMPLETED" ||
-          ["COMPLETED", "STOPPED", "FAILED", "CANCELLED"].includes(statusUpper);
+          (["COMPLETED", "STOPPED", "FAILED", "CANCELLED"].includes(statusUpper) && !isProcessing);
 
         if (this.duration > 0) {
           this.progress = Math.min(100, (this.elapsed / this.duration) * 100);
@@ -1290,7 +1342,7 @@ function dashboard(opts) {
 
         if (ops) {
           this.metrics.ops_per_sec = ops.current_per_sec || 0;
-          if (hasActiveWorkers) {
+          if (hasActiveWorkers && allowCharts) {
             this.qpsHistory.push(this.metrics.ops_per_sec);
             if (this.qpsHistory.length > 30) this.qpsHistory.shift();
             const sum = this.qpsHistory.reduce((a, b) => a + b, 0);
@@ -1340,6 +1392,21 @@ function dashboard(opts) {
             this.metrics.sf_running_range_scan_bench = bench.running_range_scan || 0;
             this.metrics.sf_running_insert_bench = bench.running_insert || 0;
             this.metrics.sf_running_update_bench = bench.running_update || 0;
+          }
+          // Postgres query stats from pg_stat_activity polling
+          const pgBench = custom.pg_bench;
+          if (pgBench) {
+            this.metrics.pg_bench_available = true;
+            this.metrics.pg_running_bench = pgBench.running || 0;
+            this.metrics.pg_waiting_bench = pgBench.waiting || 0;
+            this.metrics.pg_running_tagged_bench = pgBench.running_tagged || 0;
+            this.metrics.pg_running_other_bench = pgBench.running_other || 0;
+            this.metrics.pg_running_read_bench = pgBench.running_read || 0;
+            this.metrics.pg_running_write_bench = pgBench.running_write || 0;
+            this.metrics.pg_running_point_lookup_bench = pgBench.running_point_lookup || 0;
+            this.metrics.pg_running_range_scan_bench = pgBench.running_range_scan || 0;
+            this.metrics.pg_running_insert_bench = pgBench.running_insert || 0;
+            this.metrics.pg_running_update_bench = pgBench.running_update || 0;
           }
           const latBreakdown = custom.latency_breakdown;
           if (latBreakdown) {
@@ -1518,6 +1585,39 @@ function dashboard(opts) {
             sfRunningChart2.data.datasets[6].data.push(upd);
             sfRunningChart2.data.datasets[7].data.push(this.metrics.sf_bench_available ? this.metrics.sf_blocked_bench : 0);
             sfRunningChart2.update();
+          }
+        }
+
+        // Postgres Running Queries Chart
+        const pgRunningCanvas2 = document.getElementById("pgRunningChart");
+        const pgRunningChart2 = pgRunningCanvas2 && (pgRunningCanvas2.__chart || (window.Chart && Chart.getChart ? Chart.getChart(pgRunningCanvas2) : null));
+        if (pgRunningChart2) {
+          if (pgRunningChart2.data.labels.length > 60) {
+            pgRunningChart2.data.labels.shift();
+            pgRunningChart2.data.datasets.forEach((ds) => ds.data.shift());
+          }
+          if (allowCharts && this.metrics.pg_bench_available) {
+            const totalTagged = this.metrics.pg_running_tagged_bench;
+            const totalRaw = this.metrics.pg_running_bench;
+            const total = totalTagged > 0 ? totalTagged : totalRaw;
+
+            const pgReads = this.metrics.pg_running_read_bench;
+            const pgWrites = this.metrics.pg_running_write_bench;
+            const pgPl = this.metrics.pg_running_point_lookup_bench;
+            const pgRs = this.metrics.pg_running_range_scan_bench;
+            const pgIns = this.metrics.pg_running_insert_bench;
+            const pgUpd = this.metrics.pg_running_update_bench;
+
+            pgRunningChart2.data.labels.push(ts);
+            pgRunningChart2.data.datasets[0].data.push(total);
+            pgRunningChart2.data.datasets[1].data.push(pgReads);
+            pgRunningChart2.data.datasets[2].data.push(pgPl);
+            pgRunningChart2.data.datasets[3].data.push(pgRs);
+            pgRunningChart2.data.datasets[4].data.push(pgWrites);
+            pgRunningChart2.data.datasets[5].data.push(pgIns);
+            pgRunningChart2.data.datasets[6].data.push(pgUpd);
+            pgRunningChart2.data.datasets[7].data.push(this.metrics.pg_waiting_bench);
+            pgRunningChart2.update();
           }
         }
 

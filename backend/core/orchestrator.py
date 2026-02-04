@@ -13,10 +13,21 @@ from typing import Any
 from backend.config import settings
 from backend.connectors import snowflake_pool
 from backend.core import results_store
+from backend.core.pool_refresh import refresh_key_pool_after_writes, test_had_writes
+from backend.core.postgres_stats import (
+    PgCapabilities,
+    PgStatDelta,
+    PgStatSnapshot,
+    capture_pg_stat_snapshot,
+    compute_snapshot_delta,
+    delta_to_dict,
+    get_pg_capabilities,
+)
 from backend.core.results_store import (
     enrich_query_executions_with_retry,
     insert_test_logs,
     update_enrichment_status,
+    update_postgres_enrichment,
     update_test_overhead_percentiles,
 )
 from backend.core.test_log_stream import (
@@ -128,11 +139,55 @@ class RunContext:
     scenario_config: dict[str, Any]
     poll_task: asyncio.Task | None = None
     worker_procs: list[asyncio.subprocess.Process] = field(default_factory=list)
+    worker_stream_tasks: list[asyncio.Task] = field(default_factory=list)
     started_at: datetime | None = None
     stopping: bool = False
     log_queue: asyncio.Queue | None = None
     log_handler: logging.Handler | None = None
     log_drain_task: asyncio.Task | None = None
+    did_resume_warehouse: bool = False
+    # PostgreSQL statistics for enrichment (3-point capture)
+    pg_capabilities: PgCapabilities | None = None
+    pg_snapshot_before_warmup: PgStatSnapshot | None = None
+    pg_snapshot_after_warmup: PgStatSnapshot | None = None
+    pg_snapshot_after_measurement: PgStatSnapshot | None = None
+    pg_delta_warmup: PgStatDelta | None = None  # warmup phase only
+    pg_delta_measurement: PgStatDelta | None = None  # measurement phase only
+    pg_delta_total: PgStatDelta | None = None  # warmup + measurement
+
+
+async def _stream_worker_output(
+    proc: asyncio.subprocess.Process,
+    worker_id: int,
+    run_id: str,
+) -> None:
+    """Stream worker stdout/stderr to console in real-time.
+    
+    NOTE: We print directly instead of using logger.log() to avoid duplicate
+    entries in TEST_LOGS - workers already persist their own logs via
+    TestLogQueueHandler.
+    """
+    import sys
+
+    async def _stream_pipe(stream: asyncio.StreamReader | None) -> None:
+        if stream is None:
+            return
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            text = line.decode().rstrip()
+            if text:
+                print(f"[worker-{worker_id}] {text}", file=sys.stderr)
+
+    tasks = []
+    if proc.stdout:
+        tasks.append(_stream_pipe(proc.stdout))
+    if proc.stderr:
+        tasks.append(_stream_pipe(proc.stderr))
+
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class OrchestratorService:
@@ -145,6 +200,48 @@ class OrchestratorService:
         self._pool = snowflake_pool.get_default_pool()
         self._background_tasks: set[asyncio.Task] = set()
         self._active_runs: dict[str, RunContext] = {}
+
+    async def _get_postgres_connection(self, scenario_config: dict[str, Any]):
+        """
+        Create a Postgres connection for capturing pg_stat_statements snapshots.
+
+        Args:
+            scenario_config: The scenario configuration containing target info
+
+        Returns:
+            asyncpg connection or None if connection fails
+        """
+        import asyncpg
+
+        from backend.connectors.postgres_pool import get_postgres_connection_params
+
+        target_cfg = scenario_config.get("target", {})
+        table_type = str(target_cfg.get("table_type", "")).strip().upper()
+        database = str(target_cfg.get("database", "")).strip()
+
+        if not database:
+            logger.warning("No database configured for Postgres stats capture")
+            return None
+
+        # Determine pool type based on table type
+        pool_type = (
+            "snowflake_postgres" if table_type == "SNOWFLAKE_POSTGRES" else "default"
+        )
+
+        try:
+            params = get_postgres_connection_params(pool_type)
+            conn = await asyncpg.connect(
+                host=params["host"],
+                port=params["port"],
+                database=database,
+                user=params["user"],
+                password=params["password"],
+                timeout=10.0,
+            )
+            return conn
+        except Exception as e:
+            logger.warning("Failed to create Postgres connection for stats: %s", e)
+            return None
 
     async def _run_fail_fast_checks(self, *, template_id: str | None = None) -> None:
         prefix = f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
@@ -189,6 +286,145 @@ class OrchestratorService:
                 raise ValueError(
                     f"Template {template_id} not found in {prefix}.TEST_TEMPLATES"
                 )
+
+    async def generate_preflight_warnings(
+        self, scenario_config: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """
+        Generate pre-flight warnings for a test configuration.
+
+        Checks for configurations that are likely to hit Snowflake limits,
+        particularly the 20-waiter lock limit on standard tables.
+
+        Args:
+            scenario_config: The full scenario configuration dict
+
+        Returns:
+            List of warning dicts with keys: severity, title, message, recommendations
+        """
+        warnings: list[dict[str, Any]] = []
+
+        # Extract relevant config values
+        table_type = str(
+            scenario_config.get("table_type", "standard")
+        ).lower()
+        workload_cfg = scenario_config.get("workload", {})
+        workload_type = str(workload_cfg.get("workload_type", "read_only")).lower()
+        total_threads = int(scenario_config.get("total_threads", 10))
+        table_name = str(scenario_config.get("table_name", ""))
+
+        # Calculate write percentage based on workload type
+        write_pct = 0.0
+        if workload_type == "read_only":
+            write_pct = 0.0
+        elif workload_type == "write_only":
+            write_pct = 1.0
+        elif workload_type == "read_heavy":
+            write_pct = 0.2  # 80% read, 20% write
+        elif workload_type == "write_heavy":
+            write_pct = 0.8  # 20% read, 80% write
+        elif workload_type == "mixed":
+            write_pct = 0.5  # 50/50
+        elif workload_type == "custom":
+            # Parse custom_queries for write operations
+            custom_queries = workload_cfg.get("custom_queries", [])
+            for q in custom_queries:
+                kind = str(q.get("query_kind", "")).upper()
+                weight = float(q.get("weight_pct", 0)) / 100.0
+                if kind in ("INSERT", "UPDATE", "DELETE"):
+                    write_pct += weight
+
+        # Calculate expected concurrent writers
+        expected_concurrent_writes = total_threads * write_pct
+
+        # Check for lock contention risk on standard tables
+        # Snowflake limit: 20 statements waiting for a table lock
+        LOCK_WAITER_LIMIT = 20
+
+        if table_type == "standard" and expected_concurrent_writes > LOCK_WAITER_LIMIT:
+            warnings.append({
+                "severity": "high",
+                "title": "Lock Contention Risk",
+                "message": (
+                    f"Standard tables use TABLE-LEVEL LOCKING for writes. "
+                    f"With {total_threads} threads and ~{write_pct*100:.0f}% writes, "
+                    f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
+                    f"Snowflake's lock waiter limit is {LOCK_WAITER_LIMIT} statements. "
+                    f"If any write takes >1 second, you WILL hit SF_LOCK_WAITER_LIMIT errors."
+                ),
+                "recommendations": [
+                    "Use a HYBRID table for concurrent write workloads (row-level locking)",
+                    f"Reduce concurrency to ≤{int(LOCK_WAITER_LIMIT / write_pct) if write_pct > 0 else total_threads} threads",
+                    "Use READ_ONLY workload to benchmark read performance separately",
+                ],
+                "details": {
+                    "table_type": table_type,
+                    "table_name": table_name,
+                    "total_threads": total_threads,
+                    "write_percentage": round(write_pct * 100, 1),
+                    "expected_concurrent_writes": round(expected_concurrent_writes, 1),
+                    "lock_waiter_limit": LOCK_WAITER_LIMIT,
+                },
+            })
+        elif table_type == "standard" and expected_concurrent_writes > LOCK_WAITER_LIMIT * 0.5:
+            # Warning for approaching the limit (>50% of limit)
+            warnings.append({
+                "severity": "medium",
+                "title": "Potential Lock Contention",
+                "message": (
+                    f"With {total_threads} threads and ~{write_pct*100:.0f}% writes on a STANDARD table, "
+                    f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
+                    f"This approaches Snowflake's {LOCK_WAITER_LIMIT}-waiter limit. "
+                    f"Slow writes could trigger SF_LOCK_WAITER_LIMIT errors."
+                ),
+                "recommendations": [
+                    "Monitor for SF_LOCK_WAITER_LIMIT errors during the run",
+                    "Consider using a HYBRID table for better write concurrency",
+                ],
+                "details": {
+                    "table_type": table_type,
+                    "table_name": table_name,
+                    "total_threads": total_threads,
+                    "write_percentage": round(write_pct * 100, 1),
+                    "expected_concurrent_writes": round(expected_concurrent_writes, 1),
+                    "lock_waiter_limit": LOCK_WAITER_LIMIT,
+                },
+            })
+
+        return warnings
+
+    async def get_preflight_warnings(self, run_id: str) -> list[dict[str, Any]]:
+        """
+        Get pre-flight warnings for a prepared run.
+
+        Args:
+            run_id: The run ID to check
+
+        Returns:
+            List of warning dicts
+        """
+        prefix = f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
+
+        rows = await self._pool.execute_query(
+            f"""
+            SELECT SCENARIO_CONFIG
+            FROM {prefix}.RUN_STATUS
+            WHERE RUN_ID = ?
+            """,
+            params=[run_id],
+        )
+        if not rows:
+            raise ValueError(f"Run {run_id} not found")
+
+        scenario_config_raw = rows[0][0]
+        if isinstance(scenario_config_raw, str):
+            scenario_config = json.loads(scenario_config_raw)
+        elif isinstance(scenario_config_raw, dict):
+            scenario_config = scenario_config_raw
+        else:
+            scenario_config = {}
+
+        return await self.generate_preflight_warnings(scenario_config)
 
     async def create_run(
         self, template_id: str, template_config: dict[str, Any], scenario: TestScenario
@@ -466,25 +702,6 @@ class OrchestratorService:
 
         logger.info("Created run %s for template %s", run_id, template_id)
 
-        # Increment template usage count
-        try:
-            now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
-            await self._pool.execute_query(
-                f"""
-                UPDATE {prefix}.TEST_TEMPLATES
-                SET USAGE_COUNT = COALESCE(USAGE_COUNT, 0) + 1,
-                    LAST_USED_AT = '{now}'
-                WHERE TEMPLATE_ID = ?
-                """,
-                params=[template_id],
-            )
-            logger.debug("Incremented usage count for template %s", template_id)
-        except Exception as e:
-            # Log but don't fail the run creation if usage tracking fails
-            logger.warning(
-                "Failed to increment usage count for template %s: %s", template_id, e
-            )
-
         return run_id
 
     async def start_run(self, run_id: str) -> None:
@@ -492,12 +709,27 @@ class OrchestratorService:
         Transitions run to RUNNING and spawns workers.
 
         Steps:
-        1. Fetch SCENARIO_CONFIG from RUN_STATUS
-        2. Update RUN_STATUS to RUNNING and set START_TIME
-        3. Emit START event to RUN_CONTROL_EVENTS
-        4. Spawn workers as local subprocesses
-        5. Start background poll loop for this run
+        1. Setup log streaming (context vars + handler) FIRST so all logs are captured
+        2. Fetch SCENARIO_CONFIG from RUN_STATUS
+        3. Update RUN_STATUS to RUNNING and set START_TIME
+        4. Emit START event to RUN_CONTROL_EVENTS
+        5. Spawn workers as local subprocesses
+        6. Start background poll loop for this run
         """
+        # Setup log streaming FIRST, before any logger calls, so all orchestrator
+        # logs for this run are captured and streamed to the UI in real-time.
+        log_queue: asyncio.Queue = asyncio.Queue(maxsize=10_000)
+        log_handler = TestLogQueueHandler(test_id=run_id, queue=log_queue)
+        log_handler.setLevel(logging.DEBUG)  # Capture all levels
+
+        # Add handler only to root logger - module logger propagates to root by default
+        # Adding to both causes duplicate log entries
+        logging.getLogger().addHandler(log_handler)
+
+        # Set context vars so TestLogQueueHandler.emit() captures logs for this test
+        CURRENT_TEST_ID.set(run_id)
+        CURRENT_WORKER_ID.set("ORCHESTRATOR")
+
         logger.info("Starting run %s", run_id)
         prefix = f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
 
@@ -520,6 +752,24 @@ class OrchestratorService:
             )
 
         await self._run_fail_fast_checks(template_id=str(template_id or ""))
+
+        # Increment template usage count now that test is actually starting
+        try:
+            now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+            await self._pool.execute_query(
+                f"""
+                UPDATE {prefix}.TEST_TEMPLATES
+                SET USAGE_COUNT = COALESCE(USAGE_COUNT, 0) + 1,
+                    LAST_USED_AT = '{now}'
+                WHERE TEMPLATE_ID = ?
+                """,
+                params=[template_id],
+            )
+            logger.debug("Incremented usage count for template %s", template_id)
+        except Exception as e:
+            logger.warning(
+                "Failed to increment usage count for template %s: %s", template_id, e
+            )
 
         # Parse scenario_config
         if isinstance(scenario_config_raw, str):
@@ -585,16 +835,9 @@ class OrchestratorService:
         )
         self._active_runs[run_id] = ctx
 
-        # Setup log streaming: attach handler to root logger, start drain task
-        log_queue: asyncio.Queue = asyncio.Queue(maxsize=10_000)
-        log_handler = TestLogQueueHandler(test_id=run_id, queue=log_queue)
-        logging.getLogger().addHandler(log_handler)
+        # Store log queue/handler in context (already created at top of function)
         ctx.log_queue = log_queue
         ctx.log_handler = log_handler
-
-        # Set the contextvar so logs are captured for this test
-        CURRENT_TEST_ID.set(run_id)
-        CURRENT_WORKER_ID.set("ORCHESTRATOR")
 
         # Start background task to drain log queue and persist to Snowflake
         drain_task = asyncio.create_task(
@@ -604,7 +847,18 @@ class OrchestratorService:
         self._background_tasks.add(drain_task)
         drain_task.add_done_callback(self._background_tasks.discard)
 
-        # 4. Spawn workers as local subprocesses
+        # 4. For Interactive/Hybrid tables, ensure the warehouse is running before spawning workers
+        target_cfg = scenario_config.get("target") or {}
+        table_type = str(target_cfg.get("table_type") or "").strip().upper()
+        warehouse_name = str(target_cfg.get("warehouse") or "").strip().upper()
+        logger.info("Pre-spawn warehouse check: table_type=%s, warehouse=%s", table_type, warehouse_name)
+        if table_type in ("HYBRID", "INTERACTIVE") and warehouse_name:
+            logger.info("Detected Interactive/Hybrid table - ensuring warehouse %s is running...", warehouse_name)
+            await self._ensure_warehouse_running(ctx, warehouse_name)
+        else:
+            logger.info("Skipping warehouse resume: table_type=%s not in (HYBRID, INTERACTIVE) or no warehouse", table_type)
+
+        # 5. Spawn workers as local subprocesses
         await self._spawn_workers(ctx)
 
         # 5. Start background poll loop for this run
@@ -621,6 +875,41 @@ class OrchestratorService:
             worker_group_count,
             initial_phase,
         )
+
+    async def _ensure_warehouse_running(self, ctx: RunContext, warehouse_name: str) -> None:
+        """
+        Ensure the warehouse is running for Interactive/Hybrid tables.
+        
+        Checks warehouse state and resumes if suspended.
+        Tracks whether we resumed it so we can suspend on teardown.
+        """
+        try:
+            rows = await self._pool.execute_query(f"SHOW WAREHOUSES LIKE '{warehouse_name}'")
+            state = None
+            for row in rows or []:
+                # SHOW WAREHOUSES columns: name(0), state(1), type(2), size(3), ...
+                if len(row) >= 2 and str(row[0]).upper() == warehouse_name:
+                    state = str(row[1]).upper()
+                    break
+            
+            logger.info("Warehouse %s state: %s", warehouse_name, state)
+            
+            if state == "SUSPENDED":
+                logger.info("Resuming suspended warehouse %s for Interactive/Hybrid table...", warehouse_name)
+                await self._pool.execute_query(f"ALTER WAREHOUSE {warehouse_name} RESUME")
+                ctx.did_resume_warehouse = True
+                logger.info("✅ Resumed warehouse %s, waiting for it to be ready...", warehouse_name)
+                await asyncio.sleep(3)
+            elif state == "RESUMING":
+                logger.info("Warehouse %s is resuming, waiting...", warehouse_name)
+                ctx.did_resume_warehouse = True
+                await asyncio.sleep(5)
+            elif state == "STARTED":
+                logger.info("Warehouse %s is already running", warehouse_name)
+            else:
+                logger.warning("Unknown warehouse state %s for %s", state, warehouse_name)
+        except Exception as e:
+            logger.error("Failed to ensure warehouse %s is running: %s", warehouse_name, e)
 
     async def _emit_control_event(
         self, *, run_id: str, event_type: str, event_data: dict[str, Any]
@@ -736,6 +1025,11 @@ class OrchestratorService:
             )
             ctx.worker_procs.append(proc)
 
+            stream_task = asyncio.create_task(
+                _stream_worker_output(proc, group_id, ctx.run_id)
+            )
+            ctx.worker_stream_tasks.append(stream_task)
+
         logger.info("Spawned %d workers for run %s", ctx.worker_group_count, ctx.run_id)
 
     async def _drain_log_queue(self, run_id: str, queue: asyncio.Queue) -> None:
@@ -743,6 +1037,10 @@ class OrchestratorService:
         Background task that drains the log queue and persists logs to Snowflake.
         Runs until the run completes or is cancelled.
         """
+        # Ensure context vars are set so any logs from this task are captured
+        CURRENT_TEST_ID.set(run_id)
+        CURRENT_WORKER_ID.set("ORCHESTRATOR")
+
         while True:
             try:
                 batch: list[dict[str, Any]] = []
@@ -793,6 +1091,10 @@ class OrchestratorService:
         - STOP scheduling based on duration_seconds
         - Monitor worker process health
         """
+        # Ensure context vars are set so logs from this task are captured
+        CURRENT_TEST_ID.set(run_id)
+        CURRENT_WORKER_ID.set("ORCHESTRATOR")
+
         logger.info("Poll loop started for run %s", run_id)
         ctx = self._active_runs.get(run_id)
         if not ctx:
@@ -942,6 +1244,35 @@ class OrchestratorService:
         find_max_best_qps = 0.0
         find_max_completed = False
         find_max_final_reason: str | None = None
+
+        # Postgres stats capture setup
+        is_postgres_test = str(target_cfg.get("table_type", "")).strip().upper() in {
+            "POSTGRES",
+            "SNOWFLAKE_POSTGRES",
+        }
+        pg_stats_conn = None
+        pg_stats_enabled = False
+
+        if is_postgres_test:
+            try:
+                pg_stats_conn = await self._get_postgres_connection(ctx.scenario_config)
+                if pg_stats_conn:
+                    ctx.pg_capabilities = await get_pg_capabilities(pg_stats_conn)
+                    pg_stats_enabled = ctx.pg_capabilities.pg_stat_statements_available
+                    if pg_stats_enabled:
+                        logger.info(
+                            "pg_stat_statements enabled for run %s (track_io_timing=%s)",
+                            run_id,
+                            ctx.pg_capabilities.track_io_timing,
+                        )
+                    else:
+                        logger.info(
+                            "pg_stat_statements not available for run %s - skipping enrichment",
+                            run_id,
+                        )
+            except Exception as e:
+                logger.warning("Failed to check Postgres capabilities for %s: %s", run_id, e)
+                pg_stats_enabled = False
 
         async def _poll_warehouse(elapsed: float | None) -> None:
             if not warehouse_name:
@@ -1172,21 +1503,69 @@ class OrchestratorService:
                 if ctx is not None and isinstance(ctx.scenario_config, dict)
                 else {}
             )
-            table_type_str = str(scenario_config.get("table_type", "")).strip().upper()
+            # table_type is nested under target.table_type in scenario_config
+            target_cfg = scenario_config.get("target", {})
+            table_type_str = str(target_cfg.get("table_type", "")).strip().upper()
             is_postgres_test = table_type_str in {"POSTGRES", "SNOWFLAKE_POSTGRES"}
 
             try:
                 if is_postgres_test:
-                    logger.info(
-                        "Skipping QUERY_HISTORY enrichment for Postgres test %s "
-                        "(pg_stat_statements provides aggregate stats only)",
-                        test_id,
-                    )
-                    await update_enrichment_status(
-                        test_id=test_id,
-                        status="SKIPPED",
-                        error="Postgres: no per-query history available",
-                    )
+                    # Postgres: Use pg_stat_statements enrichment if available
+                    if ctx and ctx.pg_delta_measurement:
+                        delta = ctx.pg_delta_measurement
+                        totals = delta.totals
+                        logger.info(
+                            "Postgres enrichment for %s: %d calls, %.2fms total exec, "
+                            "%.2f%% cache hit, %d query patterns",
+                            test_id,
+                            totals.get("calls", 0),
+                            totals.get("total_exec_time", 0),
+                            totals.get("cache_hit_ratio", 0) * 100,
+                            totals.get("query_pattern_count", 0),
+                        )
+                        # Log by query kind breakdown
+                        for kind, stats in delta.by_query_kind.items():
+                            logger.info(
+                                "  %s: %d calls, %.2fms mean exec, %.2f%% cache hit",
+                                kind,
+                                stats.get("calls", 0),
+                                stats.get("mean_exec_time", 0),
+                                stats.get("cache_hit_ratio", 0) * 100,
+                            )
+                        
+                        # Persist Postgres enrichment data to TEST_RESULTS
+                        pg_caps_dict = None
+                        if ctx.pg_capabilities:
+                            pg_caps_dict = {
+                                "pg_stat_statements_available": ctx.pg_capabilities.pg_stat_statements_available,
+                                "track_io_timing": ctx.pg_capabilities.track_io_timing,
+                                "pg_version": ctx.pg_capabilities.pg_version,
+                            }
+                        await update_postgres_enrichment(
+                            test_id=test_id,
+                            pg_delta_measurement=delta_to_dict(ctx.pg_delta_measurement) if ctx.pg_delta_measurement else None,
+                            pg_delta_warmup=delta_to_dict(ctx.pg_delta_warmup) if ctx.pg_delta_warmup else None,
+                            pg_delta_total=delta_to_dict(ctx.pg_delta_total) if ctx.pg_delta_total else None,
+                            pg_capabilities=pg_caps_dict,
+                        )
+                        
+                        await update_enrichment_status(
+                            test_id=test_id,
+                            status="COMPLETED",
+                            error=None,
+                        )
+                        logger.info("Postgres pg_stat_statements enrichment completed for %s", test_id)
+                    else:
+                        logger.info(
+                            "Skipping QUERY_HISTORY enrichment for Postgres test %s "
+                            "(pg_stat_statements not available or no deltas captured)",
+                            test_id,
+                        )
+                        await update_enrichment_status(
+                            test_id=test_id,
+                            status="SKIPPED",
+                            error="Postgres: pg_stat_statements unavailable or no data captured",
+                        )
                 else:
                     logger.info("Starting enrichment for run %s", test_id)
                     await enrich_query_executions_with_retry(
@@ -1200,6 +1579,31 @@ class OrchestratorService:
                         test_id=test_id, status="COMPLETED", error=None
                     )
                     logger.info("Enrichment completed for run %s", test_id)
+
+                # Refresh value pools if test had writes (runs in parallel with enrichment completion)
+                template_id = ctx.template_id if ctx else None
+                if template_id and test_had_writes(scenario_config):
+                    logger.info(
+                        "Test %s had writes - refreshing KEY pool for template %s",
+                        test_id,
+                        template_id,
+                    )
+                    refresh_result = await refresh_key_pool_after_writes(
+                        template_id=template_id,
+                        scenario_config=scenario_config,
+                        pool=self._pool,
+                    )
+                    if refresh_result.get("refreshed"):
+                        logger.info(
+                            "KEY pool refreshed: %d keys sampled for template %s",
+                            refresh_result.get("keys_sampled", 0),
+                            template_id,
+                        )
+                    elif refresh_result.get("error"):
+                        logger.warning(
+                            "KEY pool refresh skipped: %s",
+                            refresh_result.get("error"),
+                        )
 
                 # Transition phase from PROCESSING to COMPLETED and set END_TIME.
                 # END_TIME is set here (not when status→COMPLETED) so elapsed time
@@ -1440,6 +1844,23 @@ class OrchestratorService:
                     status = "RUNNING"
                     phase = initial_phase
 
+                    # Capture first pg_stat_statements snapshot (before warmup/measurement)
+                    # NOTE: We capture ALL queries (no filter) because PostgreSQL's pg_stat_statements
+                    # strips comments during query normalization, so UB_KIND markers won't be present.
+                    # Query classification happens in extract_query_kind() based on SQL patterns.
+                    if pg_stats_enabled and pg_stats_conn and ctx.pg_snapshot_before_warmup is None:
+                        try:
+                            ctx.pg_snapshot_before_warmup = await capture_pg_stat_snapshot(
+                                pg_stats_conn
+                            )
+                            logger.info(
+                                "Captured pg_stat_statements snapshot 1 (before_warmup) for %s: %d queries",
+                                run_id,
+                                len(ctx.pg_snapshot_before_warmup.stats),
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to capture pg_stat snapshot 1 for %s: %s", run_id, e)
+
                 guardrail_reason = None
                 if (
                     max_cpu_percent is not None
@@ -1566,6 +1987,26 @@ class OrchestratorService:
                     )
                     phase = "MEASUREMENT"
 
+                    # Capture second pg_stat_statements snapshot (after warmup, before measurement)
+                    if pg_stats_enabled and pg_stats_conn and ctx.pg_snapshot_after_warmup is None:
+                        try:
+                            ctx.pg_snapshot_after_warmup = await capture_pg_stat_snapshot(
+                                pg_stats_conn
+                            )
+                            logger.info(
+                                "Captured pg_stat_statements snapshot 2 (after_warmup) for %s: %d queries",
+                                run_id,
+                                len(ctx.pg_snapshot_after_warmup.stats),
+                            )
+                            # Compute warmup phase delta
+                            if ctx.pg_snapshot_before_warmup:
+                                ctx.pg_delta_warmup = compute_snapshot_delta(
+                                    ctx.pg_snapshot_before_warmup,
+                                    ctx.pg_snapshot_after_warmup,
+                                )
+                        except Exception as e:
+                            logger.warning("Failed to capture pg_stat snapshot 2 for %s: %s", run_id, e)
+
                 effective_elapsed_seconds = elapsed_seconds
                 if warmup_seconds > 0 and warmup_elapsed_seconds is not None:
                     # Use warmup start as the elapsed base so PREPARING does not
@@ -1606,6 +2047,44 @@ class OrchestratorService:
                         params=[run_id],
                     )
                     status = "STOPPING"
+
+                    # Capture third pg_stat_statements snapshot (after measurement)
+                    if pg_stats_enabled and pg_stats_conn and ctx.pg_snapshot_after_measurement is None:
+                        try:
+                            ctx.pg_snapshot_after_measurement = await capture_pg_stat_snapshot(
+                                pg_stats_conn
+                            )
+                            logger.info(
+                                "Captured pg_stat_statements snapshot 3 (after_measurement) for %s: %d queries",
+                                run_id,
+                                len(ctx.pg_snapshot_after_measurement.stats),
+                            )
+                            # Compute measurement phase delta (after_warmup -> after_measurement)
+                            # If no warmup, use before_warmup as the baseline
+                            baseline_snapshot = (
+                                ctx.pg_snapshot_after_warmup
+                                if ctx.pg_snapshot_after_warmup
+                                else ctx.pg_snapshot_before_warmup
+                            )
+                            if baseline_snapshot:
+                                ctx.pg_delta_measurement = compute_snapshot_delta(
+                                    baseline_snapshot,
+                                    ctx.pg_snapshot_after_measurement,
+                                )
+                            # Compute total delta (before_warmup -> after_measurement)
+                            if ctx.pg_snapshot_before_warmup:
+                                ctx.pg_delta_total = compute_snapshot_delta(
+                                    ctx.pg_snapshot_before_warmup,
+                                    ctx.pg_snapshot_after_measurement,
+                                )
+                            logger.info(
+                                "Computed pg_stat deltas for %s: measurement=%s, total=%s",
+                                run_id,
+                                ctx.pg_delta_measurement is not None,
+                                ctx.pg_delta_total is not None,
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to capture pg_stat snapshot 3 for %s: %s", run_id, e)
 
                 total_ops = 0
                 error_count = 0
@@ -2086,37 +2565,12 @@ class OrchestratorService:
                         proc.returncode is not None for proc in ctx.worker_procs
                     )
                     if all_exited:
+                        # Wait for stream tasks to finish draining any remaining output
+                        if ctx.worker_stream_tasks:
+                            await asyncio.gather(
+                                *ctx.worker_stream_tasks, return_exceptions=True
+                            )
                         for i, proc in enumerate(ctx.worker_procs):
-                            stdout_data, stderr_data = await proc.communicate()
-                            if stdout_data:
-                                logger.info(
-                                    "Worker %d stdout for %s:\n%s",
-                                    i,
-                                    run_id,
-                                    stdout_data.decode()[-4000:],
-                                )
-                            if stderr_data:
-                                stderr_str = stderr_data.decode()
-                                if len(stderr_str) > 8000:
-                                    logger.warning(
-                                        "Worker %d stderr for %s (first 4000 chars):\n%s",
-                                        i,
-                                        run_id,
-                                        stderr_str[:4000],
-                                    )
-                                    logger.warning(
-                                        "Worker %d stderr for %s (last 4000 chars):\n%s",
-                                        i,
-                                        run_id,
-                                        stderr_str[-4000:],
-                                    )
-                                else:
-                                    logger.warning(
-                                        "Worker %d stderr for %s:\n%s",
-                                        i,
-                                        run_id,
-                                        stderr_str,
-                                    )
                             logger.info("Worker %d exit code: %s", i, proc.returncode)
                         logger.info(
                             "All workers exited for run %s, poll loop ending", run_id
@@ -2173,6 +2627,27 @@ class OrchestratorService:
                 logger.error(
                     "Failed to finalize run %s status: %s", run_id, finalize_err
                 )
+
+            # If we resumed an Interactive/Hybrid warehouse, suspend it to save costs
+            ctx = self._active_runs.get(run_id)
+            if ctx and ctx.did_resume_warehouse:
+                target_cfg = ctx.scenario_config.get("target") or {}
+                warehouse_name = str(target_cfg.get("warehouse") or "").strip().upper()
+                if warehouse_name:
+                    try:
+                        logger.info("Suspending warehouse %s (we resumed it on startup)...", warehouse_name)
+                        await self._pool.execute_query(f"ALTER WAREHOUSE {warehouse_name} SUSPEND")
+                        logger.info("✅ Suspended warehouse %s", warehouse_name)
+                    except Exception as suspend_err:
+                        logger.warning("Failed to suspend warehouse %s: %s", warehouse_name, suspend_err)
+
+            # Clean up Postgres stats connection
+            if pg_stats_conn:
+                try:
+                    await pg_stats_conn.close()
+                    logger.debug("Closed Postgres stats connection for run %s", run_id)
+                except Exception as pg_close_err:
+                    logger.warning("Failed to close Postgres stats connection for %s: %s", run_id, pg_close_err)
 
             # Clean up log streaming
             ctx = self._active_runs.get(run_id)

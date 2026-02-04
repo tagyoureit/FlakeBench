@@ -47,6 +47,22 @@
     </div>
 
     <div x-show="!loading && !error && ready">
+        <!-- Floating toolbar for chart controls -->
+        <div class="floating-toolbar" style="margin-bottom: 1rem;">
+            <span class="floating-toolbar-label">Charts</span>
+            <button
+                type="button"
+                class="btn btn-sm"
+                :class="showWarmup ? 'btn-warning' : 'btn-secondary'"
+                @click="toggleShowWarmup()"
+            >
+                <span x-text="showWarmup ? 'Hide Warmup' : 'Show Warmup'"></span>
+            </button>
+            <span class="floating-toolbar-indicator" :class="{ 'active': showWarmup }">
+                <span x-text="showWarmup ? 'Showing warmup' : 'Measurement only'"></span>
+            </span>
+        </div>
+
         <div class="dashboard-top-grid">
             <div class="card" x-show="testA">
                 <div class="card-title" style="margin-bottom: 0.25rem;">
@@ -68,11 +84,21 @@
                         <strong>Database:</strong>
                         <span>Postgres</span>
                     </div>
+                    <div class="mt-1" x-show="testA && testA.load_mode">
+                        <strong>Load Mode:</strong>
+                        <span x-text="testA ? (testA.load_mode || '') : ''"></span>
+                    </div>
+                    <div class="mt-1" x-show="testA && testA.workload_mix">
+                        <strong>Workload Mix:</strong>
+                        <span x-text="testA ? (testA.workload_mix || '') : ''"></span>
+                    </div>
                     <div class="mt-1">
-                        <strong>Concurrency:</strong>
-                        <span x-text="testA ? (testA.concurrent_connections ?? '') : ''"></span>
-                        • <strong>Duration:</strong>
+                        <strong>Duration:</strong>
                         <span x-text="testA && testA.duration_seconds != null ? Number(testA.duration_seconds).toFixed(0) : ''"></span>s
+                    </div>
+                    <div class="mt-1" x-show="testA && testA.scaling_mode">
+                        <strong>Scaling:</strong>
+                        <span x-text="testA ? (testA.scaling_mode === 'AUTO' ? 'Auto' : testA.scaling_mode || '') : ''"></span>
                     </div>
                     <div class="mt-1">
                         <strong>QPS:</strong>
@@ -108,11 +134,21 @@
                         <strong>Database:</strong>
                         <span>Postgres</span>
                     </div>
+                    <div class="mt-1" x-show="testB && testB.load_mode">
+                        <strong>Load Mode:</strong>
+                        <span x-text="testB ? (testB.load_mode || '') : ''"></span>
+                    </div>
+                    <div class="mt-1" x-show="testB && testB.workload_mix">
+                        <strong>Workload Mix:</strong>
+                        <span x-text="testB ? (testB.workload_mix || '') : ''"></span>
+                    </div>
                     <div class="mt-1">
-                        <strong>Concurrency:</strong>
-                        <span x-text="testB ? (testB.concurrent_connections ?? '') : ''"></span>
-                        • <strong>Duration:</strong>
+                        <strong>Duration:</strong>
                         <span x-text="testB && testB.duration_seconds != null ? Number(testB.duration_seconds).toFixed(0) : ''"></span>s
+                    </div>
+                    <div class="mt-1" x-show="testB && testB.scaling_mode">
+                        <strong>Scaling:</strong>
+                        <span x-text="testB ? (testB.scaling_mode === 'AUTO' ? 'Auto' : testB.scaling_mode || '') : ''"></span>
                     </div>
                     <div class="mt-1">
                         <strong>QPS:</strong>
@@ -125,6 +161,337 @@
                     <a class="btn btn-secondary btn-sm" :href="testB ? `/dashboard/history/${testB.test_id}` : '/history'">
                         Open History Dashboard
                     </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- Duration Mismatch Warning -->
+        <template x-if="testA && testB && Math.abs((testA.duration_seconds || 0) - (testB.duration_seconds || 0)) > Math.min(testA.duration_seconds || 1, testB.duration_seconds || 1) * 0.1">
+            <div class="card" style="background: #fef3c7; border: 1px solid #f59e0b;">
+                <div style="display: flex; align-items: center; gap: 0.5rem; color: #92400e;">
+                    <svg style="width: 1.25rem; height: 1.25rem; flex-shrink: 0;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                    </svg>
+                    <div>
+                        <strong>Duration Mismatch:</strong>
+                        Primary ran for <span x-text="testA?.duration_seconds?.toFixed(0) || '?'"></span>s vs Secondary <span x-text="testB?.duration_seconds?.toFixed(0) || '?'"></span>s.
+                        Charts are time-aligned but aggregate metrics may not be directly comparable.
+                    </div>
+                </div>
+            </div>
+        </template>
+
+        <!-- Statistics Comparison Panel -->
+        <div class="card" x-show="statisticsA || statisticsB">
+            <div class="card-title">Statistics Comparison</div>
+            <div x-show="statisticsLoading" class="text-center py-4">
+                {% include "components/loading_spinner.html" %}
+                <p class="mt-2 text-sm">Loading statistics...</p>
+            </div>
+            <div x-show="statisticsError" class="alert alert-error">
+                <span x-text="statisticsError"></span>
+            </div>
+            <div x-show="!statisticsLoading && !statisticsError">
+                <div style="overflow-x: auto;">
+                    <table class="comparison-table" style="width: 100%;">
+                        <thead>
+                            <tr>
+                                <th style="width: 200px;">Metric</th>
+                                <th class="text-right" style="width: 120px;">Primary</th>
+                                <th class="text-right" style="width: 120px;">Secondary</th>
+                                <th class="text-right" style="width: 100px;">Delta</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Total Queries</td>
+                                <td class="text-right py-2 px-3" x-text="statisticsA?.total_queries?.toLocaleString() ?? '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="statisticsB?.total_queries?.toLocaleString() ?? '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.total_queries, statisticsB?.total_queries))" x-text="formatDelta(calcDelta(statisticsA?.total_queries, statisticsB?.total_queries))"></td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Success Rate (%)</td>
+                                <td class="text-right py-2 px-3" x-text="statisticsA?.success_rate_pct != null ? statisticsA.success_rate_pct.toFixed(2) + '%' : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="statisticsB?.success_rate_pct != null ? statisticsB.success_rate_pct.toFixed(2) + '%' : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.success_rate_pct, statisticsB?.success_rate_pct))" x-text="formatDelta(calcDelta(statisticsA?.success_rate_pct, statisticsB?.success_rate_pct))"></td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Avg Throughput (QPS)</td>
+                                <td class="text-right py-2 px-3" x-text="statisticsA?.throughput?.avg_qps != null ? statisticsA.throughput.avg_qps.toFixed(1) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="statisticsB?.throughput?.avg_qps != null ? statisticsB.throughput.avg_qps.toFixed(1) : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.throughput?.avg_qps, statisticsB?.throughput?.avg_qps))" x-text="formatDelta(calcDelta(statisticsA?.throughput?.avg_qps, statisticsB?.throughput?.avg_qps))"></td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Latency P50 (ms)</td>
+                                <td class="text-right py-2 px-3" x-text="statisticsA?.latency?.p50_ms != null ? statisticsA.latency.p50_ms.toFixed(2) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="statisticsB?.latency?.p50_ms != null ? statisticsB.latency.p50_ms.toFixed(2) : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.latency?.p50_ms, statisticsB?.latency?.p50_ms), true)" x-text="formatDelta(calcDelta(statisticsA?.latency?.p50_ms, statisticsB?.latency?.p50_ms))"></td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Latency P95 (ms)</td>
+                                <td class="text-right py-2 px-3" x-text="statisticsA?.latency?.p95_ms != null ? statisticsA.latency.p95_ms.toFixed(2) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="statisticsB?.latency?.p95_ms != null ? statisticsB.latency.p95_ms.toFixed(2) : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.latency?.p95_ms, statisticsB?.latency?.p95_ms), true)" x-text="formatDelta(calcDelta(statisticsA?.latency?.p95_ms, statisticsB?.latency?.p95_ms))"></td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Latency P99 (ms)</td>
+                                <td class="text-right py-2 px-3" x-text="statisticsA?.latency?.p99_ms != null ? statisticsA.latency.p99_ms.toFixed(2) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="statisticsB?.latency?.p99_ms != null ? statisticsB.latency.p99_ms.toFixed(2) : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.latency?.p99_ms, statisticsB?.latency?.p99_ms), true)" x-text="formatDelta(calcDelta(statisticsA?.latency?.p99_ms, statisticsB?.latency?.p99_ms))"></td>
+                            </tr>
+                            <tr>
+                                <td class="py-2 px-3 font-medium">Error Rate (%)</td>
+                                <td class="text-right py-2 px-3" x-text="statisticsA?.errors?.error_rate_pct != null ? statisticsA.errors.error_rate_pct.toFixed(2) + '%' : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="statisticsB?.errors?.error_rate_pct != null ? statisticsB.errors.error_rate_pct.toFixed(2) + '%' : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.errors?.error_rate_pct, statisticsB?.errors?.error_rate_pct), true)" x-text="formatDelta(calcDelta(statisticsA?.errors?.error_rate_pct, statisticsB?.errors?.error_rate_pct))"></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="text-xs text-gray-500 mt-3">
+                    Total queries: Primary=<span x-text="statisticsA?.total_queries ?? '—'"></span>, Secondary=<span x-text="statisticsB?.total_queries ?? '—'"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detailed Latency Breakdown Section -->
+        <div class="card" x-show="latencyBreakdownA || latencyBreakdownB">
+            <div class="card-title">Detailed Latency Breakdown</div>
+            <div x-show="latencyBreakdownLoading" class="text-center py-4">
+                {% include "components/loading_spinner.html" %}
+                <p class="mt-2 text-sm">Loading latency breakdown...</p>
+            </div>
+            <div x-show="latencyBreakdownError" class="alert alert-error">
+                <span x-text="latencyBreakdownError"></span>
+            </div>
+            <div x-show="!latencyBreakdownLoading && !latencyBreakdownError">
+                <!-- Read/Write Operations Summary Cards -->
+                <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; margin-bottom: 1.5rem;">
+                    <!-- Read Operations Card -->
+                    <div style="background: linear-gradient(135deg, #dbeafe 0%, #eff6ff 100%); border-radius: 0.5rem; padding: 1rem; border: 1px solid #bfdbfe;">
+                        <div style="font-weight: 600; color: #1e40af; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem;">
+                            <svg style="width: 1.25rem; height: 1.25rem;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                            </svg>
+                            Read Operations
+                        </div>
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; font-size: 0.875rem;">
+                            <div>
+                                <span style="color: #6b7280;">Primary:</span>
+                                <span style="font-weight: 500;" x-text="formatCount(latencyBreakdownA?.read_operations?.count)"></span>
+                                <span style="color: #6b7280;">(<span x-text="formatOps(latencyBreakdownA?.read_operations?.ops_per_second)"></span>)</span>
+                            </div>
+                            <div>
+                                <span style="color: #6b7280;">Secondary:</span>
+                                <span style="font-weight: 500;" x-text="formatCount(latencyBreakdownB?.read_operations?.count)"></span>
+                                <span style="color: #6b7280;">(<span x-text="formatOps(latencyBreakdownB?.read_operations?.ops_per_second)"></span>)</span>
+                            </div>
+                        </div>
+                        <template x-if="latencyBreakdownA?.read_operations && latencyBreakdownB?.read_operations">
+                            <div style="margin-top: 0.5rem; font-size: 0.75rem;">
+                                <span style="color: #6b7280;">Δ Ops/s:</span>
+                                <span :style="{ color: (latencyBreakdownA.read_operations.ops_per_second - latencyBreakdownB.read_operations.ops_per_second) >= 0 ? '#059669' : '#dc2626', fontWeight: '600' }"
+                                      x-text="((latencyBreakdownA.read_operations.ops_per_second - latencyBreakdownB.read_operations.ops_per_second) >= 0 ? '+' : '') + formatOps(latencyBreakdownA.read_operations.ops_per_second - latencyBreakdownB.read_operations.ops_per_second)"></span>
+                                <span :style="{ color: (latencyBreakdownA.read_operations.ops_per_second - latencyBreakdownB.read_operations.ops_per_second) >= 0 ? '#059669' : '#dc2626' }"
+                                      x-text="'(' + (latencyBreakdownB.read_operations.ops_per_second > 0 ? (((latencyBreakdownA.read_operations.ops_per_second - latencyBreakdownB.read_operations.ops_per_second) / latencyBreakdownB.read_operations.ops_per_second) * 100).toFixed(1) + '%' : '—') + ')'"></span>
+                            </div>
+                        </template>
+                    </div>
+                    <!-- Write Operations Card -->
+                    <div style="background: linear-gradient(135deg, #fce7f3 0%, #fdf2f8 100%); border-radius: 0.5rem; padding: 1rem; border: 1px solid #fbcfe8;">
+                        <div style="font-weight: 600; color: #be185d; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem;">
+                            <svg style="width: 1.25rem; height: 1.25rem;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                            </svg>
+                            Write Operations
+                        </div>
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; font-size: 0.875rem;">
+                            <div>
+                                <span style="color: #6b7280;">Primary:</span>
+                                <span style="font-weight: 500;" x-text="formatCount(latencyBreakdownA?.write_operations?.count)"></span>
+                                <span style="color: #6b7280;">(<span x-text="formatOps(latencyBreakdownA?.write_operations?.ops_per_second)"></span>)</span>
+                            </div>
+                            <div>
+                                <span style="color: #6b7280;">Secondary:</span>
+                                <span style="font-weight: 500;" x-text="formatCount(latencyBreakdownB?.write_operations?.count)"></span>
+                                <span style="color: #6b7280;">(<span x-text="formatOps(latencyBreakdownB?.write_operations?.ops_per_second)"></span>)</span>
+                            </div>
+                        </div>
+                        <template x-if="latencyBreakdownA?.write_operations && latencyBreakdownB?.write_operations">
+                            <div style="margin-top: 0.5rem; font-size: 0.75rem;">
+                                <span style="color: #6b7280;">Δ Ops/s:</span>
+                                <span :style="{ color: (latencyBreakdownA.write_operations.ops_per_second - latencyBreakdownB.write_operations.ops_per_second) >= 0 ? '#059669' : '#dc2626', fontWeight: '600' }"
+                                      x-text="((latencyBreakdownA.write_operations.ops_per_second - latencyBreakdownB.write_operations.ops_per_second) >= 0 ? '+' : '') + formatOps(latencyBreakdownA.write_operations.ops_per_second - latencyBreakdownB.write_operations.ops_per_second)"></span>
+                                <span :style="{ color: (latencyBreakdownA.write_operations.ops_per_second - latencyBreakdownB.write_operations.ops_per_second) >= 0 ? '#059669' : '#dc2626' }"
+                                      x-text="'(' + (latencyBreakdownB.write_operations.ops_per_second > 0 ? (((latencyBreakdownA.write_operations.ops_per_second - latencyBreakdownB.write_operations.ops_per_second) / latencyBreakdownB.write_operations.ops_per_second) * 100).toFixed(1) + '%' : '—') + ')'"></span>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Read vs Write Latency Table -->
+                <div style="margin-bottom: 1.5rem;">
+                    <h4 style="font-size: 0.875rem; font-weight: 600; color: #374151; margin-bottom: 0.75rem;">Read vs Write Latency</h4>
+                    <div style="overflow-x: auto;">
+                        <table class="comparison-table" style="width: 100%;">
+                            <thead>
+                                <tr>
+                                    <th style="width: 120px;">Type</th>
+                                    <th>P50 (ms)</th>
+                                    <th>P95 (ms)</th>
+                                    <th>P99 (ms)</th>
+                                    <th>Min (ms)</th>
+                                    <th>Max (ms)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <!-- Read Row -->
+                                <tr>
+                                    <td style="font-weight: 600; color: #1e40af;">Read</td>
+                                    <td>
+                                        <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                            <span x-text="formatMs(latencyBreakdownA?.read_operations?.p50_ms) + ' / ' + formatMs(latencyBreakdownB?.read_operations?.p50_ms)"></span>
+                                            <template x-if="latencyBreakdownA?.read_operations?.p50_ms && latencyBreakdownB?.read_operations?.p50_ms">
+                                                <span style="font-size: 0.75rem;"
+                                                      :style="{ color: (latencyBreakdownA.read_operations.p50_ms - latencyBreakdownB.read_operations.p50_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                      x-text="((latencyBreakdownA.read_operations.p50_ms - latencyBreakdownB.read_operations.p50_ms) <= 0 ? '↓' : '↑') + Math.abs(((latencyBreakdownA.read_operations.p50_ms - latencyBreakdownB.read_operations.p50_ms) / latencyBreakdownB.read_operations.p50_ms) * 100).toFixed(1) + '%'"></span>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                            <span x-text="formatMs(latencyBreakdownA?.read_operations?.p95_ms) + ' / ' + formatMs(latencyBreakdownB?.read_operations?.p95_ms)"></span>
+                                            <template x-if="latencyBreakdownA?.read_operations?.p95_ms && latencyBreakdownB?.read_operations?.p95_ms">
+                                                <span style="font-size: 0.75rem;"
+                                                      :style="{ color: (latencyBreakdownA.read_operations.p95_ms - latencyBreakdownB.read_operations.p95_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                      x-text="((latencyBreakdownA.read_operations.p95_ms - latencyBreakdownB.read_operations.p95_ms) <= 0 ? '↓' : '↑') + Math.abs(((latencyBreakdownA.read_operations.p95_ms - latencyBreakdownB.read_operations.p95_ms) / latencyBreakdownB.read_operations.p95_ms) * 100).toFixed(1) + '%'"></span>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                            <span x-text="formatMs(latencyBreakdownA?.read_operations?.p99_ms) + ' / ' + formatMs(latencyBreakdownB?.read_operations?.p99_ms)"></span>
+                                            <template x-if="latencyBreakdownA?.read_operations?.p99_ms && latencyBreakdownB?.read_operations?.p99_ms">
+                                                <span style="font-size: 0.75rem;"
+                                                      :style="{ color: (latencyBreakdownA.read_operations.p99_ms - latencyBreakdownB.read_operations.p99_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                      x-text="((latencyBreakdownA.read_operations.p99_ms - latencyBreakdownB.read_operations.p99_ms) <= 0 ? '↓' : '↑') + Math.abs(((latencyBreakdownA.read_operations.p99_ms - latencyBreakdownB.read_operations.p99_ms) / latencyBreakdownB.read_operations.p99_ms) * 100).toFixed(1) + '%'"></span>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td x-text="formatMs(latencyBreakdownA?.read_operations?.min_ms) + ' / ' + formatMs(latencyBreakdownB?.read_operations?.min_ms)"></td>
+                                    <td x-text="formatMs(latencyBreakdownA?.read_operations?.max_ms) + ' / ' + formatMs(latencyBreakdownB?.read_operations?.max_ms)"></td>
+                                </tr>
+                                <!-- Write Row -->
+                                <tr>
+                                    <td style="font-weight: 600; color: #be185d;">Write</td>
+                                    <td>
+                                        <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                            <span x-text="formatMs(latencyBreakdownA?.write_operations?.p50_ms) + ' / ' + formatMs(latencyBreakdownB?.write_operations?.p50_ms)"></span>
+                                            <template x-if="latencyBreakdownA?.write_operations?.p50_ms && latencyBreakdownB?.write_operations?.p50_ms">
+                                                <span style="font-size: 0.75rem;"
+                                                      :style="{ color: (latencyBreakdownA.write_operations.p50_ms - latencyBreakdownB.write_operations.p50_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                      x-text="((latencyBreakdownA.write_operations.p50_ms - latencyBreakdownB.write_operations.p50_ms) <= 0 ? '↓' : '↑') + Math.abs(((latencyBreakdownA.write_operations.p50_ms - latencyBreakdownB.write_operations.p50_ms) / latencyBreakdownB.write_operations.p50_ms) * 100).toFixed(1) + '%'"></span>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                            <span x-text="formatMs(latencyBreakdownA?.write_operations?.p95_ms) + ' / ' + formatMs(latencyBreakdownB?.write_operations?.p95_ms)"></span>
+                                            <template x-if="latencyBreakdownA?.write_operations?.p95_ms && latencyBreakdownB?.write_operations?.p95_ms">
+                                                <span style="font-size: 0.75rem;"
+                                                      :style="{ color: (latencyBreakdownA.write_operations.p95_ms - latencyBreakdownB.write_operations.p95_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                      x-text="((latencyBreakdownA.write_operations.p95_ms - latencyBreakdownB.write_operations.p95_ms) <= 0 ? '↓' : '↑') + Math.abs(((latencyBreakdownA.write_operations.p95_ms - latencyBreakdownB.write_operations.p95_ms) / latencyBreakdownB.write_operations.p95_ms) * 100).toFixed(1) + '%'"></span>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                            <span x-text="formatMs(latencyBreakdownA?.write_operations?.p99_ms) + ' / ' + formatMs(latencyBreakdownB?.write_operations?.p99_ms)"></span>
+                                            <template x-if="latencyBreakdownA?.write_operations?.p99_ms && latencyBreakdownB?.write_operations?.p99_ms">
+                                                <span style="font-size: 0.75rem;"
+                                                      :style="{ color: (latencyBreakdownA.write_operations.p99_ms - latencyBreakdownB.write_operations.p99_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                      x-text="((latencyBreakdownA.write_operations.p99_ms - latencyBreakdownB.write_operations.p99_ms) <= 0 ? '↓' : '↑') + Math.abs(((latencyBreakdownA.write_operations.p99_ms - latencyBreakdownB.write_operations.p99_ms) / latencyBreakdownB.write_operations.p99_ms) * 100).toFixed(1) + '%'"></span>
+                                            </template>
+                                        </div>
+                                    </td>
+                                    <td x-text="formatMs(latencyBreakdownA?.write_operations?.min_ms) + ' / ' + formatMs(latencyBreakdownB?.write_operations?.min_ms)"></td>
+                                    <td x-text="formatMs(latencyBreakdownA?.write_operations?.max_ms) + ' / ' + formatMs(latencyBreakdownB?.write_operations?.max_ms)"></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Per-Query-Type Latency Table -->
+                <div>
+                    <h4 style="font-size: 0.875rem; font-weight: 600; color: #374151; margin-bottom: 0.75rem;">Per-Query-Type Latency</h4>
+                    <div style="overflow-x: auto;">
+                        <table class="comparison-table" style="width: 100%;">
+                            <thead>
+                                <tr>
+                                    <th style="width: 140px;">Query Type</th>
+                                    <th>Count</th>
+                                    <th>P50 (ms)</th>
+                                    <th>P95 (ms)</th>
+                                    <th>P99 (ms)</th>
+                                    <th>Ops/s</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template x-for="item in getMergedQueryTypes()" :key="item.query_type">
+                                    <tr>
+                                        <td style="font-weight: 500;" :style="{ color: isReadOperation(item.query_type) ? '#1e40af' : '#be185d' }" x-text="item.query_type"></td>
+                                        <td>
+                                            <span x-text="formatCount(item.primary?.count) + ' / ' + formatCount(item.secondary?.count)"></span>
+                                        </td>
+                                        <td>
+                                            <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                                <span x-text="formatMs(item.primary?.p50_ms) + ' / ' + formatMs(item.secondary?.p50_ms)"></span>
+                                                <template x-if="item.primary?.p50_ms && item.secondary?.p50_ms">
+                                                    <span style="font-size: 0.75rem;"
+                                                          :style="{ color: (item.primary.p50_ms - item.secondary.p50_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                          x-text="((item.primary.p50_ms - item.secondary.p50_ms) <= 0 ? '↓' : '↑') + Math.abs(((item.primary.p50_ms - item.secondary.p50_ms) / item.secondary.p50_ms) * 100).toFixed(1) + '%'"></span>
+                                                </template>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                                <span x-text="formatMs(item.primary?.p95_ms) + ' / ' + formatMs(item.secondary?.p95_ms)"></span>
+                                                <template x-if="item.primary?.p95_ms && item.secondary?.p95_ms">
+                                                    <span style="font-size: 0.75rem;"
+                                                          :style="{ color: (item.primary.p95_ms - item.secondary.p95_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                          x-text="((item.primary.p95_ms - item.secondary.p95_ms) <= 0 ? '↓' : '↑') + Math.abs(((item.primary.p95_ms - item.secondary.p95_ms) / item.secondary.p95_ms) * 100).toFixed(1) + '%'"></span>
+                                                </template>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                                <span x-text="formatMs(item.primary?.p99_ms) + ' / ' + formatMs(item.secondary?.p99_ms)"></span>
+                                                <template x-if="item.primary?.p99_ms && item.secondary?.p99_ms">
+                                                    <span style="font-size: 0.75rem;"
+                                                          :style="{ color: (item.primary.p99_ms - item.secondary.p99_ms) <= 0 ? '#059669' : '#dc2626' }"
+                                                          x-text="((item.primary.p99_ms - item.secondary.p99_ms) <= 0 ? '↓' : '↑') + Math.abs(((item.primary.p99_ms - item.secondary.p99_ms) / item.secondary.p99_ms) * 100).toFixed(1) + '%'"></span>
+                                                </template>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div style="display: flex; flex-direction: column; gap: 0.125rem;">
+                                                <span x-text="formatOps(item.primary?.ops_per_second) + ' / ' + formatOps(item.secondary?.ops_per_second)"></span>
+                                                <template x-if="item.primary?.ops_per_second && item.secondary?.ops_per_second">
+                                                    <span style="font-size: 0.75rem;"
+                                                          :style="{ color: (item.primary.ops_per_second - item.secondary.ops_per_second) >= 0 ? '#059669' : '#dc2626' }"
+                                                          x-text="((item.primary.ops_per_second - item.secondary.ops_per_second) >= 0 ? '↑' : '↓') + Math.abs(((item.primary.ops_per_second - item.secondary.ops_per_second) / item.secondary.ops_per_second) * 100).toFixed(1) + '%'"></span>
+                                                </template>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="text-xs text-gray-500 mt-3">
+                    Values shown as Primary / Secondary. Percentages indicate change from Secondary to Primary (↓ latency = improvement, ↑ ops/s = improvement).
                 </div>
             </div>
         </div>
@@ -153,6 +520,28 @@
             </div>
             <div class="chart-container" style="margin-top: 1rem;">
                 <canvas id="compareConcurrencyChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Error Timeline Chart -->
+        <div class="card" x-show="(errorTimelineA && errorTimelineA.total_errors > 0) || (errorTimelineB && errorTimelineB.total_errors > 0)">
+            <div class="card-title">Error Timeline</div>
+            <div x-show="errorTimelineLoading" class="text-center py-4">
+                {% include "components/loading_spinner.html" %}
+                <p class="mt-2 text-sm">Loading error timeline...</p>
+            </div>
+            <div x-show="errorTimelineError" class="alert alert-error">
+                <span x-text="errorTimelineError"></span>
+            </div>
+            <div x-show="!errorTimelineLoading && !errorTimelineError" style="color: #6b7280; margin-top: -0.25rem;">
+                Error rate percentage over time (5-second buckets).
+            </div>
+            <div class="chart-container" style="margin-top: 1rem;" x-show="!errorTimelineLoading && !errorTimelineError">
+                <canvas id="compareErrorTimelineChart"></canvas>
+            </div>
+            <div class="text-xs text-gray-500 mt-3" x-show="!errorTimelineLoading && !errorTimelineError">
+                Total errors: Primary=<span x-text="errorTimelineA?.total_errors ?? 0"></span> (<span x-text="errorTimelineA?.overall_error_rate_pct?.toFixed(2) ?? '0'"></span>%), 
+                Secondary=<span x-text="errorTimelineB?.total_errors ?? 0"></span> (<span x-text="errorTimelineB?.overall_error_rate_pct?.toFixed(2) ?? '0'"></span>%)
             </div>
         </div>
     </div>

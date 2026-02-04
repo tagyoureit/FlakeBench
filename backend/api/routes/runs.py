@@ -29,6 +29,21 @@ class RunCreateResponse(BaseModel):
 class RunActionResponse(BaseModel):
     run_id: str
     status: str
+    warnings: list[dict] = []
+
+
+class PreflightWarning(BaseModel):
+    severity: str  # "high", "medium", "low"
+    title: str
+    message: str
+    recommendations: list[str] = []
+    details: dict = {}
+
+
+class PreflightResponse(BaseModel):
+    run_id: str
+    warnings: list[PreflightWarning] = []
+    can_proceed: bool = True  # False if any "high" severity warnings
 
 
 class LiveMetricsUpdate(BaseModel):
@@ -142,3 +157,34 @@ async def ingest_live_metrics(run_id: str, payload: LiveMetricsUpdate) -> None:
         )
     except Exception as e:
         raise http_exception("ingest live metrics", e)
+
+
+@router.get(
+    "/{run_id}/preflight",
+    response_model=PreflightResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_preflight_warnings(run_id: str) -> PreflightResponse:
+    """
+    Get pre-flight warnings for a prepared run before starting.
+
+    Returns warnings about configurations that may cause issues,
+    such as lock contention on standard tables with high write concurrency.
+
+    Call this endpoint after creating a run but before starting it
+    to inform users of potential issues.
+    """
+    try:
+        warnings_raw = await orchestrator.get_preflight_warnings(run_id)
+        warnings = [PreflightWarning(**w) for w in warnings_raw]
+        # can_proceed is False if any high-severity warnings
+        can_proceed = not any(w.severity == "high" for w in warnings)
+        return PreflightResponse(
+            run_id=run_id,
+            warnings=warnings,
+            can_proceed=can_proceed,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Run not found")
+    except Exception as e:
+        raise http_exception("get preflight warnings", e)

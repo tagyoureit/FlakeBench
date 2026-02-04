@@ -9,7 +9,7 @@ implementations that can be used for future refactoring.
 
 Usage:
     from backend.core.executor import TestExecutor
-    
+
     # Or the traditional import still works:
     from backend.core.test_executor import TestExecutor
 """

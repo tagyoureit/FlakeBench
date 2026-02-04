@@ -75,55 +75,6 @@ function compareDetail() {
     return n.toFixed(2);
   };
 
-  /**
-   * Parse an ISO-ish datetime string into epoch milliseconds.
-   *
-   * The Snowflake/Python stack often produces microsecond timestamps like:
-   *   "2026-01-08T18:24:28.734695"
-   * Some browsers don't consistently parse 6-digit fractional seconds, so we
-   * parse it ourselves and only keep millisecond precision.
-   *
-   * @param {unknown} value
-   * @returns {number} ms since epoch (local time if timezone is missing); NaN if unparseable
-   */
-  const parseIsoToMs = (value) => {
-    const s = value != null ? String(value) : "";
-    if (!s) return Number.NaN;
-
-    // YYYY-MM-DDTHH:MM:SS(.frac)?(Z|±HH:MM)?
-    const m = s.match(
-      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$/,
-    );
-    if (!m) {
-      const t = Date.parse(s);
-      return Number.isFinite(t) ? t : Number.NaN;
-    }
-
-    const year = Number(m[1]);
-    const month = Number(m[2]);
-    const day = Number(m[3]);
-    const hour = Number(m[4]);
-    const minute = Number(m[5]);
-    const second = Number(m[6]);
-    const frac = m[7] != null ? String(m[7]) : "";
-    const tz = m[8] != null ? String(m[8]) : "";
-
-    const msStr = frac ? frac.padEnd(3, "0").slice(0, 3) : "0";
-    const ms = Number(msStr);
-
-    // If an explicit timezone is present, we can rely on Date.parse after normalizing
-    // fractional seconds to 3 digits.
-    if (tz) {
-      const fracNorm = frac ? `.${frac.padEnd(3, "0").slice(0, 3)}` : "";
-      const norm = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${fracNorm}${tz}`;
-      const t = Date.parse(norm);
-      if (Number.isFinite(t)) return t;
-    }
-
-    // No timezone: treat as local time. We only care about relative elapsed times.
-    return new Date(year, month - 1, day, hour, minute, second, ms).getTime();
-  };
-
   const toPoints = (snapshots, xKey, yKey) => {
     const rows = Array.isArray(snapshots) ? snapshots : [];
     const out = [];
@@ -138,35 +89,33 @@ function compareDetail() {
   };
 
   /**
-   * Build monotonic x/y points using wall-clock time derived from snapshot timestamps.
+   * Build x/y points using elapsed_seconds for the x-axis.
    *
-   * This avoids "scribble" artifacts when the backend resets elapsed_seconds (e.g.
-   * when switching from start_time to measurement_start_time).
+   * This matches the behavior of the regular history page charts, which use
+   * elapsed_seconds directly. The data is already sorted by elapsed_seconds
+   * from the API.
    *
-   * @param {unknown} snapshots
+   * @param {Array} snapshots
    * @param {string} yKey
+   * @param {boolean} showWarmup - whether to include warmup data
+   * @param {number|null} warmupEnd - warmup end elapsed seconds (to offset x when hiding warmup)
    * @returns {Array<{x:number,y:number}>}
    */
-  const toWallElapsedPoints = (snapshots, yKey) => {
+  const toElapsedPoints = (snapshots, yKey, showWarmup = true, warmupEnd = null) => {
     const rows = Array.isArray(snapshots) ? snapshots : [];
     const out = [];
-    let t0 = Number.NaN;
-
     for (const s of rows) {
       if (!s) continue;
-      const tsMs = parseIsoToMs(s.timestamp);
-      if (!Number.isFinite(tsMs)) continue;
-      if (!Number.isFinite(t0)) t0 = tsMs;
-
-      const x = (tsMs - t0) / 1000.0;
+      // Filter out warmup data if showWarmup is false
+      if (!showWarmup && s.warmup) continue;
+      let x = Number(s.elapsed_seconds || 0);
+      // Offset x by warmup end when hiding warmup
+      if (!showWarmup && warmupEnd != null) {
+        x = x - warmupEnd;
+      }
       const y = Number(s[yKey] || 0);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       out.push({ x, y });
-    }
-
-    // Fallback: if timestamp parsing failed (unexpected), fall back to raw elapsed_seconds.
-    if (out.length === 0) {
-      return toPoints(rows, "elapsed_seconds", yKey);
     }
     return out;
   };
@@ -199,6 +148,31 @@ function compareDetail() {
 
     const ctx = canvas.getContext ? canvas.getContext("2d") : null;
     if (!ctx) return;
+
+    // Build warmup annotations if provided
+    const annotations = {};
+    if (options && options.warmupAnnotations) {
+      for (const ann of options.warmupAnnotations) {
+        if (ann.x != null && ann.x > 0) {
+          annotations[ann.key] = {
+            type: "line",
+            xMin: ann.x,
+            xMax: ann.x,
+            borderColor: ann.color || "rgba(255, 165, 0, 0.8)",
+            borderWidth: 2,
+            borderDash: [6, 4],
+            label: {
+              display: true,
+              content: ann.label || "Warmup End",
+              position: "start",
+              backgroundColor: ann.color || "rgba(255, 165, 0, 0.8)",
+              color: "#fff",
+              font: { size: 10 },
+            },
+          };
+        }
+      }
+    }
 
     canvas.__chart = new Chart(ctx, {
       type: "line",
@@ -239,6 +213,7 @@ function compareDetail() {
               },
             },
           },
+          annotation: Object.keys(annotations).length > 0 ? { annotations } : undefined,
         },
       },
     });
@@ -254,6 +229,9 @@ function compareDetail() {
     testB: null,
     metricsA: [],
     metricsB: [],
+    warmupEndA: null,
+    warmupEndB: null,
+    showWarmup: false,
 
     init() {
       this.load();
@@ -287,9 +265,20 @@ function compareDetail() {
         this.metricsB = Array.isArray(metricsB && metricsB.snapshots)
           ? metricsB.snapshots
           : [];
+        this.warmupEndA = metricsA && metricsA.warmup_end_elapsed_seconds != null
+          ? Number(metricsA.warmup_end_elapsed_seconds)
+          : null;
+        this.warmupEndB = metricsB && metricsB.warmup_end_elapsed_seconds != null
+          ? Number(metricsB.warmup_end_elapsed_seconds)
+          : null;
 
         this.renderCharts();
         this.ready = true;
+
+        // Load additional data in parallel (non-blocking)
+        this.loadStatistics();
+        this.loadErrorTimeline();
+        this.loadLatencyBreakdown();
       } catch (e) {
         console.error("Deep compare load failed:", e);
         this.error = e && e.message ? e.message : String(e);
@@ -300,83 +289,99 @@ function compareDetail() {
     },
 
     renderCharts() {
-      const nameA =
-        this.testA && (this.testA.template_name || this.testA.test_name)
-          ? String(this.testA.template_name || this.testA.test_name)
-          : "Primary";
-      const nameB =
-        this.testB && (this.testB.template_name || this.testB.test_name)
-          ? String(this.testB.template_name || this.testB.test_name)
-          : "Secondary";
+      const showWarmup = this.showWarmup;
+      const warmupEndA = this.warmupEndA;
+      const warmupEndB = this.warmupEndB;
+
+      // Build warmup annotations when showing warmup
+      const warmupAnnotations = [];
+      if (showWarmup) {
+        if (warmupEndA != null && warmupEndA > 0) {
+          warmupAnnotations.push({
+            key: "warmupA",
+            x: warmupEndA,
+            label: "Primary Warmup End",
+            color: "rgba(59, 130, 246, 0.8)",
+          });
+        }
+        if (warmupEndB != null && warmupEndB > 0) {
+          warmupAnnotations.push({
+            key: "warmupB",
+            x: warmupEndB,
+            label: "Secondary Warmup End",
+            color: "rgba(156, 163, 175, 0.8)",
+          });
+        }
+      }
 
       // Throughput (QPS)
-      const opsA = toWallElapsedPoints(this.metricsA, "ops_per_sec");
-      const opsB = toWallElapsedPoints(this.metricsB, "ops_per_sec");
+      const opsA = toElapsedPoints(this.metricsA, "ops_per_sec", showWarmup, warmupEndA);
+      const opsB = toElapsedPoints(this.metricsB, "ops_per_sec", showWarmup, warmupEndB);
       renderLineChart(
         "compareThroughputChart",
         [
           mkDataset({
-            label: `${nameA} QPS`,
+            label: "Primary",
             points: opsA,
             color: "rgb(59, 130, 246)",
             dashed: false,
           }),
           mkDataset({
-            label: `${nameB} QPS`,
+            label: "Secondary",
             points: opsB,
             color: "rgb(156, 163, 175)",
             dashed: true,
           }),
         ],
-        { yTitle: "QPS", yTickFormat: "compact" },
+        { yTitle: "QPS", yTickFormat: "compact", warmupAnnotations },
       );
 
       // Latency (P50/P95/P99)
-      const p50A = toWallElapsedPoints(this.metricsA, "p50_latency");
-      const p95A = toWallElapsedPoints(this.metricsA, "p95_latency");
-      const p99A = toWallElapsedPoints(this.metricsA, "p99_latency");
-      const p50B = toWallElapsedPoints(this.metricsB, "p50_latency");
-      const p95B = toWallElapsedPoints(this.metricsB, "p95_latency");
-      const p99B = toWallElapsedPoints(this.metricsB, "p99_latency");
+      const p50A = toElapsedPoints(this.metricsA, "p50_latency", showWarmup, warmupEndA);
+      const p95A = toElapsedPoints(this.metricsA, "p95_latency", showWarmup, warmupEndA);
+      const p99A = toElapsedPoints(this.metricsA, "p99_latency", showWarmup, warmupEndA);
+      const p50B = toElapsedPoints(this.metricsB, "p50_latency", showWarmup, warmupEndB);
+      const p95B = toElapsedPoints(this.metricsB, "p95_latency", showWarmup, warmupEndB);
+      const p99B = toElapsedPoints(this.metricsB, "p99_latency", showWarmup, warmupEndB);
 
       renderLineChart(
         "compareLatencyChart",
         [
           mkDataset({
-            label: `${nameA} P50`,
+            label: "Primary P50",
             points: p50A,
             color: "rgb(16, 185, 129)",
           }),
           mkDataset({
-            label: `${nameA} P95`,
+            label: "Primary P95",
             points: p95A,
             color: "rgb(245, 158, 11)",
           }),
           mkDataset({
-            label: `${nameA} P99`,
+            label: "Primary P99",
             points: p99A,
             color: "rgb(239, 68, 68)",
           }),
           mkDataset({
-            label: `${nameB} P50`,
+            label: "Secondary P50",
             points: p50B,
             color: "rgb(156, 163, 175)",
             dashed: true,
           }),
           mkDataset({
-            label: `${nameB} P95`,
+            label: "Secondary P95",
             points: p95B,
             color: "rgb(107, 114, 128)",
             dashed: true,
           }),
           mkDataset({
-            label: `${nameB} P99`,
+            label: "Secondary P99",
             points: p99B,
             color: "rgb(55, 65, 81)",
             dashed: true,
           }),
         ],
-        { yTitle: "Latency (ms)" },
+        { yTitle: "Latency (ms)", warmupAnnotations },
       );
 
       // Concurrency:
@@ -389,25 +394,378 @@ function compareDetail() {
 
       const keyA = isPgA ? "active_connections" : "sf_running";
       const keyB = isPgB ? "active_connections" : "sf_running";
-      const ptsA = toWallElapsedPoints(this.metricsA, keyA);
-      const ptsB = toWallElapsedPoints(this.metricsB, keyB);
+      const ptsA = toElapsedPoints(this.metricsA, keyA, showWarmup, warmupEndA);
+      const ptsB = toElapsedPoints(this.metricsB, keyB, showWarmup, warmupEndB);
       renderLineChart(
         "compareConcurrencyChart",
         [
           mkDataset({
-            label: `${nameA} ${isPgA ? "in_flight" : "sf_running"}`,
+            label: `Primary ${isPgA ? "in_flight" : "sf_running"}`,
             points: ptsA,
             color: "rgb(99, 102, 241)",
           }),
           mkDataset({
-            label: `${nameB} ${isPgB ? "in_flight" : "sf_running"}`,
+            label: `Secondary ${isPgB ? "in_flight" : "sf_running"}`,
             points: ptsB,
             color: "rgb(156, 163, 175)",
             dashed: true,
           }),
         ],
-        { yTitle: "Concurrent operations", yTickFormat: "compact" },
+        { yTitle: "Concurrent operations", yTickFormat: "compact", warmupAnnotations },
       );
+    },
+
+    toggleShowWarmup() {
+      this.showWarmup = !this.showWarmup;
+      this.renderCharts();
+      // Re-render error timeline with updated warmup setting
+      if (this.errorTimelineA || this.errorTimelineB) {
+        this.renderErrorTimelineChart();
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // Statistics Panel (Phase A)
+    // -------------------------------------------------------------------------
+
+    statisticsA: null,
+    statisticsB: null,
+    statisticsLoading: false,
+    statisticsError: null,
+
+    async loadStatistics() {
+      if (!this.ids || this.ids.length !== 2) return;
+      this.statisticsLoading = true;
+      this.statisticsError = null;
+
+      try {
+        const [a, b] = this.ids;
+        const [statsA, statsB] = await Promise.all([
+          fetchJson(`/api/tests/${encodeURIComponent(a)}/statistics`),
+          fetchJson(`/api/tests/${encodeURIComponent(b)}/statistics`),
+        ]);
+        this.statisticsA = statsA;
+        this.statisticsB = statsB;
+        this.renderStatisticsPanel();
+      } catch (e) {
+        console.error("Statistics load failed:", e);
+        this.statisticsError = e && e.message ? e.message : String(e);
+      } finally {
+        this.statisticsLoading = false;
+      }
+    },
+
+    renderStatisticsPanel() {
+      // Statistics are rendered via Alpine bindings in the HTML template
+      // This method can be used for any post-render processing if needed
+    },
+
+    /**
+     * Calculate the delta between two values as a percentage.
+     * Positive means A > B (primary is higher).
+     */
+    calcDelta(valA, valB) {
+      if (valB == null || valB === 0) return null;
+      if (valA == null) return null;
+      return ((valA - valB) / valB) * 100;
+    },
+
+    /**
+     * Format a delta value with + or - prefix and percentage.
+     */
+    formatDelta(delta) {
+      if (delta == null || !Number.isFinite(delta)) return "—";
+      const sign = delta >= 0 ? "+" : "";
+      return `${sign}${delta.toFixed(1)}%`;
+    },
+
+    /**
+     * Get CSS class for delta (green for improvement, red for regression).
+     * @param {number} delta - The delta percentage
+     * @param {boolean} lowerIsBetter - If true, negative delta is good (e.g., latency)
+     */
+    getDeltaClass(delta, lowerIsBetter = false) {
+      if (delta == null || !Number.isFinite(delta)) return "text-gray-500";
+      const isGood = lowerIsBetter ? delta < 0 : delta > 0;
+      return isGood ? "text-green-600" : "text-red-600";
+    },
+
+    /**
+     * Calculate the cost delta between two values as a percentage.
+     * Positive means A > B (primary is more expensive).
+     */
+    calcCostDelta(valA, valB) {
+      if (valB == null || valB === 0) return null;
+      if (valA == null) return null;
+      return ((valA - valB) / valB) * 100;
+    },
+
+    /**
+     * Format a cost delta value with appropriate messaging.
+     * For costs, negative delta means savings (good).
+     */
+    formatCostDelta(delta) {
+      if (delta == null || !Number.isFinite(delta)) return "—";
+      const sign = delta >= 0 ? "+" : "";
+      const label = delta < 0 ? " savings" : " more";
+      return `${sign}${delta.toFixed(1)}%${label}`;
+    },
+
+    // -------------------------------------------------------------------------
+    // Error Timeline Chart (Phase B)
+    // -------------------------------------------------------------------------
+
+    errorTimelineA: null,
+    errorTimelineB: null,
+    errorTimelineLoading: false,
+    errorTimelineError: null,
+
+    async loadErrorTimeline() {
+      if (!this.ids || this.ids.length !== 2) return;
+      this.errorTimelineLoading = true;
+      this.errorTimelineError = null;
+
+      try {
+        const [a, b] = this.ids;
+        const [errA, errB] = await Promise.all([
+          fetchJson(`/api/tests/${encodeURIComponent(a)}/error-timeline`),
+          fetchJson(`/api/tests/${encodeURIComponent(b)}/error-timeline`),
+        ]);
+        this.errorTimelineA = errA;
+        this.errorTimelineB = errB;
+        this.renderErrorTimelineChart();
+      } catch (e) {
+        console.error("Error timeline load failed:", e);
+        this.errorTimelineError = e && e.message ? e.message : String(e);
+      } finally {
+        this.errorTimelineLoading = false;
+      }
+    },
+
+    renderErrorTimelineChart() {
+      const errA = this.errorTimelineA;
+      const errB = this.errorTimelineB;
+
+      // Check if there are any errors to display
+      const hasErrorsA = errA && errA.available && errA.total_errors > 0;
+      const hasErrorsB = errB && errB.available && errB.total_errors > 0;
+
+      if (!hasErrorsA && !hasErrorsB) {
+        // No errors to display - hide the chart section or show a message
+        return;
+      }
+
+      const showWarmup = this.showWarmup;
+      const warmupEndA = errA && errA.warmup_end_elapsed_seconds != null
+        ? Number(errA.warmup_end_elapsed_seconds)
+        : null;
+      const warmupEndB = errB && errB.warmup_end_elapsed_seconds != null
+        ? Number(errB.warmup_end_elapsed_seconds)
+        : null;
+
+      // Build warmup annotations when showing warmup
+      const warmupAnnotations = [];
+      if (showWarmup) {
+        if (warmupEndA != null && warmupEndA > 0) {
+          warmupAnnotations.push({
+            key: "warmupA",
+            x: warmupEndA,
+            label: "Primary Warmup End",
+            color: "rgba(59, 130, 246, 0.8)",
+          });
+        }
+        if (warmupEndB != null && warmupEndB > 0) {
+          warmupAnnotations.push({
+            key: "warmupB",
+            x: warmupEndB,
+            label: "Secondary Warmup End",
+            color: "rgba(156, 163, 175, 0.8)",
+          });
+        }
+      }
+
+      // Convert error timeline points to chart data
+      const toErrorPoints = (timeline, showWarmup, warmupEnd) => {
+        if (!timeline || !timeline.points) return [];
+        const out = [];
+        for (const p of timeline.points) {
+          if (!showWarmup && p.warmup) continue;
+          let x = Number(p.elapsed_seconds || 0);
+          if (!showWarmup && warmupEnd != null) {
+            x = x - warmupEnd;
+          }
+          const y = Number(p.error_rate_pct || 0);
+          out.push({ x, y });
+        }
+        return out;
+      };
+
+      const ptsA = toErrorPoints(errA, showWarmup, warmupEndA);
+      const ptsB = toErrorPoints(errB, showWarmup, warmupEndB);
+
+      renderLineChart(
+        "compareErrorTimelineChart",
+        [
+          mkDataset({
+            label: "Primary Error Rate %",
+            points: ptsA,
+            color: "rgb(239, 68, 68)",
+            dashed: false,
+          }),
+          mkDataset({
+            label: "Secondary Error Rate %",
+            points: ptsB,
+            color: "rgb(156, 163, 175)",
+            dashed: true,
+          }),
+        ],
+        { yTitle: "Error Rate (%)", warmupAnnotations },
+      );
+    },
+
+    // -------------------------------------------------------------------------
+    // Duration Mismatch Warning (Phase E)
+    // -------------------------------------------------------------------------
+
+    getDurationMismatchWarning() {
+      if (!this.testA || !this.testB) return null;
+      const durA = Number(this.testA.duration_seconds || 0);
+      const durB = Number(this.testB.duration_seconds || 0);
+      if (durA === 0 || durB === 0) return null;
+
+      const diff = Math.abs(durA - durB);
+      const maxDur = Math.max(durA, durB);
+      const pctDiff = (diff / maxDur) * 100;
+
+      // Warn if duration differs by more than 20%
+      if (pctDiff > 20) {
+        return `Test durations differ significantly: Primary=${durA}s, Secondary=${durB}s (${pctDiff.toFixed(0)}% difference). Results may not be directly comparable.`;
+      }
+      return null;
+    },
+
+    // -------------------------------------------------------------------------
+    // Zero-write handling (Phase E)
+    // -------------------------------------------------------------------------
+
+    hasWriteOperations(test) {
+      if (!test) return false;
+      return (test.write_operations || 0) > 0 ||
+             (test.custom_insert_pct || 0) > 0 ||
+             (test.custom_update_pct || 0) > 0;
+    },
+
+    // -------------------------------------------------------------------------
+    // Latency Breakdown (Detailed Read/Write + Per-Query-Type)
+    // -------------------------------------------------------------------------
+
+    latencyBreakdownA: null,
+    latencyBreakdownB: null,
+    latencyBreakdownLoading: false,
+    latencyBreakdownError: null,
+
+    async loadLatencyBreakdown() {
+      if (!this.ids || this.ids.length !== 2) return;
+      this.latencyBreakdownLoading = true;
+      this.latencyBreakdownError = null;
+
+      try {
+        const [a, b] = this.ids;
+        const [breakdownA, breakdownB] = await Promise.all([
+          fetchJson(`/api/tests/${encodeURIComponent(a)}/latency-breakdown`),
+          fetchJson(`/api/tests/${encodeURIComponent(b)}/latency-breakdown`),
+        ]);
+        this.latencyBreakdownA = breakdownA;
+        this.latencyBreakdownB = breakdownB;
+      } catch (e) {
+        console.error("Latency breakdown load failed:", e);
+        this.latencyBreakdownError = e && e.message ? e.message : String(e);
+      } finally {
+        this.latencyBreakdownLoading = false;
+      }
+    },
+
+    /**
+     * Format a number with K suffix for thousands.
+     */
+    formatCount(val) {
+      if (val == null) return "—";
+      if (val >= 1000) {
+        return (val / 1000).toFixed(2) + "k";
+      }
+      return val.toString();
+    },
+
+    /**
+     * Format ops/s with 2 decimal places.
+     */
+    formatOps(val) {
+      if (val == null) return "—";
+      return val.toFixed(2);
+    },
+
+    /**
+     * Format milliseconds with 2 decimal places.
+     */
+    formatMs(val) {
+      if (val == null) return "—";
+      return val.toFixed(2);
+    },
+
+    /**
+     * Get merged per-query-type data for comparison table.
+     * Returns array of objects with query_type, primary stats, secondary stats.
+     */
+    getMergedQueryTypes() {
+      const a = this.latencyBreakdownA;
+      const b = this.latencyBreakdownB;
+      if (!a?.per_query_type && !b?.per_query_type) return [];
+
+      const map = new Map();
+
+      // Add primary data
+      if (a?.per_query_type) {
+        for (const qt of a.per_query_type) {
+          map.set(qt.query_type, { query_type: qt.query_type, primary: qt, secondary: null });
+        }
+      }
+
+      // Add/merge secondary data
+      if (b?.per_query_type) {
+        for (const qt of b.per_query_type) {
+          const existing = map.get(qt.query_type);
+          if (existing) {
+            existing.secondary = qt;
+          } else {
+            map.set(qt.query_type, { query_type: qt.query_type, primary: null, secondary: qt });
+          }
+        }
+      }
+
+      // Sort by query type order
+      const order = {
+        "POINT LOOKUP": 1, "Point Lookup": 1,
+        "RANGE SCAN": 2, "Range Scan": 2,
+        "SELECT": 3,
+        "INSERT": 4, "Insert": 4,
+        "UPDATE": 5, "Update": 5,
+        "DELETE": 6, "Delete": 6,
+      };
+
+      return Array.from(map.values()).sort((x, y) => {
+        const ox = order[x.query_type] || order[x.query_type.toUpperCase()] || 99;
+        const oy = order[y.query_type] || order[y.query_type.toUpperCase()] || 99;
+        return ox - oy;
+      });
+    },
+
+    /**
+     * Check if a query type is a read operation.
+     */
+    isReadOperation(queryType) {
+      if (!queryType) return false;
+      const upper = queryType.toUpperCase().replace(/_/g, " ");
+      return upper === "POINT LOOKUP" || upper === "RANGE SCAN" || upper === "SELECT" || upper === "READ";
     },
   };
 }

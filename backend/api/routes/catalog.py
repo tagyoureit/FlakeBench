@@ -210,20 +210,46 @@ def _include_views(t: TableType) -> bool:
     return True
 
 
+def _matches_filter(detected_type: str, filter_type: str | None) -> bool:
+    """Check if a detected_type matches the requested filter_type."""
+    if not filter_type or filter_type.upper() == "ALL":
+        return True
+    return detected_type.upper() == filter_type.upper()
+
+
 @router.get("/objects", response_model=list[dict[str, Any]])
 async def list_objects(
     table_type: str = Query("standard"),
     database: str | None = Query(None),
     schema: str | None = Query(None),
+    filter_type: str | None = Query(None),
 ):
     """
     List tables (and optionally views) in a schema.
 
     Returns objects as:
-      { "name": "...", "type": "TABLE" | "VIEW" }
+      { "name": "...", "type": "TABLE" | "VIEW", "detected_type": "STANDARD" | "HYBRID" | "DYNAMIC" | "INTERACTIVE" | "VIEW" }
+
+    Detection logic:
+    - HYBRID: IS_HYBRID=YES in INFORMATION_SCHEMA
+    - INTERACTIVE: IS_DYNAMIC=YES AND appears in SHOW INTERACTIVE TABLES (Unistore)
+    - DYNAMIC: IS_DYNAMIC=YES AND does NOT appear in SHOW INTERACTIVE TABLES
+    - STANDARD: Everything else
+
+    Note: In Unistore-enabled accounts, tables created with CREATE DYNAMIC TABLE 
+    appear in SHOW INTERACTIVE TABLES (not SHOW DYNAMIC TABLES) and are treated
+    as Interactive Tables for benchmarking purposes.
 
     For HYBRID and INTERACTIVE table types, only tables are returned (no views).
     For STANDARD and Postgres-family types, both tables and views are returned.
+
+    The `filter_type` parameter filters results by detected_type:
+      - ALL (default): return all objects
+      - STANDARD: only standard tables
+      - HYBRID: only hybrid tables
+      - DYNAMIC: only dynamic tables (traditional, non-Unistore)
+      - INTERACTIVE: only interactive tables (Unistore)
+      - VIEW: only views
     """
 
     t = _table_type(table_type)
@@ -243,26 +269,33 @@ async def list_objects(
 
         pool_type = _postgres_pool_type(t)
         try:
-            # Tables
-            table_rows = await postgres_pool.fetch_from_database(
-                db_name,
-                """
-                    SELECT table_name
-                    FROM information_schema.tables
-                    WHERE table_schema = $1
-                      AND table_type = 'BASE TABLE'
-                    ORDER BY table_name
-                """,
-                schema_name,
-                pool_type=pool_type,
-            )
+            out: list[dict[str, Any]] = []
 
-            out: list[dict[str, Any]] = [
-                {"name": str(r["table_name"]), "type": "TABLE"} for r in table_rows
-            ]
+            # Tables (detected_type is TABLE for Postgres)
+            if _matches_filter("TABLE", filter_type):
+                table_rows = await postgres_pool.fetch_from_database(
+                    db_name,
+                    """
+                        SELECT table_name
+                        FROM information_schema.tables
+                        WHERE table_schema = $1
+                          AND table_type = 'BASE TABLE'
+                        ORDER BY table_name
+                    """,
+                    schema_name,
+                    pool_type=pool_type,
+                )
+                out.extend(
+                    {
+                        "name": str(r["table_name"]),
+                        "type": "TABLE",
+                        "detected_type": "TABLE",
+                    }
+                    for r in table_rows
+                )
 
             # Views (only if applicable for this table type)
-            if include_views:
+            if include_views and _matches_filter("VIEW", filter_type):
                 view_rows = await postgres_pool.fetch_from_database(
                     db_name,
                     """
@@ -275,10 +308,15 @@ async def list_objects(
                     pool_type=pool_type,
                 )
                 out.extend(
-                    {"name": str(r["table_name"]), "type": "VIEW"} for r in view_rows
+                    {
+                        "name": str(r["table_name"]),
+                        "type": "VIEW",
+                        "detected_type": "VIEW",
+                    }
+                    for r in view_rows
                 )
 
-            out.sort(key=lambda x: (x["type"], x["name"]))
+            out.sort(key=lambda x: (x["detected_type"], x["name"]))
             return out
         except Exception as e:
             logger.warning(f"Failed to list objects in {db_name}.{schema_name}: {e}")
@@ -297,27 +335,101 @@ async def list_objects(
 
     sf = snowflake_pool.get_default_pool()
 
-    # SHOW TABLES is the most reliable across Snowflake editions/features.
-    table_rows = await sf.execute_query(f"SHOW TABLES IN SCHEMA {db}.{sch}")
-
     out: list[dict[str, Any]] = []
 
-    for row in table_rows:
-        # SHOW TABLES: name at index 1
-        name = None
-        if row and len(row) > 1:
-            name = row[1]
-        elif row:
-            name = row[0]
-        name_str = _upper_str(name)
-        if name_str:
-            out.append({"name": name_str, "type": "TABLE"})
+    # First, get list of Interactive Tables (Unistore) via SHOW INTERACTIVE TABLES
+    # This is needed because IS_DYNAMIC=YES in INFORMATION_SCHEMA doesn't distinguish
+    # between Dynamic Tables and Interactive Tables
+    interactive_table_names: set[str] = set()
+    try:
+        interactive_rows = await sf.execute_query(
+            f"SHOW INTERACTIVE TABLES IN SCHEMA {db}.{sch}"
+        )
+        for row in interactive_rows:
+            # SHOW INTERACTIVE TABLES: name is at index 1
+            if row and len(row) > 1:
+                interactive_table_names.add(_upper_str(row[1]))
+    except Exception as e:
+        # SHOW INTERACTIVE TABLES may not be available in all accounts
+        logger.debug(f"SHOW INTERACTIVE TABLES not available: {e}")
 
-    # Views (only for STANDARD table type)
-    if include_views:
-        view_rows = await sf.execute_query(f"SHOW VIEWS IN SCHEMA {db}.{sch}")
-        for row in view_rows:
-            # SHOW VIEWS: name at index 1
+    # Query INFORMATION_SCHEMA.TABLES for type detection (IS_HYBRID, IS_DYNAMIC)
+    # This gives us more metadata than SHOW TABLES
+    try:
+        info_schema_rows = await sf.execute_query(
+            f"""
+            SELECT
+                TABLE_NAME,
+                TABLE_TYPE,
+                COALESCE(IS_HYBRID, 'NO') AS IS_HYBRID,
+                COALESCE(IS_DYNAMIC, 'NO') AS IS_DYNAMIC
+            FROM {db}.INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = '{sch}'
+              AND TABLE_TYPE IN ('BASE TABLE', 'VIEW', 'INTERACTIVE TABLE')
+            ORDER BY TABLE_NAME
+            """
+        )
+
+        for row in info_schema_rows:
+            # Row format: (TABLE_NAME, TABLE_TYPE, IS_HYBRID, IS_DYNAMIC)
+            name_str = _upper_str(row[0]) if row else None
+            sf_table_type = str(row[1]).upper() if row and len(row) > 1 else "BASE TABLE"
+            is_hybrid = str(row[2]).upper() if row and len(row) > 2 else "NO"
+            is_dynamic = str(row[3]).upper() if row and len(row) > 3 else "NO"
+
+            if not name_str:
+                continue
+
+            # Determine detected_type
+            # Priority: INTERACTIVE TABLE (static) > VIEW > HYBRID > INTERACTIVE (dynamic) > DYNAMIC > STANDARD
+            # Static Interactive Tables have TABLE_TYPE='INTERACTIVE TABLE'
+            # Dynamic Interactive Tables have IS_DYNAMIC=YES and appear in SHOW INTERACTIVE TABLES
+            if sf_table_type == "INTERACTIVE TABLE":
+                # Static Interactive Table - true Unistore table
+                detected_type = "INTERACTIVE"
+                obj_type = "TABLE"
+            elif sf_table_type == "VIEW":
+                detected_type = "VIEW"
+                obj_type = "VIEW"
+            elif is_hybrid == "YES":
+                detected_type = "HYBRID"
+                obj_type = "TABLE"
+            elif is_dynamic == "YES" and name_str in interactive_table_names:
+                # Dynamic Interactive Table (Unistore) - detected via SHOW INTERACTIVE TABLES
+                detected_type = "INTERACTIVE"
+                obj_type = "TABLE"
+            elif is_dynamic == "YES":
+                # Dynamic Table (materialized view) - not in SHOW INTERACTIVE TABLES
+                detected_type = "DYNAMIC"
+                obj_type = "TABLE"
+            else:
+                detected_type = "STANDARD"
+                obj_type = "TABLE"
+
+            # Skip views if not included for this table_type
+            if obj_type == "VIEW" and not include_views:
+                continue
+
+            # Apply filter
+            if not _matches_filter(detected_type, filter_type):
+                continue
+
+            out.append({
+                "name": name_str,
+                "type": obj_type,
+                "detected_type": detected_type,
+            })
+
+    except Exception as e:
+        # Fallback to SHOW TABLES if INFORMATION_SCHEMA query fails
+        # (e.g., older Snowflake versions without IS_HYBRID/IS_DYNAMIC)
+        logger.warning(
+            f"INFORMATION_SCHEMA query failed, falling back to SHOW: {e}"
+        )
+
+        table_rows = await sf.execute_query(f"SHOW TABLES IN SCHEMA {db}.{sch}")
+
+        for row in table_rows:
             name = None
             if row and len(row) > 1:
                 name = row[1]
@@ -325,7 +437,102 @@ async def list_objects(
                 name = row[0]
             name_str = _upper_str(name)
             if name_str:
-                out.append({"name": name_str, "type": "VIEW"})
+                # Without INFORMATION_SCHEMA, we can't detect type - default to STANDARD
+                if _matches_filter("STANDARD", filter_type):
+                    out.append({
+                        "name": name_str,
+                        "type": "TABLE",
+                        "detected_type": "STANDARD",
+                    })
 
-    out.sort(key=lambda x: (x["type"], x["name"]))
+        # Views (only for STANDARD table type)
+        if include_views and _matches_filter("VIEW", filter_type):
+            view_rows = await sf.execute_query(f"SHOW VIEWS IN SCHEMA {db}.{sch}")
+            for row in view_rows:
+                name = None
+                if row and len(row) > 1:
+                    name = row[1]
+                elif row:
+                    name = row[0]
+                name_str = _upper_str(name)
+                if name_str:
+                    out.append({
+                        "name": name_str,
+                        "type": "VIEW",
+                        "detected_type": "VIEW",
+                    })
+
+    out.sort(key=lambda x: (x["detected_type"], x["name"]))
     return out
+
+
+@router.get("/postgres/capabilities")
+async def get_postgres_capabilities(
+    table_type: str = Query(..., description="POSTGRES or SNOWFLAKE_POSTGRES"),
+    database: str = Query(..., description="Target database name"),
+) -> dict[str, Any]:
+    """
+    Check PostgreSQL server capabilities for pg_stat_statements enrichment.
+
+    Returns:
+        - capabilities: Server capability flags (pg_stat_statements, track_io_timing, etc.)
+        - warnings: User-facing warnings for missing capabilities with remediation steps
+        - available: True if pg_stat_statements is available for enrichment
+
+    This endpoint should be called when loading a test configuration to notify users
+    if server-side metrics won't be available.
+    """
+    import asyncpg
+
+    from backend.core.postgres_stats import get_capability_warnings, get_pg_capabilities
+
+    table_type_upper = table_type.strip().upper()
+    if table_type_upper not in {"POSTGRES", "SNOWFLAKE_POSTGRES"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid table_type: {table_type}. Must be POSTGRES or SNOWFLAKE_POSTGRES.",
+        )
+
+    pool_type = "snowflake_postgres" if table_type_upper == "SNOWFLAKE_POSTGRES" else "default"
+    params = postgres_pool.get_postgres_connection_params(pool_type)
+
+    conn = None
+    try:
+        conn = await asyncpg.connect(
+            host=params["host"],
+            port=params["port"],
+            database=database,
+            user=params["user"],
+            password=params["password"],
+            timeout=10.0,
+        )
+
+        capabilities = await get_pg_capabilities(conn)
+        warnings = get_capability_warnings(capabilities)
+
+        return {
+            "available": capabilities.pg_stat_statements_available,
+            "capabilities": {
+                "pg_stat_statements_available": capabilities.pg_stat_statements_available,
+                "track_io_timing": capabilities.track_io_timing,
+                "track_planning": capabilities.track_planning,
+                "shared_buffers": capabilities.shared_buffers,
+                "pg_version": capabilities.pg_version,
+            },
+            "warnings": warnings,
+        }
+
+    except asyncpg.InvalidCatalogNameError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Database '{database}' not found.",
+        )
+    except Exception as e:
+        logger.warning("Failed to check Postgres capabilities: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to connect to database '{database}': {e}",
+        )
+    finally:
+        if conn:
+            await conn.close()

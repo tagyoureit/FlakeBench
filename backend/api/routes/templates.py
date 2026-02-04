@@ -201,6 +201,42 @@ def _coerce_int(v: Any, *, label: str) -> int:
     return out
 
 
+def _enrich_postgres_instance_size(cfg: dict[str, Any]) -> dict[str, Any]:
+    """
+    Enrich template config with postgres_instance_size for Postgres table types.
+    
+    Looks up the actual instance size from the configured SNOWFLAKE_POSTGRES_HOST
+    and stores it in the template config so it doesn't need to be looked up at runtime.
+    
+    This is only populated for POSTGRES/SNOWFLAKE_POSTGRES table types.
+    For other table types, postgres_instance_size is set to None.
+    """
+    table_type = str(cfg.get("table_type") or "").upper().strip()
+    
+    if table_type not in ("POSTGRES", "SNOWFLAKE_POSTGRES"):
+        # Not a Postgres template - clear any stale value
+        cfg["postgres_instance_size"] = None
+        return cfg
+    
+    # Try to look up the actual instance size from the configured host
+    try:
+        from backend.core.cost_calculator import get_postgres_instance_size_by_host
+        
+        actual_size = get_postgres_instance_size_by_host(settings.SNOWFLAKE_POSTGRES_HOST)
+        if actual_size:
+            cfg["postgres_instance_size"] = actual_size
+            logger.debug(f"Set postgres_instance_size to {actual_size} from configured host")
+        else:
+            # Fall back to default from settings
+            cfg["postgres_instance_size"] = settings.POSTGRES_INSTANCE_SIZE or "STANDARD_M"
+            logger.debug(f"Using default postgres_instance_size: {cfg['postgres_instance_size']}")
+    except Exception as e:
+        logger.warning(f"Failed to lookup Postgres instance size: {e}")
+        cfg["postgres_instance_size"] = settings.POSTGRES_INSTANCE_SIZE or "STANDARD_M"
+    
+    return cfg
+
+
 def _normalize_template_config(cfg: Any) -> dict[str, Any]:
     """
     Normalize template config to an authoritative CUSTOM workload definition.
@@ -514,7 +550,9 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
             if max_cpu <= 0 or max_cpu > 100:
                 raise ValueError("guardrails.max_cpu_percent must be within (0, 100]")
             if max_mem <= 0 or max_mem > 100:
-                raise ValueError("guardrails.max_memory_percent must be within (0, 100]")
+                raise ValueError(
+                    "guardrails.max_memory_percent must be within (0, 100]"
+                )
 
         # Store both new and legacy formats for compatibility
         out["guardrails"] = {
@@ -604,6 +642,9 @@ class AiPrepareResponse(BaseModel):
     domain_label: Optional[str] = None
     pools: Dict[str, int] = Field(default_factory=dict)
     message: str
+    # Interactive Table specific fields
+    cluster_by: Optional[List[str]] = None  # Cluster key columns for Interactive Tables
+    warnings: List[str] = Field(default_factory=list)  # Validation warnings
 
 
 class AiAdjustSqlRequest(BaseModel):
@@ -625,6 +666,9 @@ class AiAdjustSqlResponse(BaseModel):
     ai_workload: Dict[str, Any] = Field(default_factory=dict)
     toast_level: str
     summary: str
+    # Interactive Table specific fields
+    cluster_by: Optional[List[str]] = None  # Cluster key columns for Interactive Tables
+    warnings: List[str] = Field(default_factory=list)  # Validation warnings
 
 
 @router.get("/", response_model=List[TemplateResponse])
@@ -1303,6 +1347,48 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
         except Exception:
             pass  # If check fails, assume table
 
+        # ------------------------------------------------------------------
+        # Interactive Table validation: fetch cluster key and check warehouse type
+        # ------------------------------------------------------------------
+        cluster_by_columns: list[str] = []
+        interactive_warnings: list[str] = []
+        
+        if is_interactive:
+            # Fetch cluster key from SHOW INTERACTIVE TABLES
+            try:
+                interactive_rows = await pool.execute_query(
+                    f"SHOW INTERACTIVE TABLES LIKE '{tbl}' IN SCHEMA {db}.{sch}"
+                )
+                if interactive_rows and len(interactive_rows) > 0:
+                    # Column 4 is cluster_by, e.g., "(O_ORDERKEY)" or "(O_ORDERDATE, O_CUSTKEY)"
+                    cluster_by_raw = str(interactive_rows[0][4] or "").strip()
+                    if cluster_by_raw:
+                        # Parse "(col1, col2)" into ["COL1", "COL2"]
+                        cluster_by_raw = cluster_by_raw.strip("()")
+                        cluster_by_columns = [
+                            c.strip().upper() for c in cluster_by_raw.split(",") if c.strip()
+                        ]
+                        logger.info(f"Interactive Table {tbl} cluster key: {cluster_by_columns}")
+            except Exception as e:
+                logger.debug(f"Could not fetch cluster key for {tbl}: {e}")
+
+            # Check warehouse type - Interactive Tables perform best with Interactive Warehouses
+            warehouse_name = str(cfg.get("warehouse_name") or "").strip()
+            if warehouse_name:
+                try:
+                    wh_rows = await pool.execute_query(f"SHOW WAREHOUSES LIKE '{warehouse_name}'")
+                    if wh_rows and len(wh_rows) > 0:
+                        # Column 2 is warehouse type (STANDARD vs INTERACTIVE)
+                        wh_type = str(wh_rows[0][2] or "STANDARD").upper()
+                        if wh_type != "INTERACTIVE":
+                            interactive_warnings.append(
+                                f"⚠️ Warehouse '{warehouse_name}' is type '{wh_type}'. "
+                                f"Interactive Tables perform best with INTERACTIVE warehouses. "
+                                f"Consider using an Interactive Warehouse for optimal query performance."
+                            )
+                except Exception as e:
+                    logger.debug(f"Could not check warehouse type for {warehouse_name}: {e}")
+
         # For pool sizing in preparation, treat concurrent_connections as:
         # - CONCURRENCY mode: fixed worker count
         # - QPS mode: max worker cap (may be -1 => no user cap; use engine cap)
@@ -1740,6 +1826,32 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
             )
             range_mode = "TIME_CUTOFF"
 
+        # ------------------------------------------------------------------
+        # Interactive Table: Validate WHERE clause against cluster key
+        # ------------------------------------------------------------------
+        if is_interactive and cluster_by_columns:
+            # Check if point lookup key matches cluster key
+            if key_col and key_col.upper() not in cluster_by_columns:
+                interactive_warnings.append(
+                    f"⚠️ Point lookup uses '{key_col}' but table is clustered on {cluster_by_columns}. "
+                    f"Queries on non-clustered columns will be slow (5-second timeout). "
+                    f"For optimal performance, query on: {', '.join(cluster_by_columns)}"
+                )
+            
+            # Check if range scan key matches cluster key (first column typically most selective)
+            if range_mode == "ID_BETWEEN" and key_col:
+                if key_col.upper() not in cluster_by_columns:
+                    interactive_warnings.append(
+                        f"⚠️ Range scan uses '{key_col}' but table is clustered on {cluster_by_columns}. "
+                        f"Consider clustering on '{key_col}' or using a table clustered appropriately."
+                    )
+            elif range_mode == "TIME_CUTOFF" and time_col:
+                if time_col.upper() not in cluster_by_columns:
+                    interactive_warnings.append(
+                        f"⚠️ Range scan uses '{time_col}' but table is clustered on {cluster_by_columns}. "
+                        f"Time-based queries may be slow if not aligned with cluster key."
+                    )
+
         # Insert (always placeholders; params generated in executor).
         # NOTE: Interactive tables do NOT support DML (INSERT, UPDATE, DELETE).
         # Only INSERT OVERWRITE is allowed, which is not supported in benchmark workloads.
@@ -1918,8 +2030,10 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
             custom_update_pct=p_upd,
             columns=cols_map,
             ai_workload=ai_workload,
-            toast_level=toast_level,
+            toast_level="warning" if interactive_warnings else toast_level,
             summary=ai_summary,
+            cluster_by=cluster_by_columns if cluster_by_columns else None,
+            warnings=interactive_warnings,
         )
     except Exception as e:
         raise http_exception("ai adjust sql", e)
@@ -2026,6 +2140,8 @@ async def create_template(template: TemplateCreate):
         import json
 
         normalized_cfg = _normalize_template_config(template.config)
+        # Enrich with postgres_instance_size if applicable
+        normalized_cfg = _enrich_postgres_instance_size(normalized_cfg)
         # If a template payload includes AI workload prep artifacts (e.g. from duplicating
         # an existing template), they are not valid for a *new* template.
         # Pools are keyed by TEMPLATE_ID, so carrying over the old pool_id would create
@@ -2126,6 +2242,8 @@ async def update_template(template_id: str, template: TemplateUpdate):
             import json
 
             normalized_cfg = _normalize_template_config(template.config)
+            # Enrich with postgres_instance_size if applicable
+            normalized_cfg = _enrich_postgres_instance_size(normalized_cfg)
             config_json = json.dumps(normalized_cfg)
             updates.append("CONFIG = PARSE_JSON(?)")
             params.append(config_json)
@@ -2433,7 +2551,8 @@ async def prepare_ai_template(template_id: str):
                     if obj_parts
                     else "OBJECT_CONSTRUCT()"
                 )
-                if is_view:
+                if is_view or is_hybrid:
+                    # Views and hybrid tables don't support TABLESAMPLE
                     sample_rows = await pool.execute_query(
                         f"SELECT {obj_expr} FROM {full_name} LIMIT 20"
                     )
@@ -2624,8 +2743,8 @@ async def prepare_ai_template(template_id: str):
             key_expr = _quote_ident(key_ident)
 
             # Use TABLESAMPLE SYSTEM for fast block-level sampling on tables.
-            # For views, use simple LIMIT (not random, but fast - avoids timeout).
-            if is_view:
+            # For views and hybrid tables, use simple LIMIT (not random, but fast - avoids timeout).
+            if is_view or is_hybrid:
                 insert_key_pool = f"""
                 INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
                     POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
@@ -2702,7 +2821,8 @@ async def prepare_ai_template(template_id: str):
                 pools_created["RANGE"] = int(target_n)
             else:
                 # Fallback: sample distinct time values
-                if is_view:
+                if is_view or is_hybrid:
+                    # Views and hybrid tables don't support TABLESAMPLE
                     insert_time_pool = f"""
                     INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
                         POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
@@ -2770,6 +2890,10 @@ async def prepare_ai_template(template_id: str):
             "projection_columns": projection_cols,
             "domain_label": domain_label,
             "ai_notes": ai_notes,
+            # Track source table for staleness detection when editing templates
+            "source_database": db,
+            "source_schema": sch,
+            "source_table": tbl,
         }
 
         # Store only the columns we will touch (keeps CONFIG small and avoids inserting into arbitrary columns).
@@ -2915,6 +3039,33 @@ async def delete_template(template_id: str):
             DELETE FROM {prefix}.TEST_RESULTS
             WHERE TEST_CONFIG:"template_id"::string = ?
             """,
+            params=[template_id],
+        )
+
+        # Delete from Hybrid control tables (children first due to FK constraints).
+        # RUN_STATUS.RUN_ID matches TEST_RESULTS.TEST_ID for parent runs.
+        await pool.execute_query(
+            f"""
+            DELETE FROM {prefix}.WORKER_HEARTBEATS
+            WHERE RUN_ID IN (
+                SELECT RUN_ID FROM {prefix}.RUN_STATUS
+                WHERE TEMPLATE_ID = ?
+            )
+            """,
+            params=[template_id],
+        )
+        await pool.execute_query(
+            f"""
+            DELETE FROM {prefix}.RUN_CONTROL_EVENTS
+            WHERE RUN_ID IN (
+                SELECT RUN_ID FROM {prefix}.RUN_STATUS
+                WHERE TEMPLATE_ID = ?
+            )
+            """,
+            params=[template_id],
+        )
+        await pool.execute_query(
+            f"DELETE FROM {prefix}.RUN_STATUS WHERE TEMPLATE_ID = ?",
             params=[template_id],
         )
 
