@@ -321,6 +321,16 @@ class TestScenario(BaseModel):
         "uniform", description="Data distribution (uniform, normal, zipfian)"
     )
 
+    # Postgres connection settings
+    use_pgbouncer: bool = Field(
+        False,
+        description=(
+            "Use PgBouncer (port 5431) for Postgres connections. "
+            "Requires snowflake_pooler extension and non-superuser role. "
+            "Disabled by default - uses direct PostgreSQL (port 5432)."
+        ),
+    )
+
     # Metrics collection
     metrics_interval_seconds: float = Field(
         1.0, ge=0.1, le=60.0, description="Metrics collection interval"

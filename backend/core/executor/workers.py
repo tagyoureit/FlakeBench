@@ -1,14 +1,16 @@
 """
 Worker management for test executor.
+
+NOTE: All workloads now use CUSTOM execution path exclusively.
+Legacy workload types (READ_ONLY, WRITE_ONLY, MIXED, etc.) are no longer
+supported at runtime. Templates are normalized to CUSTOM with explicit
+query percentages during save.
 """
 
 import asyncio
 import logging
 
 from typing import TYPE_CHECKING, Any, Optional
-
-if TYPE_CHECKING:
-    from backend.models import WorkloadType
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +19,6 @@ class WorkersMixin:
     """Mixin providing worker management functionality for TestExecutor."""
 
     if TYPE_CHECKING:
-
-        async def _execute_read(self, worker_id: int, warmup: bool = False) -> None: ...
-
-        async def _execute_write(
-            self, worker_id: int, warmup: bool = False
-        ) -> None: ...
 
         async def _execute_custom(
             self, worker_id: int, warmup: bool = False
@@ -39,32 +35,17 @@ class WorkersMixin:
         """
         Worker task that executes operations until stopped.
 
+        All workloads use CUSTOM execution which handles query mix
+        (POINT_LOOKUP, RANGE_SCAN, INSERT, UPDATE) via weighted selection.
+
         Args:
             worker_id: Unique identifier for this worker
         """
-        from backend.models import WorkloadType
-
         logger.debug("Worker %d started", worker_id)
 
         while not self._stop_event.is_set():
             try:
-                workload_type = self.scenario.workload_type
-
-                if workload_type == WorkloadType.READ_ONLY:
-                    await self._execute_read(worker_id)
-                elif workload_type == WorkloadType.WRITE_ONLY:
-                    await self._execute_write(worker_id)
-                elif workload_type == WorkloadType.CUSTOM:
-                    await self._execute_custom(worker_id)
-                elif workload_type in (
-                    WorkloadType.READ_HEAVY,
-                    WorkloadType.WRITE_HEAVY,
-                    WorkloadType.MIXED,
-                ):
-                    await self._execute_mixed(worker_id, workload_type)
-                else:
-                    # Default to mixed workload
-                    await self._execute_mixed(worker_id, WorkloadType.MIXED)
+                await self._execute_custom(worker_id)
 
                 # Think time between operations
                 if self.scenario.think_time_ms > 0:
@@ -87,13 +68,14 @@ class WorkersMixin:
         """
         Worker task for QPS/FIND_MAX modes with external stop signal.
 
+        All workloads use CUSTOM execution which handles query mix
+        (POINT_LOOKUP, RANGE_SCAN, INSERT, UPDATE) via weighted selection.
+
         Args:
             worker_id: Unique identifier for this worker
             warmup: Whether this worker is in warmup phase
             stop_signal: Optional event to signal this specific worker to stop
         """
-        from backend.models import WorkloadType
-
         logger.debug("Controlled worker %d started (warmup=%s)", worker_id, warmup)
 
         while not self._stop_event.is_set():
@@ -107,26 +89,7 @@ class WorkersMixin:
                 # still count as measurement once the measurement window begins
                 is_warmup_op = warmup and not self._measurement_active
 
-                workload_type = self.scenario.workload_type
-
-                if workload_type == WorkloadType.READ_ONLY:
-                    await self._execute_read(worker_id, warmup=is_warmup_op)
-                elif workload_type == WorkloadType.WRITE_ONLY:
-                    await self._execute_write(worker_id, warmup=is_warmup_op)
-                elif workload_type == WorkloadType.CUSTOM:
-                    await self._execute_custom(worker_id, warmup=is_warmup_op)
-                elif workload_type in (
-                    WorkloadType.READ_HEAVY,
-                    WorkloadType.WRITE_HEAVY,
-                    WorkloadType.MIXED,
-                ):
-                    await self._execute_mixed(
-                        worker_id, workload_type, warmup=is_warmup_op
-                    )
-                else:
-                    await self._execute_mixed(
-                        worker_id, WorkloadType.MIXED, warmup=is_warmup_op
-                    )
+                await self._execute_custom(worker_id, warmup=is_warmup_op)
 
                 # Think time between operations
                 if self.scenario.think_time_ms > 0:
@@ -170,36 +133,6 @@ class WorkersMixin:
         await asyncio.gather(*warmup_workers, return_exceptions=True)
 
         logger.info("Warmup phase complete")
-
-    async def _execute_mixed(
-        self,
-        worker_id: int,
-        workload_type: "WorkloadType",
-        warmup: bool = False,
-    ) -> None:
-        """
-        Execute a mixed workload operation based on workload type ratios.
-
-        Args:
-            worker_id: Worker identifier
-            workload_type: Type of mixed workload
-            warmup: Whether this is a warmup operation
-        """
-        import random
-        from backend.models import WorkloadType
-
-        # Determine read/write ratio based on workload type
-        if workload_type == WorkloadType.READ_HEAVY:
-            read_ratio = 0.8
-        elif workload_type == WorkloadType.WRITE_HEAVY:
-            read_ratio = 0.2
-        else:  # MIXED
-            read_ratio = 0.5
-
-        if random.random() < read_ratio:
-            await self._execute_read(worker_id, warmup=warmup)
-        else:
-            await self._execute_write(worker_id, warmup=warmup)
 
     async def _transition_to_measurement_phase(self) -> None:
         """

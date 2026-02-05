@@ -251,9 +251,21 @@
             </div>
         </div>
         
-        <div class="card" x-show="config.table_type === 'POSTGRES' || config.table_type === 'SNOWFLAKE_POSTGRES'">
-            <div class="card-title">Warehouse Configuration</div>
-            <div class="alert alert-info">
+        <div class="card" x-show="isPostgresFamilyTableType(config.table_type)">
+            <div class="card-title">Postgres Connection Settings</div>
+            
+            <div class="form-group">
+                <label class="form-label" style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" x-model="config.use_pgbouncer" style="margin: 0;">
+                    Use PgBouncer (port 5431)
+                </label>
+                <small class="form-text">
+                    Connects via PgBouncer (port 5431) for connection pooling. Requires <code>snowflake_pooler</code> extension 
+                    and a non-superuser role. <strong>Without PgBouncer: max 500 connections. With PgBouncer: up to 1000.</strong>
+                </small>
+            </div>
+
+            <div class="alert alert-info mt-3">
                 Warehouse selection is not used for Postgres-based templates. Results are still recorded to Snowflake using the `.env` `SNOWFLAKE_WAREHOUSE`.
             </div>
         </div>
@@ -963,6 +975,7 @@ function testConfiguration() {
             think_time: 0,
             warmup: 30,
             use_cached_result: true,
+            use_pgbouncer: false,  // PgBouncer (port 6432) may not be available on all instances
             custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
             custom_range_scan_query:
                 'SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100',
@@ -1073,6 +1086,7 @@ function testConfiguration() {
                 custom_insert_query: c.custom_insert_query,
                 custom_update_query: c.custom_update_query,
                 use_cached_result: c.use_cached_result,
+                use_pgbouncer: c.use_pgbouncer,
                 scaling: JSON.stringify(c.scaling || {}),
                 guardrails: JSON.stringify(c.guardrails || {}),
             };
@@ -1814,6 +1828,15 @@ function testConfiguration() {
                             const v = String(this.config.use_cached_result).trim().toLowerCase();
                             this.config.use_cached_result = !['0', 'false', 'no', 'off'].includes(v);
                         }
+                        // Default use_pgbouncer to FALSE for Postgres connections.
+                        // PgBouncer (port 6432) may not be available on all instances.
+                        // Coerce to a boolean for the checkbox UI.
+                        if (this.config.use_pgbouncer == null) {
+                            this.config.use_pgbouncer = false;
+                        } else {
+                            const v = String(this.config.use_pgbouncer).trim().toLowerCase();
+                            this.config.use_pgbouncer = !['0', 'false', 'no', 'off'].includes(v);
+                        }
                         this.ensureCanonicalWorkloadConfig();
                         this.config.template_name = template.template_name;
                         this.config.description = template.description;
@@ -2118,6 +2141,43 @@ function testConfiguration() {
                 }
             }
 
+            // Validate connection limits for Postgres based on PgBouncer setting
+            const isPostgresTableType = this.isPostgresFamilyTableType(this.config.table_type);
+            if (isPostgresTableType) {
+                const usePgBouncer = this.config.use_pgbouncer === true;
+                // Direct PostgreSQL max_connections is typically 500
+                // PgBouncer can handle up to 1000 client connections (multiplexed over ~497 server connections)
+                const DIRECT_POSTGRES_MAX = 500;
+                const PGBOUNCER_MAX = 1000;
+                const connectionLimit = usePgBouncer ? PGBOUNCER_MAX : DIRECT_POSTGRES_MAX;
+
+                // Calculate total connections based on load mode
+                let totalConnections = 0;
+                if (loadMode === 'CONCURRENCY') {
+                    totalConnections = Number(this.config.concurrent_connections || 0);
+                } else if (loadMode === 'FIND_MAX_CONCURRENCY') {
+                    totalConnections = Number(this.config.concurrent_connections || 0);
+                } else if (loadMode === 'QPS' && scalingMode === 'FIXED') {
+                    // For QPS mode with FIXED scaling, calculate from workers × connections
+                    totalConnections = minWorkers * minC;
+                }
+
+                if (totalConnections > connectionLimit) {
+                    if (usePgBouncer) {
+                        window.toast.warning(
+                            `Total connections (${totalConnections}) exceeds PgBouncer client limit (${PGBOUNCER_MAX}). ` +
+                            `Reduce the connection count.`
+                        );
+                    } else {
+                        window.toast.warning(
+                            `Total connections (${totalConnections}) exceeds PostgreSQL max_connections (${DIRECT_POSTGRES_MAX}). ` +
+                            `Enable PgBouncer to support up to ${PGBOUNCER_MAX} connections.`
+                        );
+                    }
+                    return;
+                }
+            }
+
             // Validate guardrails for non-FIXED modes (only if enabled)
             if (scalingMode !== 'FIXED' && this.config.guardrails?.enabled !== false) {
                 const maxCpu = Number(this.config.guardrails?.max_cpu_percent || 0);
@@ -2332,10 +2392,19 @@ function testConfiguration() {
                 } else {
                     const error = await response.json().catch(() => ({}));
                     const detail = error && error.detail ? error.detail : null;
-                    window.toast.error(
-                        'Error saving template: ' +
-                            (detail?.message || detail?.detail || detail || 'Unknown error'),
-                    );
+                    
+                    // Check for PgBouncer-related errors and show helpful message with docs link
+                    if (detail && (detail.error === 'pgbouncer_extension_missing' || detail.error === 'pgbouncer_privileged_user_not_allowed')) {
+                        window.toast.error(detail.message);
+                        if (detail.docs_url) {
+                            window.toast.info(`See docs: ${detail.docs_url}`, { timeoutMs: 15000 });
+                        }
+                    } else {
+                        window.toast.error(
+                            'Error saving template: ' +
+                                (detail?.message || detail?.detail || detail || 'Unknown error'),
+                        );
+                    }
                 }
             } catch (error) {
                 console.error('Failed to save template:', error);
@@ -2362,6 +2431,13 @@ function testConfiguration() {
                 this.config = { ...this.config, ...templateConfig };
                 this.config.scaling = { ...defaultScaling, ...(templateConfig.scaling || {}) };
                 this.config.guardrails = { ...defaultGuardrails, ...(templateConfig.guardrails || {}) };
+                // Coerce use_pgbouncer to boolean (default FALSE - port 6432 may not be available)
+                if (this.config.use_pgbouncer == null) {
+                    this.config.use_pgbouncer = false;
+                } else {
+                    const v = String(this.config.use_pgbouncer).trim().toLowerCase();
+                    this.config.use_pgbouncer = !['0', 'false', 'no', 'off'].includes(v);
+                }
                 this.ensureCanonicalWorkloadConfig();
                 this.config.template_name = template.template_name;
                 this.config.description = template.description;

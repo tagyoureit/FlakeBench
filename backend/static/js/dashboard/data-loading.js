@@ -486,6 +486,7 @@ window.DashboardMixins.dataLoading = {
         throw new Error(String(data.error));
       }
       this.errorSummaryRows = data && Array.isArray(data.rows) ? data.rows : [];
+      this.errorSummaryHierarchy = data && data.hierarchy ? data.hierarchy : null;
     } catch (e) {
       console.warn("Failed to load error summary:", e);
       this.errorSummaryError = e && e.message ? e.message : String(e);

@@ -2120,6 +2120,104 @@ async def get_template(template_id: str):
         raise http_exception("get template", e)
 
 
+async def _check_pgbouncer_requirements(config: dict) -> None:
+    """
+    Validate PgBouncer requirements if use_pgbouncer is enabled.
+
+    Checks if the snowflake_pooler extension is installed in the target database.
+    Returns a specific error code if missing so the frontend can prompt for installation.
+
+    Args:
+        config: Template configuration dictionary
+
+    Raises:
+        HTTPException: If PgBouncer is enabled but extension is not installed
+    """
+    use_pgbouncer = config.get("use_pgbouncer", False)
+    if not use_pgbouncer:
+        return
+
+    table_type = str(config.get("table_type", "")).upper()
+    if table_type not in ("POSTGRES", "SNOWFLAKE_POSTGRES"):
+        return
+
+    database = config.get("database", "")
+    if not database:
+        return
+
+    pool_type = "snowflake_postgres" if table_type == "SNOWFLAKE_POSTGRES" else "default"
+
+    try:
+        # Check if snowflake_pooler extension is installed
+        rows = await postgres_pool.fetch_from_database(
+            database=database,
+            query="SELECT extname FROM pg_extension WHERE extname = 'snowflake_pooler'",
+            pool_type=pool_type,
+            use_pgbouncer=False,  # Must use direct connection to check
+        )
+
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error": "pgbouncer_extension_missing",
+                    "database": database,
+                    "message": (
+                        f"PgBouncer requires the 'snowflake_pooler' extension in database '{database}'. "
+                        f"Connect as snowflake_admin and run: CREATE EXTENSION snowflake_pooler;"
+                    ),
+                    "docs_url": "https://docs.snowflake.com/en/user-guide/snowflake-postgres/postgres-connection-pooling",
+                },
+            )
+
+        # Check if current user is a superuser or has replication privilege
+        # PgBouncer does not allow connections from either type
+        role_rows = await postgres_pool.fetch_from_database(
+            database=database,
+            query="SELECT rolsuper, rolreplication FROM pg_roles WHERE rolname = current_user",
+            pool_type=pool_type,
+            use_pgbouncer=False,
+        )
+
+        if role_rows:
+            is_superuser = role_rows[0][0]
+            has_replication = role_rows[0][1]
+            if is_superuser or has_replication:
+                reasons = []
+                if is_superuser:
+                    reasons.append("superuser")
+                if has_replication:
+                    reasons.append("replication")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error": "pgbouncer_privileged_user_not_allowed",
+                        "message": (
+                            f"PgBouncer does not allow connections from users with "
+                            f"{' or '.join(reasons)} privileges. "
+                            f"Create a non-privileged application role to use PgBouncer, "
+                            f"or disable the PgBouncer option."
+                        ),
+                        "docs_url": "https://docs.snowflake.com/en/user-guide/snowflake-postgres/postgres-connection-pooling",
+                    },
+                )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("Failed to check PgBouncer extension: %s: %s", type(e).__name__, e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "pgbouncer_check_failed",
+                "message": (
+                    f"Failed to verify PgBouncer requirements for database '{database}': {e}. "
+                    f"Either disable PgBouncer or ensure the database is accessible."
+                ),
+            },
+        )
+
+
 @router.post("/", response_model=TemplateResponse, status_code=status.HTTP_201_CREATED)
 async def create_template(template: TemplateCreate):
     """
@@ -2142,6 +2240,10 @@ async def create_template(template: TemplateCreate):
         normalized_cfg = _normalize_template_config(template.config)
         # Enrich with postgres_instance_size if applicable
         normalized_cfg = _enrich_postgres_instance_size(normalized_cfg)
+
+        # Validate PgBouncer requirements before saving
+        await _check_pgbouncer_requirements(normalized_cfg)
+
         # If a template payload includes AI workload prep artifacts (e.g. from duplicating
         # an existing template), they are not valid for a *new* template.
         # Pools are keyed by TEMPLATE_ID, so carrying over the old pool_id would create
@@ -2244,6 +2346,10 @@ async def update_template(template_id: str, template: TemplateUpdate):
             normalized_cfg = _normalize_template_config(template.config)
             # Enrich with postgres_instance_size if applicable
             normalized_cfg = _enrich_postgres_instance_size(normalized_cfg)
+
+            # Validate PgBouncer requirements before saving
+            await _check_pgbouncer_requirements(normalized_cfg)
+
             config_json = json.dumps(normalized_cfg)
             updates.append("CONFIG = PARSE_JSON(?)")
             params.append(config_json)

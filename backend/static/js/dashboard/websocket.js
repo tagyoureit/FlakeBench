@@ -20,6 +20,9 @@ window.DashboardMixins.websocket = {
     this.websocket.onopen = () => {
       this._debugLog("WS", "CONNECTED");
       this.testRunning = true;
+      // Reset saturation detection for new test
+      this._saturationSamples = [];
+      this._saturationWarningShown = false;
       if (typeof this.stopMultiNodeLogPolling === "function") {
         this.stopMultiNodeLogPolling();
       }

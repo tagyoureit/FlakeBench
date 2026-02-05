@@ -1844,3 +1844,128 @@ fieldset:disabled .alert,
   background: #dbeafe;
   color: #1d4ed8;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Error Summary Drill-Down KPI Cards                                          */
+/* -------------------------------------------------------------------------- */
+
+.error-summary-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.error-summary-kpi-card {
+  background: #f9fafb;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  text-align: center;
+  transition: all 0.2s ease;
+}
+
+.error-summary-kpi-clickable {
+  cursor: pointer;
+}
+
+.error-summary-kpi-clickable:hover {
+  border-color: var(--primary);
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.15);
+  transform: translateY(-1px);
+}
+
+.error-summary-kpi-icon {
+  font-size: 1.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.error-summary-kpi-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-light);
+  margin-bottom: 0.25rem;
+}
+
+.error-summary-kpi-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--text-dark);
+}
+
+.error-summary-kpi-warning {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  border-color: #fcd34d;
+}
+
+.error-summary-kpi-warning .error-summary-kpi-value {
+  color: #92400e;
+}
+
+.error-summary-kpi-error {
+  background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+  border-color: #fca5a5;
+}
+
+.error-summary-kpi-error .error-summary-kpi-value {
+  color: #991b1b;
+}
+
+.error-summary-kpi-total {
+  background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%);
+  border-color: #a5b4fc;
+}
+
+.error-summary-kpi-total .error-summary-kpi-value {
+  color: #3730a3;
+}
+
+.error-summary-kpi-querytype {
+  background: #f9fafb;
+  border-color: var(--border);
+}
+
+.error-summary-kpi-querytype .error-summary-kpi-value {
+  font-size: 1.25rem;
+}
+
+/* Error Summary Detail Table */
+.error-summary-detail-table {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+.error-summary-detail-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.error-summary-detail-table th {
+  position: sticky;
+  top: 0;
+  background: #f9fafb;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dark);
+  border-bottom: 1px solid var(--border);
+}
+
+.error-summary-detail-table td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+}
+
+.error-summary-detail-table tr:last-child td {
+  border-bottom: none;
+}
+
+.error-summary-detail-table tr:hover {
+  background: #f9fafb;
+}

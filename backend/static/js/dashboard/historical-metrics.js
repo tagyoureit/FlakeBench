@@ -8,7 +8,11 @@ window.DashboardMixins.historicalMetrics = {
   async loadHistoricalMetrics() {
     if (!this.testId) return;
     try {
-      const resp = await fetch(`/api/tests/${this.testId}/metrics`);
+      // Fetch both main metrics and per-worker metrics in parallel
+      const [resp, workerResp] = await Promise.all([
+        fetch(`/api/tests/${this.testId}/metrics`),
+        fetch(`/api/tests/${this.testId}/worker-metrics`),
+      ]);
       if (!resp.ok) return;
       const data = await resp.json();
       
@@ -22,10 +26,21 @@ window.DashboardMixins.historicalMetrics = {
         ? Number(data.warmup_end_elapsed_seconds)
         : null;
 
+      // Store per-worker metrics if available
+      this._workerMetrics = null;
+      if (workerResp.ok) {
+        const workerData = await workerResp.json();
+        if (workerData.available && workerData.workers && workerData.workers.length > 1) {
+          this._workerMetrics = workerData.workers;
+          console.log(`Loaded per-worker metrics for ${workerData.workers.length} workers`);
+        }
+      }
+
       if (this.debug) {
         this._debugCharts("loadHistoricalMetrics: start", {
           snapshots: data.snapshots.length,
           warmupEnd: this.metricsWarmupEndElapsed,
+          workers: this._workerMetrics ? this._workerMetrics.length : 0,
         });
       }
       
@@ -231,14 +246,130 @@ window.DashboardMixins.historicalMetrics = {
     }
 
     if (concurrencyChart) {
-      concurrencyChart.data.labels = labels;
-      if (isPostgres) {
-        if (concurrencyChart.data.datasets[0]) concurrencyChart.data.datasets[0].data = targetData;
-        if (concurrencyChart.data.datasets[1]) concurrencyChart.data.datasets[1].data = inFlightData;
+      // Check if we have per-worker breakdown data
+      const workerMetrics = this._workerMetrics;
+      if (workerMetrics && workerMetrics.length > 1) {
+        // Build per-worker datasets with proper time alignment
+        const workerColors = [
+          "rgb(59, 130, 246)",   // blue
+          "rgb(245, 158, 11)",   // amber
+          "rgb(168, 85, 247)",   // purple
+          "rgb(236, 72, 153)",   // pink
+          "rgb(34, 197, 94)",    // green
+          "rgb(239, 68, 68)",    // red
+          "rgb(6, 182, 212)",    // cyan
+          "rgb(249, 115, 22)",   // orange
+        ];
+
+        // Build time-indexed data for each worker
+        const workerDataByTime = {};  // elapsed_seconds -> { workerId: active_connections }
+        const workerTargetByTime = {}; // elapsed_seconds -> { workerId: target_workers }
+        
+        for (const worker of workerMetrics) {
+          const workerId = worker.worker_id || worker.key;
+          for (const snap of (worker.snapshots || [])) {
+            const bucket = Math.round(Number(snap.elapsed_seconds || 0));
+            if (!workerDataByTime[bucket]) {
+              workerDataByTime[bucket] = {};
+              workerTargetByTime[bucket] = {};
+            }
+            workerDataByTime[bucket][workerId] = Number(snap.active_connections || 0);
+            workerTargetByTime[bucket][workerId] = Number(snap.target_workers || 0);
+          }
+        }
+
+        // Sort workers for consistent ordering
+        const workerIds = workerMetrics.map(w => w.worker_id || w.key).sort();
+        
+        // Build labels and data arrays aligned with main snapshots
+        const workerLabels = [];
+        const totalInFlightData = [];
+        const totalTargetData = [];
+        const perWorkerData = {};  // workerId -> array of values
+        
+        for (const workerId of workerIds) {
+          perWorkerData[workerId] = [];
+        }
+
+        for (const snapshot of snapshots) {
+          if (!snapshot) continue;
+          let secs = Number(snapshot.elapsed_seconds || 0);
+          if (!showWarmup && warmupEnd != null) {
+            secs = secs - warmupEnd;
+          }
+          const bucket = Math.round(Number(snapshot.elapsed_seconds || 0));
+          const ts = `${this.formatSecondsTenths(secs)}s`;
+          workerLabels.push(ts);
+
+          // Sum active connections from all workers for this time bucket
+          let totalInFlight = 0;
+          let totalTarget = 0;
+          const bucketData = workerDataByTime[bucket] || {};
+          const bucketTargetData = workerTargetByTime[bucket] || {};
+          
+          for (const workerId of workerIds) {
+            const val = bucketData[workerId] || 0;
+            const targetVal = bucketTargetData[workerId] || 0;
+            perWorkerData[workerId].push(val);
+            totalInFlight += val;
+            totalTarget += targetVal;
+          }
+          totalInFlightData.push(totalInFlight);
+          totalTargetData.push(totalTarget);
+        }
+
+        // Build datasets: Target (dashed), Total In-flight, then per-worker breakdown
+        const datasets = [
+          {
+            label: "Target workers (total)",
+            data: totalTargetData,
+            borderColor: "rgb(34, 197, 94)",
+            backgroundColor: "transparent",
+            tension: 0.1,
+            borderDash: [4, 4],
+            borderWidth: 2,
+          },
+          {
+            label: "In-flight (total)",
+            data: totalInFlightData,
+            borderColor: "rgb(100, 116, 139)",  // slate
+            backgroundColor: "transparent",
+            tension: 0.4,
+            borderWidth: 3,
+          },
+        ];
+
+        // Add per-worker datasets
+        workerIds.forEach((workerId, idx) => {
+          const color = workerColors[idx % workerColors.length];
+          // Create a display name: use group index if available
+          const worker = workerMetrics.find(w => (w.worker_id || w.key) === workerId);
+          const groupId = worker?.worker_group_id;
+          const displayName = groupId != null ? `Worker ${groupId}` : workerId;
+          datasets.push({
+            label: displayName,
+            data: perWorkerData[workerId],
+            borderColor: color,
+            backgroundColor: "transparent",
+            tension: 0.4,
+            borderWidth: 1.5,
+          });
+        });
+
+        // Replace chart datasets
+        concurrencyChart.data.labels = workerLabels;
+        concurrencyChart.data.datasets = datasets;
       } else {
-        if (concurrencyChart.data.datasets[0]) concurrencyChart.data.datasets[0].data = targetData;
-        if (concurrencyChart.data.datasets[1]) concurrencyChart.data.datasets[1].data = inFlightData;
-        if (concurrencyChart.data.datasets[2]) concurrencyChart.data.datasets[2].data = sfQueuedData;
+        // Single worker or no per-worker data - use aggregated data
+        concurrencyChart.data.labels = labels;
+        if (isPostgres) {
+          if (concurrencyChart.data.datasets[0]) concurrencyChart.data.datasets[0].data = targetData;
+          if (concurrencyChart.data.datasets[1]) concurrencyChart.data.datasets[1].data = inFlightData;
+        } else {
+          if (concurrencyChart.data.datasets[0]) concurrencyChart.data.datasets[0].data = targetData;
+          if (concurrencyChart.data.datasets[1]) concurrencyChart.data.datasets[1].data = inFlightData;
+          if (concurrencyChart.data.datasets[2]) concurrencyChart.data.datasets[2].data = sfQueuedData;
+        }
       }
       addWarmupAnnotation(concurrencyChart);
       concurrencyChart.update();

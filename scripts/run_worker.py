@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 from backend.config import settings
 from backend.connectors import postgres_pool, snowflake_pool
 from backend.core import results_store
-from backend.core.query_execution_streamer import QueryExecutionStreamer
+from backend.core.file_query_logger import FileBasedQueryLogger
 from backend.core.test_executor import TestExecutor
 from backend.core.test_log_stream import (
     CURRENT_TEST_ID,
@@ -505,20 +505,19 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     executor._benchmark_query_tag = benchmark_query_tag_warmup
     executor._benchmark_query_tag_running = benchmark_query_tag_running  # type: ignore[attr-defined]
 
-    # Initialize query execution streamer for continuous persistence.
-    # Uses the control pool (default pool) to stream records to Snowflake.
+    # Initialize file-based query logger for high-throughput benchmarks.
+    # Writes to local Parquet files during benchmark, then bulk loads to Snowflake
+    # during PROCESSING phase via PUT + COPY INTO. This eliminates event loop
+    # contention that caused concurrency dips with the streaming approach.
     # Use executor.test_id (worker's unique ID) so QUERY_EXECUTIONS.TEST_ID matches
     # the QUERY_TAG in Snowflake's QUERY_HISTORY for proper enrichment.
-    # The dashboard finds records via JOIN on TEST_RESULTS.RUN_ID.
-    query_streamer = QueryExecutionStreamer(
-        pool=snowflake_pool.get_default_pool(),
+    results_prefix = f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
+    query_logger = FileBasedQueryLogger(
         test_id=str(executor.test_id),
-        flush_interval_seconds=30.0,
-        flush_threshold_records=5000,
-        batch_insert_size=2000,
+        worker_id=cfg.worker_group_id,
+        results_prefix=results_prefix,
     )
-    executor.set_query_execution_streamer(query_streamer)
-    await query_streamer.start()
+    executor.set_query_logger(query_logger)
 
     table_type = str(template_config.get("table_type") or "STANDARD").strip().upper()
     is_postgres = table_type in {
@@ -549,6 +548,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 )
             except Exception:
                 pass
+            query_logger.cleanup_on_error()
             return 1
 
     raw_use_cached = template_config.get("use_cached_result")
@@ -568,6 +568,24 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     else:
         use_cached_result = True
 
+    # PgBouncer setting for Postgres connections (default False - port 6432 may not be available)
+    raw_use_pgbouncer = template_config.get("use_pgbouncer")
+    if raw_use_pgbouncer is None:
+        use_pgbouncer = False  # Default to direct PostgreSQL (port 5432)
+    elif isinstance(raw_use_pgbouncer, bool):
+        use_pgbouncer = raw_use_pgbouncer
+    elif isinstance(raw_use_pgbouncer, (int, float)):
+        use_pgbouncer = bool(raw_use_pgbouncer)
+    elif isinstance(raw_use_pgbouncer, str):
+        use_pgbouncer = raw_use_pgbouncer.strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+    else:
+        use_pgbouncer = False
+
     tags_value = meta.get("tags")
     template_tags = tags_value if isinstance(tags_value, dict) else {}
     is_smoke = str(template_tags.get("smoke", "")).lower() == "true"
@@ -580,6 +598,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         logger.error(
             "Template execution warehouse must not match results warehouse (SNOWFLAKE_WAREHOUSE)."
         )
+        query_logger.cleanup_on_error()
         return 1
 
     if not is_postgres:
@@ -635,21 +654,64 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         executor._snowflake_pool_override = per_test_pool  # type: ignore[attr-defined]
     else:
         # =========================================================================
-        # Postgres pool creation: Size pool to match per-worker connection target.
-        # Without this, Postgres workers use default pool size (5-20) regardless
-        # of the requested concurrency, severely limiting throughput.
+        # Postgres pool creation: Size pool based on PgBouncer setting.
+        # - With PgBouncer (port 5431): Allow up to 1000 client connections since
+        #   PgBouncer multiplexes them over ~497 server connections (transaction pooling).
+        # - Without PgBouncer (port 5432): Cap at 200 to leave room within max_connections=500.
         # =========================================================================
         max_workers = int(per_worker_cap)
-        initial_pool = max(1, min(max_workers, max(1, int(initial_target or 1))))
+
+        # Cap connection pool size based on connection mode
+        # - Direct PostgreSQL (port 5432): Cap at 200 to leave room within max_connections=500
+        # - PgBouncer (port 5431): Allow up to 1000 client connections - PgBouncer multiplexes
+        #   these over its server-side pool (default_pool_size: 497) using transaction pooling
+        DIRECT_POSTGRES_CAP = 200  # Safe limit for direct PostgreSQL connections
+        PGBOUNCER_CLIENT_CAP = 1000  # PgBouncer handles multiplexing, can have many clients
+        
+        pool_cap = PGBOUNCER_CLIENT_CAP if use_pgbouncer else DIRECT_POSTGRES_CAP
+        
+        if max_workers > pool_cap:
+            effective_max_workers = pool_cap
+            logger.info(
+                "[benchmark] Capping asyncpg pool from %d to %d (use_pgbouncer=%s, port=%s)",
+                max_workers,
+                effective_max_workers,
+                use_pgbouncer,
+                "5431" if use_pgbouncer else "5432",
+            )
+        else:
+            effective_max_workers = max_workers
+
+        # Calculate initial pool size (connections created at startup)
+        # These limits are based on Snowflake Postgres defaults:
+        # - PostgreSQL max_connections: 500
+        # - PgBouncer default_pool_size: 497 (server-side connections)
+        #
+        # With PgBouncer: Start with fewer connections to avoid overwhelming the pooler
+        # during init. PgBouncer can't handle 1000 simultaneous connection attempts.
+        # The pool will grow on-demand up to effective_max_workers.
+        #
+        # Without PgBouncer: Can initialize closer to max since we connect directly.
+        PGBOUNCER_INITIAL_CAP = 100  # Conservative to avoid client_login_timeout
+        DIRECT_INITIAL_CAP = 497    # PostgreSQL max_connections is 500, leave small buffer
+        
+        if use_pgbouncer:
+            # Start smaller, let pool grow on demand
+            initial_pool = min(PGBOUNCER_INITIAL_CAP, max(1, int(initial_target or 1)))
+        else:
+            initial_pool = max(1, min(effective_max_workers, max(1, int(initial_target or 1))))
+            initial_pool = min(initial_pool, DIRECT_INITIAL_CAP)
+        
         logger.info(
             "[benchmark] Postgres pool sizing: total_connections=%d, initial_target=%d, "
-            "per_worker_cap=%d, max_workers=%d, initial_pool=%d, load_mode=%s",
+            "per_worker_cap=%d, max_workers=%d, initial_pool=%d, load_mode=%s, use_pgbouncer=%s",
             total_connections,
             initial_target,
             per_worker_cap,
-            max_workers,
+            effective_max_workers,
             initial_pool,
             load_mode,
+            use_pgbouncer,
         )
 
         # Determine pool type and database from template config
@@ -667,7 +729,14 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             )
 
         # Get connection params and create a properly-sized pool for this worker
-        pg_params = postgres_pool.get_postgres_connection_params(pg_pool_type)
+        pg_params = postgres_pool.get_postgres_connection_params(
+            pg_pool_type, use_pgbouncer=use_pgbouncer
+        )
+        logger.info(
+            "[benchmark] Postgres connection: use_pgbouncer=%s, port=%d",
+            use_pgbouncer,
+            pg_params["port"],
+        )
         per_test_pg_pool = postgres_pool.PostgresConnectionPool(
             host=pg_params["host"],
             port=pg_params["port"],
@@ -675,7 +744,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             user=pg_params["user"],
             password=pg_params["password"],
             min_size=initial_pool,
-            max_size=max_workers,
+            max_size=effective_max_workers,
             pool_name="benchmark",
         )
         executor._postgres_pool_override = per_test_pg_pool  # type: ignore[attr-defined]
@@ -738,6 +807,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             logger.error("Benchmark pool initialization failed: %s", exc)
             last_error = str(exc)
             await _safe_heartbeat("DEAD")
+            query_logger.cleanup_on_error()
             return 2
     else:
         # Initialize Postgres pool before START
@@ -757,6 +827,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             logger.error("Postgres benchmark pool initialization failed: %s", exc)
             last_error = str(exc)
             await _safe_heartbeat("DEAD")
+            query_logger.cleanup_on_error()
             return 2
 
     # Setup executor (table profiling, value pools, etc.) before START
@@ -766,6 +837,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         last_error = str(getattr(executor, "_setup_error", "Setup failed"))
         logger.error("Executor setup failed: %s", last_error)
         await _safe_heartbeat("DEAD")
+        query_logger.cleanup_on_error()
         return 1
     logger.info("Executor setup complete - ready for START")
     await _safe_heartbeat("READY")  # Signal orchestrator that pool init is complete
@@ -1036,6 +1108,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         logger.error("Failed to insert TEST_RESULTS row: %s", exc)
         last_error = str(exc)
         await _safe_heartbeat("DEAD")
+        query_logger.cleanup_on_error()
         return 1
 
     executor.status = TestStatus.RUNNING
@@ -1335,22 +1408,22 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     # _mark_run_completed(), not by workers. This avoids race conditions when
     # multiple workers complete around the same time.
 
-    # Shutdown the query execution streamer (flushes remaining buffer to Snowflake).
-    # This replaces the previous bulk-insert-at-shutdown approach.
+    # Finalize query logger: flush buffer, PUT to stage, COPY INTO, cleanup.
+    # This happens during PROCESSING phase after benchmark completes.
     try:
-        flush_p99 = query_streamer.stats.get("flush_p99_ms")
-        await query_streamer.shutdown(flush_p99_ms=flush_p99)
+        finalize_stats = await query_logger.finalize(snowflake_pool.get_default_pool())
         logger.info(
-            "QueryExecutionStreamer shutdown: %s",
+            "FileBasedQueryLogger finalized: %s",
             {
-                "total_flushed": query_streamer.stats.get("total_records_flushed"),
-                "dropped_batches": query_streamer.stats.get("dropped_batches"),
-                "run_partial": query_streamer.run_partial,
+                "rows_loaded": finalize_stats.get("rows_loaded"),
+                "files_processed": finalize_stats.get("files_processed"),
+                "total_rows_captured": finalize_stats.get("total_rows_captured"),
             },
         )
         health.record_success()
     except Exception as exc:
-        logger.warning("Failed to shutdown QueryExecutionStreamer: %s", exc)
+        logger.warning("Failed to finalize FileBasedQueryLogger: %s", exc)
+        query_logger.cleanup_on_error()
 
     # NOTE: Enrichment (QUERY_HISTORY matching) is handled centrally by the
     # orchestrator as a background task after all workers complete. Worker just

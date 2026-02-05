@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import uuid
@@ -57,14 +58,12 @@ def build_worker_targets(
     target_qps_total: float | None = None,
 ) -> tuple[int, dict[str, dict[str, Any]]]:
     """
-    Distribute total_target threads evenly across workers.
+    Distribute total_target threads across workers using pack strategy.
 
-    Algorithm (2.10 Target Allocation):
-    - base = total_target // worker_group_count
-    - remainder = total_target % worker_group_count
-    - Workers with group_id < remainder get base + 1
-    - If per_worker_cap/max_threads_per_worker is set, clamp total to max achievable
-    - Never drop below min_threads_per_worker floor when provided
+    Algorithm (Pack Strategy):
+    - Fill workers to max_threads_per_worker first
+    - Last worker gets the remainder
+    - Example: 100 threads, 7 workers, max 15 -> 6@15 + 1@10
 
     Args:
         total_target: Total threads to distribute.
@@ -109,22 +108,40 @@ def build_worker_targets(
             )
             target_total = min_total
 
-    base = target_total // worker_count
-    remainder = target_total % worker_count
     per_worker_qps = None
     if load_mode == "QPS" and target_qps_total is not None:
         per_worker_qps = float(target_qps_total) / float(worker_count)
 
     targets: dict[str, dict[str, Any]] = {}
-    for idx in range(worker_count):
-        target = base + (1 if idx < remainder else 0)
-        entry: dict[str, Any] = {
-            "target_threads": int(target),
-            "worker_group_id": int(idx),
-        }
-        if per_worker_qps is not None:
-            entry["target_qps"] = float(per_worker_qps)
-        targets[f"worker-{idx}"] = entry
+
+    # Pack strategy: fill workers to effective_cap, last worker gets remainder
+    if effective_cap is not None and int(effective_cap) > 0:
+        cap = int(effective_cap)
+        remaining = target_total
+        for idx in range(worker_count):
+            # Fill to cap, or take what's left
+            target = min(cap, remaining)
+            remaining -= target
+            entry: dict[str, Any] = {
+                "target_threads": int(target),
+                "worker_group_id": int(idx),
+            }
+            if per_worker_qps is not None:
+                entry["target_qps"] = float(per_worker_qps)
+            targets[f"worker-{idx}"] = entry
+    else:
+        # No cap - balance evenly (original behavior)
+        base = target_total // worker_count
+        remainder = target_total % worker_count
+        for idx in range(worker_count):
+            target = base + (1 if idx < remainder else 0)
+            entry = {
+                "target_threads": int(target),
+                "worker_group_id": int(idx),
+            }
+            if per_worker_qps is not None:
+                entry["target_qps"] = float(per_worker_qps)
+            targets[f"worker-{idx}"] = entry
 
     return target_total, targets
 
@@ -229,7 +246,9 @@ class OrchestratorService:
         )
 
         try:
-            params = get_postgres_connection_params(pool_type)
+            # Stats connections should always use direct PostgreSQL (port 5432),
+            # not PgBouncer, since they query system views like pg_stat_statements
+            params = get_postgres_connection_params(pool_type, use_pgbouncer=False)
             conn = await asyncpg.connect(
                 host=params["host"],
                 port=params["port"],
@@ -240,7 +259,11 @@ class OrchestratorService:
             )
             return conn
         except Exception as e:
-            logger.warning("Failed to create Postgres connection for stats: %s", e)
+            logger.warning(
+                "Failed to create Postgres connection for stats: %s: %s",
+                type(e).__name__,
+                e or "(no message)",
+            )
             return None
 
     async def _run_fail_fast_checks(self, *, template_id: str | None = None) -> None:
@@ -493,6 +516,14 @@ class OrchestratorService:
             scaling_cfg.get("max_connections")
         )
 
+        # Sensible default for AUTO and BOUNDED modes to prevent footgun scenarios
+        # (e.g., 1 worker with 5000 threads). Workers handle ~250 threads well.
+        DEFAULT_MAX_THREADS_PER_WORKER = 250
+
+        if scaling_mode in {"AUTO", "BOUNDED"}:
+            if max_threads_per_worker is None:
+                max_threads_per_worker = DEFAULT_MAX_THREADS_PER_WORKER
+
         if min_workers < 1:
             raise ValueError("min_workers must be >= 1")
         if min_threads_per_worker < 1:
@@ -516,6 +547,9 @@ class OrchestratorService:
                     "FIXED mode requires scaling.min_threads_per_worker to be set"
                 )
 
+        # Extract total_threads early for optimal worker count calculation
+        total_threads = int(scenario.total_threads)
+
         worker_group_count = int(
             template_config.get("worker_group_count")
             or template_config.get("worker_count")
@@ -526,6 +560,14 @@ class OrchestratorService:
             worker_group_count = 1
         if scaling_mode == "FIXED":
             worker_group_count = min_workers
+        elif scaling_mode in {"AUTO", "BOUNDED"} and max_threads_per_worker is not None:
+            # For AUTO and BOUNDED modes, compute optimal worker count
+            # ceil(total_threads / max_threads_per_worker) gives minimum workers needed
+            optimal_workers = math.ceil(total_threads / max_threads_per_worker)
+            # Clamp between min_workers and max_workers
+            worker_group_count = max(optimal_workers, min_workers)
+            if max_workers is not None:
+                worker_group_count = min(worker_group_count, max_workers)
         else:
             if worker_group_count < min_workers:
                 worker_group_count = min_workers
@@ -546,7 +588,6 @@ class OrchestratorService:
 
         load_mode = str(getattr(scenario, "load_mode", "CONCURRENCY") or "CONCURRENCY")
         load_mode = load_mode.strip().upper()
-        total_threads = int(scenario.total_threads)
         if scaling_mode == "FIXED" and load_mode == "CONCURRENCY":
             total_threads = int(min_workers) * int(min_threads_per_worker)
 

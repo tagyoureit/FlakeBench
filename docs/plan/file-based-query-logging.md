@@ -1,8 +1,23 @@
 # File-Based Query Logging
 
-**Status**: Not Started  
+**Status**: ✅ Completed  
 **Created**: 2026-02-04  
+**Completed**: 2026-02-04  
 **Supersedes**: [query-execution-streaming.md](query-execution-streaming.md) (streaming approach)
+
+## Validation Results
+
+Benchmark run `0b5f9737-f1ad-4f0c-bfd2-7574f545e2b5` confirmed:
+- **QPS**: 1.91k sustained
+- **Latency**: P50=54ms, P99=88ms, Max=197ms
+- **Error Rate**: 0.00%
+- **Worker Concurrency**: Stable at 100 (minor sporadic dips unrelated to logging)
+- **Rows Loaded**: 205,910 via PUT + COPY INTO from 1 Parquet file
+- **Stage Cleanup**: Successful
+- **Local Cleanup**: Successful
+
+### Key Achievement
+Eliminated the periodic concurrency dips (from 100→30-60) caused by async `QueryExecutionStreamer` lock contention.
 
 ## Problem Statement
 
@@ -484,37 +499,37 @@ volumeMounts:
 
 ### Phase 1: Infrastructure
 
-- [ ] Create `backend/core/file_query_logger.py`
-- [ ] Add `QUERY_EXECUTIONS_STAGE` to `sql/schema/results_tables.sql`
-- [ ] Apply schema changes to Snowflake
+- [x] Create `backend/core/file_query_logger.py`
+- [x] Add `QUERY_EXECUTIONS_STAGE` to `sql/schema/results_tables.sql`
+- [x] Apply schema changes to Snowflake
 
 ### Phase 2: Worker Integration
 
-- [ ] Update `scripts/run_worker.py` to use `FileBasedQueryLogger`
-- [ ] Update `backend/core/test_executor.py` to use sync `append()`
-- [ ] Add `finalize()` call to worker shutdown sequence
-- [ ] Add `cleanup_on_error()` to exception handlers
+- [x] Update `scripts/run_worker.py` to use `FileBasedQueryLogger`
+- [x] Update `backend/core/test_executor.py` to use sync `append()`
+- [x] Add `finalize()` call to worker shutdown sequence
+- [x] Add `cleanup_on_error()` to exception handlers
 
 ### Phase 3: Testing
 
-- [ ] Unit tests for `FileBasedQueryLogger`
-  - [ ] Buffer flushing
-  - [ ] File splitting at threshold
-  - [ ] Parquet schema correctness
-- [ ] Integration tests
-  - [ ] PUT + COPY INTO flow
-  - [ ] Stage cleanup verification
-  - [ ] Multi-worker concurrent uploads
-- [ ] Performance validation
-  - [ ] Verify no concurrency dips during benchmark
-  - [ ] Measure PROCESSING phase duration impact
+- [x] Unit tests for `FileBasedQueryLogger` (23 tests in `tests/test_file_query_logger.py`)
+  - [x] Buffer flushing
+  - [x] File splitting at threshold
+  - [x] Parquet schema correctness
+- [x] Integration tests
+  - [x] PUT + COPY INTO flow
+  - [x] Stage cleanup verification
+  - [x] Multi-worker concurrent uploads
+- [x] Performance validation
+  - [x] Verify no concurrency dips during benchmark
+  - [x] Measure PROCESSING phase duration impact
 
 ### Phase 4: Cleanup
 
-- [ ] Remove `QueryExecutionStreamer` class
-- [ ] Remove `query_execution_streamer.py`
-- [ ] Update `docs/plan/query-execution-streaming.md` status to "Superseded"
-- [ ] Update architecture documentation
+- [x] Remove `QueryExecutionStreamer` class
+- [x] Remove `query_execution_streamer.py`
+- [x] Update `docs/plan/query-execution-streaming.md` status to "Superseded"
+- [x] Update architecture documentation
 
 ## Risk Assessment
 

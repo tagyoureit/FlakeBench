@@ -31,14 +31,12 @@ def build_worker_targets(
     target_qps_total: float | None = None,
 ) -> tuple[int, dict[str, dict[str, Any]]]:
     """
-    Distribute total_target threads evenly across workers.
+    Distribute total_target threads across workers using pack strategy.
 
-    Algorithm (2.10 Target Allocation):
-    - base = total_target // worker_group_count
-    - remainder = total_target % worker_group_count
-    - Workers with group_id < remainder get base + 1
-    - If per_worker_cap/max_threads_per_worker is set, clamp total to max achievable
-    - Never drop below min_threads_per_worker floor when provided
+    Algorithm (Pack Strategy):
+    - Fill workers to max_threads_per_worker first
+    - Last worker gets the remainder
+    - Example: 100 threads, 7 workers, max 15 -> 6@15 + 1@10
 
     Args:
         total_target: Total threads to distribute.
@@ -83,22 +81,40 @@ def build_worker_targets(
             )
             target_total = min_total
 
-    base = target_total // worker_count
-    remainder = target_total % worker_count
     per_worker_qps = None
     if load_mode == "QPS" and target_qps_total is not None:
         per_worker_qps = float(target_qps_total) / float(worker_count)
 
     targets: dict[str, dict[str, Any]] = {}
-    for idx in range(worker_count):
-        target = base + (1 if idx < remainder else 0)
-        entry: dict[str, Any] = {
-            "target_threads": int(target),
-            "worker_group_id": int(idx),
-        }
-        if per_worker_qps is not None:
-            entry["target_qps"] = float(per_worker_qps)
-        targets[f"worker-{idx}"] = entry
+
+    # Pack strategy: fill workers to effective_cap, last worker gets remainder
+    if effective_cap is not None and int(effective_cap) > 0:
+        cap = int(effective_cap)
+        remaining = target_total
+        for idx in range(worker_count):
+            # Fill to cap, or take what's left
+            target = min(cap, remaining)
+            remaining -= target
+            entry: dict[str, Any] = {
+                "target_threads": int(target),
+                "worker_group_id": int(idx),
+            }
+            if per_worker_qps is not None:
+                entry["target_qps"] = float(per_worker_qps)
+            targets[f"worker-{idx}"] = entry
+    else:
+        # No cap - balance evenly (original behavior)
+        base = target_total // worker_count
+        remainder = target_total % worker_count
+        for idx in range(worker_count):
+            target = base + (1 if idx < remainder else 0)
+            entry = {
+                "target_threads": int(target),
+                "worker_group_id": int(idx),
+            }
+            if per_worker_qps is not None:
+                entry["target_qps"] = float(per_worker_qps)
+            targets[f"worker-{idx}"] = entry
 
     return target_total, targets
 

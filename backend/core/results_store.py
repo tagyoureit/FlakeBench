@@ -1442,100 +1442,117 @@ async def enrich_query_executions_from_query_history(
     total_merged = 0
 
     for page in range(max_pages):
-        result = await pool.execute_query(
+        try:
+            result = await pool.execute_query(
+                """
+                SELECT MIN(END_TIME) as oldest_end, COUNT(*) as cnt
+                FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
+                    END_TIME_RANGE_START=>TO_TIMESTAMP_LTZ(?),
+                    END_TIME_RANGE_END=>TO_TIMESTAMP_LTZ(?),
+                    RESULT_LIMIT=>10000
+                ))
+                WHERE QUERY_TAG LIKE ?
+                """,
+                params=[start_buf, current_end, query_tag_like],
+            )
+
+            if not result or result[0][1] == 0:
+                break
+
+            row_count = result[0][1]
+            oldest_end_time = result[0][0]
+
+            # MERGE by QUERY_ID only - QUERY_ID is unique across all workers
+            # The QUERY_TAG filter ensures we only match queries from this run
+            merge_query = f"""
+            MERGE INTO {prefix}.QUERY_EXECUTIONS tgt
+            USING (
+                SELECT
+                    QUERY_ID,
+                    TOTAL_ELAPSED_TIME::FLOAT AS SF_TOTAL_ELAPSED_MS,
+                    EXECUTION_TIME::FLOAT AS SF_EXECUTION_MS,
+                    COMPILATION_TIME::FLOAT AS SF_COMPILATION_MS,
+                    QUEUED_OVERLOAD_TIME::FLOAT AS SF_QUEUED_OVERLOAD_MS,
+                    QUEUED_PROVISIONING_TIME::FLOAT AS SF_QUEUED_PROVISIONING_MS,
+                    TRANSACTION_BLOCKED_TIME::FLOAT AS SF_TX_BLOCKED_MS,
+                    BYTES_SCANNED::BIGINT AS SF_BYTES_SCANNED,
+                    ROWS_PRODUCED::BIGINT AS SF_ROWS_PRODUCED,
+                    CLUSTER_NUMBER::INTEGER AS SF_CLUSTER_NUMBER
+                FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
+                    END_TIME_RANGE_START=>TO_TIMESTAMP_LTZ(?),
+                    END_TIME_RANGE_END=>TO_TIMESTAMP_LTZ(?),
+                    RESULT_LIMIT=>10000
+                ))
+                WHERE QUERY_TAG LIKE ?
+            ) src
+            ON tgt.QUERY_ID = src.QUERY_ID
+            WHEN MATCHED THEN UPDATE SET
+                SF_TOTAL_ELAPSED_MS = src.SF_TOTAL_ELAPSED_MS,
+                SF_EXECUTION_MS = src.SF_EXECUTION_MS,
+                SF_COMPILATION_MS = src.SF_COMPILATION_MS,
+                SF_QUEUED_OVERLOAD_MS = src.SF_QUEUED_OVERLOAD_MS,
+                SF_QUEUED_PROVISIONING_MS = src.SF_QUEUED_PROVISIONING_MS,
+                SF_TX_BLOCKED_MS = src.SF_TX_BLOCKED_MS,
+                SF_BYTES_SCANNED = src.SF_BYTES_SCANNED,
+                SF_ROWS_PRODUCED = src.SF_ROWS_PRODUCED,
+                SF_CLUSTER_NUMBER = src.SF_CLUSTER_NUMBER,
+                APP_OVERHEAD_MS = IFF(
+                    tgt.APP_ELAPSED_MS IS NULL OR src.SF_TOTAL_ELAPSED_MS IS NULL,
+                    NULL,
+                    tgt.APP_ELAPSED_MS - src.SF_TOTAL_ELAPSED_MS
+                );
             """
-            SELECT MIN(END_TIME) as oldest_end, COUNT(*) as cnt
-            FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
-                END_TIME_RANGE_START=>TO_TIMESTAMP_LTZ(?),
-                END_TIME_RANGE_END=>TO_TIMESTAMP_LTZ(?),
-                RESULT_LIMIT=>10000
-            ))
-            WHERE QUERY_TAG LIKE ?
-            """,
-            params=[start_buf, current_end, query_tag_like],
-        )
+            await pool.execute_query(
+                merge_query, params=[start_buf, current_end, query_tag_like]
+            )
+            total_merged += row_count
 
-        if not result or result[0][1] == 0:
+            if not oldest_end_time:
+                break
+
+            if isinstance(oldest_end_time, str):
+                oldest_end_dt = datetime.fromisoformat(oldest_end_time)
+            elif isinstance(oldest_end_time, datetime):
+                oldest_end_dt = oldest_end_time
+            else:
+                logger.error(
+                    "Unexpected oldest_end_time type %s with value %r for %s - skipping pagination",
+                    type(oldest_end_time).__name__,
+                    oldest_end_time,
+                    id_for_log,
+                )
+                break
+
+            if oldest_end_dt.tzinfo is None:
+                oldest_end_dt = oldest_end_dt.replace(tzinfo=UTC)
+
+            # Stop if we've paged past the buffered start time.
+            if oldest_end_dt <= (start_dt - timedelta(minutes=5)):
+                break
+
+            # Guard against non-progressing pagination.
+            if oldest_end_dt >= current_end_dt:
+                break
+
+            current_end_dt = oldest_end_dt - timedelta(microseconds=1)
+            current_end = current_end_dt.isoformat()
+
+            logger.info(
+                "Enrichment page %d/%d: %d rows merged (total: %d), window end: %s",
+                page + 1,
+                max_pages,
+                row_count,
+                total_merged,
+                current_end,
+            )
+        except Exception as e:
+            logger.error(
+                "Enrichment page %d failed for %s: %s - stopping pagination",
+                page + 1,
+                id_for_log,
+                e,
+            )
             break
-
-        row_count = result[0][1]
-        oldest_end_time = result[0][0]
-
-        # MERGE by QUERY_ID only - QUERY_ID is unique across all workers
-        # The QUERY_TAG filter ensures we only match queries from this run
-        merge_query = f"""
-        MERGE INTO {prefix}.QUERY_EXECUTIONS tgt
-        USING (
-            SELECT
-                QUERY_ID,
-                TOTAL_ELAPSED_TIME::FLOAT AS SF_TOTAL_ELAPSED_MS,
-                EXECUTION_TIME::FLOAT AS SF_EXECUTION_MS,
-                COMPILATION_TIME::FLOAT AS SF_COMPILATION_MS,
-                QUEUED_OVERLOAD_TIME::FLOAT AS SF_QUEUED_OVERLOAD_MS,
-                QUEUED_PROVISIONING_TIME::FLOAT AS SF_QUEUED_PROVISIONING_MS,
-                TRANSACTION_BLOCKED_TIME::FLOAT AS SF_TX_BLOCKED_MS,
-                BYTES_SCANNED::BIGINT AS SF_BYTES_SCANNED,
-                ROWS_PRODUCED::BIGINT AS SF_ROWS_PRODUCED,
-                CLUSTER_NUMBER::INTEGER AS SF_CLUSTER_NUMBER
-            FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
-                END_TIME_RANGE_START=>TO_TIMESTAMP_LTZ(?),
-                END_TIME_RANGE_END=>TO_TIMESTAMP_LTZ(?),
-                RESULT_LIMIT=>10000
-            ))
-            WHERE QUERY_TAG LIKE ?
-        ) src
-        ON tgt.QUERY_ID = src.QUERY_ID
-        WHEN MATCHED THEN UPDATE SET
-            SF_TOTAL_ELAPSED_MS = src.SF_TOTAL_ELAPSED_MS,
-            SF_EXECUTION_MS = src.SF_EXECUTION_MS,
-            SF_COMPILATION_MS = src.SF_COMPILATION_MS,
-            SF_QUEUED_OVERLOAD_MS = src.SF_QUEUED_OVERLOAD_MS,
-            SF_QUEUED_PROVISIONING_MS = src.SF_QUEUED_PROVISIONING_MS,
-            SF_TX_BLOCKED_MS = src.SF_TX_BLOCKED_MS,
-            SF_BYTES_SCANNED = src.SF_BYTES_SCANNED,
-            SF_ROWS_PRODUCED = src.SF_ROWS_PRODUCED,
-            SF_CLUSTER_NUMBER = src.SF_CLUSTER_NUMBER,
-            APP_OVERHEAD_MS = IFF(
-                tgt.APP_ELAPSED_MS IS NULL OR src.SF_TOTAL_ELAPSED_MS IS NULL,
-                NULL,
-                tgt.APP_ELAPSED_MS - src.SF_TOTAL_ELAPSED_MS
-            );
-        """
-        await pool.execute_query(
-            merge_query, params=[start_buf, current_end, query_tag_like]
-        )
-        total_merged += row_count
-
-        if not oldest_end_time:
-            break
-
-        if isinstance(oldest_end_time, str):
-            oldest_end_dt = datetime.fromisoformat(oldest_end_time)
-        else:
-            oldest_end_dt = oldest_end_time
-
-        if oldest_end_dt.tzinfo is None:
-            oldest_end_dt = oldest_end_dt.replace(tzinfo=UTC)
-
-        # Stop if we've paged past the buffered start time.
-        if oldest_end_dt <= (start_dt - timedelta(minutes=5)):
-            break
-
-        # Guard against non-progressing pagination.
-        if oldest_end_dt >= current_end_dt:
-            break
-
-        current_end_dt = oldest_end_dt - timedelta(microseconds=1)
-        current_end = current_end_dt.isoformat()
-
-        logger.info(
-            "Enrichment page %d/%d: %d rows merged (total: %d), window end: %s",
-            page + 1,
-            max_pages,
-            row_count,
-            total_merged,
-            current_end,
-        )
 
     return total_merged
 

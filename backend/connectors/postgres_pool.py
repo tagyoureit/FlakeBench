@@ -5,6 +5,7 @@ Manages async connection pooling for Postgres with health checks and retry logic
 """
 
 import logging
+import random
 import time
 from typing import Optional, Any, Dict, List
 from contextlib import asynccontextmanager
@@ -16,10 +17,16 @@ from asyncpg.exceptions import (
     TooManyConnectionsError,
     CannotConnectNowError,
 )
+import socket
 
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+
+# PgBouncer port for Snowflake Postgres (per docs: https://docs.snowflake.com/en/user-guide/snowflake-postgres/postgres-connection-pooling)
+# Note: Requires snowflake_pooler extension and non-superuser/non-replication role
+PGBOUNCER_PORT = 5431
+POSTGRES_DIRECT_PORT = 5432
 
 
 class PostgresConnectionPool:
@@ -115,8 +122,28 @@ class PostgresConnectionPool:
                         f"Failed to create pool after {self.max_retries} attempts"
                     )
                     raise
+            except (socket.gaierror, OSError) as e:
+                # DNS resolution or network errors - can be transient when multiple
+                # workers start simultaneously and all hit DNS at once
+                if attempt < self.max_retries - 1:
+                    # Add jitter to avoid thundering herd on DNS
+                    jitter = random.uniform(0, 0.5)
+                    delay = self.retry_delay * (attempt + 1) + jitter
+                    logger.warning(
+                        f"[{self.pool_name}] Pool creation attempt {attempt + 1} failed "
+                        f"(DNS/network error: {e}), retrying in {delay:.1f}s..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"[{self.pool_name}] DNS/network error creating pool after {self.max_retries} "
+                        f"attempts: {e}. Host: {self.host!r}, Port: {self.port}"
+                    )
+                    raise
             except Exception as e:
-                logger.error(f"Unexpected error creating pool: {e}")
+                logger.error(
+                    f"Unexpected error creating pool: {type(e).__name__}: {e or '(no message)'}"
+                )
                 raise
 
     @asynccontextmanager
@@ -397,8 +424,8 @@ class PostgresConnectionPool:
 _default_pool: Optional[PostgresConnectionPool] = None
 _snowflake_postgres_pool: Optional[PostgresConnectionPool] = None
 
-# Dynamic pool cache: keyed by (pool_type, database)
-_dynamic_pools: Dict[tuple[str, str], PostgresConnectionPool] = {}
+# Dynamic pool cache: keyed by (pool_type, database, use_pgbouncer)
+_dynamic_pools: Dict[tuple[str, str, bool], PostgresConnectionPool] = {}
 
 
 def get_default_pool() -> PostgresConnectionPool:
@@ -450,39 +477,50 @@ def get_snowflake_postgres_pool() -> PostgresConnectionPool:
     return _snowflake_postgres_pool
 
 
-def get_postgres_connection_params(pool_type: str = "default") -> dict[str, Any]:
+def get_postgres_connection_params(
+    pool_type: str = "default",
+    use_pgbouncer: bool = False,
+) -> dict[str, Any]:
     """
     Get connection parameters for Postgres (without database).
 
     Args:
         pool_type: "default" for standard Postgres, "snowflake_postgres" for Snowflake Postgres
+        use_pgbouncer: If True, use PgBouncer port (5431) for better connection pooling.
+                       If False, use direct Postgres port (5432). Defaults to False for safety.
+                       Only applies to snowflake_postgres; benchmark workers should pass True.
 
     Returns:
         Dict with host, port, user, password (no database)
     """
     if pool_type == "snowflake_postgres":
+        # For Snowflake Postgres, select port based on use_pgbouncer setting
+        port = PGBOUNCER_PORT if use_pgbouncer else POSTGRES_DIRECT_PORT
         return {
             "host": settings.SNOWFLAKE_POSTGRES_HOST,
-            "port": settings.SNOWFLAKE_POSTGRES_PORT,
+            "port": port,
             "user": settings.SNOWFLAKE_POSTGRES_USER,
             "password": settings.SNOWFLAKE_POSTGRES_PASSWORD,
+            "use_pgbouncer": use_pgbouncer,
         }
     return {
         "host": settings.POSTGRES_HOST,
         "port": settings.POSTGRES_PORT,
         "user": settings.POSTGRES_USER,
         "password": settings.POSTGRES_PASSWORD,
+        "use_pgbouncer": False,  # Standard Postgres doesn't have built-in PgBouncer
     }
 
 
 def get_pool_for_database(
     database: str,
     pool_type: str = "default",
+    use_pgbouncer: bool = False,
 ) -> PostgresConnectionPool:
     """
     Get or create a connection pool for a specific database.
 
-    Pools are cached by (pool_type, database) key and created lazily.
+    Pools are cached by (pool_type, database, use_pgbouncer) key and created lazily.
     This enables dynamic database selection from templates without requiring
     POSTGRES_DATABASE to match.
 
@@ -493,17 +531,18 @@ def get_pool_for_database(
     Args:
         database: Database name to connect to
         pool_type: "default" for standard Postgres, "snowflake_postgres" for Snowflake Postgres
+        use_pgbouncer: If True, use PgBouncer port (5431). Defaults to False for catalog ops.
 
     Returns:
         PostgresConnectionPool: Pool for the specified database
     """
     global _dynamic_pools
 
-    cache_key = (pool_type, database)
+    cache_key = (pool_type, database, use_pgbouncer)
     if cache_key in _dynamic_pools:
         return _dynamic_pools[cache_key]
 
-    params = get_postgres_connection_params(pool_type)
+    params = get_postgres_connection_params(pool_type, use_pgbouncer=use_pgbouncer)
     pool = PostgresConnectionPool(
         host=params["host"],
         port=params["port"],
@@ -524,6 +563,7 @@ async def fetch_from_database(
     query: str,
     *args,
     pool_type: str = "default",
+    use_pgbouncer: bool = False,
     timeout: float = 30.0,
 ) -> List[asyncpg.Record]:
     """
@@ -538,12 +578,13 @@ async def fetch_from_database(
         query: SQL query to execute
         *args: Query parameters
         pool_type: "default" for standard Postgres, "snowflake_postgres" for Snowflake Postgres
+        use_pgbouncer: If True, use PgBouncer port (5431). Defaults to False for catalog ops.
         timeout: Query timeout in seconds
 
     Returns:
         List of records
     """
-    params = get_postgres_connection_params(pool_type)
+    params = get_postgres_connection_params(pool_type, use_pgbouncer=use_pgbouncer)
     conn = None
     try:
         conn = await asyncpg.connect(

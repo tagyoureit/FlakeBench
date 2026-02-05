@@ -181,18 +181,26 @@ window.DashboardMixins.display = {
     const sc = this.scalingConfig();
     if (!sc) return mode;
 
+    // Default applied by backend for AUTO and BOUNDED modes (no max_workers default)
+    const DEFAULT_MAX_CONN = 250;
+
     // Get connections per worker info
     const minConn = Number(sc.min_connections ?? sc.minConnections ?? 1);
-    const maxConn = Number(sc.max_connections ?? sc.maxConnections ?? null);
-    const connPart = maxConn ? `${minConn}-${maxConn} conn/worker` : `${minConn} conn/worker`;
+    const rawMaxConn = sc.max_connections ?? sc.maxConnections;
+    // For AUTO/BOUNDED, show the default that will be applied
+    const effectiveMaxConn = rawMaxConn != null ? Number(rawMaxConn) : 
+      (mode === "AUTO" || mode === "BOUNDED" ? DEFAULT_MAX_CONN : null);
+    const connPart = effectiveMaxConn ? `${minConn}-${effectiveMaxConn} conn/worker` : `${minConn}+ conn/worker`;
 
     if (mode === "AUTO") {
-      return "Auto";
+      // AUTO now shows the effective conn bounds that will be applied
+      return `Auto (${connPart})`;
     }
     if (mode === "BOUNDED") {
       const min = Number(sc.min_workers ?? sc.minWorkers ?? 1);
-      const max = Number(sc.max_workers ?? sc.maxWorkers ?? 1);
-      return `Bounded (${min}-${max} workers, ${connPart})`;
+      const rawMax = sc.max_workers ?? sc.maxWorkers;
+      const workerPart = rawMax != null ? `${min}-${Number(rawMax)} workers` : `${min}+ workers`;
+      return `Bounded (${workerPart}, ${connPart})`;
     }
     const fixed = Number(sc.fixed_workers ?? sc.fixedWorkers ?? 1);
     return `Fixed (${fixed} workers, ${connPart})`;

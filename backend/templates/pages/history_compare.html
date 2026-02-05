@@ -239,17 +239,79 @@
                                 <td class="text-right py-2 px-3" x-text="statisticsB?.latency?.p99_ms != null ? statisticsB.latency.p99_ms.toFixed(2) : '—'"></td>
                                 <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.latency?.p99_ms, statisticsB?.latency?.p99_ms), true)" x-text="formatDelta(calcDelta(statisticsA?.latency?.p99_ms, statisticsB?.latency?.p99_ms))"></td>
                             </tr>
-                            <tr>
+                            <tr class="border-b">
                                 <td class="py-2 px-3 font-medium">Error Rate (%)</td>
                                 <td class="text-right py-2 px-3" x-text="statisticsA?.errors?.error_rate_pct != null ? statisticsA.errors.error_rate_pct.toFixed(2) + '%' : '—'"></td>
                                 <td class="text-right py-2 px-3" x-text="statisticsB?.errors?.error_rate_pct != null ? statisticsB.errors.error_rate_pct.toFixed(2) + '%' : '—'"></td>
                                 <td class="text-right py-2 px-3" :class="getDeltaClass(calcDelta(statisticsA?.errors?.error_rate_pct, statisticsB?.errors?.error_rate_pct), true)" x-text="formatDelta(calcDelta(statisticsA?.errors?.error_rate_pct, statisticsB?.errors?.error_rate_pct))"></td>
+                            </tr>
+                            <!-- Cost Comparison Section -->
+                            <tr class="border-b border-t-2 border-gray-300">
+                                <td class="py-2 px-3 font-semibold text-gray-700" colspan="4">Cost Analysis</td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Estimated Cost</td>
+                                <td class="text-right py-2 px-3" x-text="testA?.estimated_cost_usd != null ? '$' + testA.estimated_cost_usd.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.estimated_cost_usd != null ? '$' + testB.estimated_cost_usd.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcCostDelta(testA?.estimated_cost_usd, testB?.estimated_cost_usd), true)" x-text="formatCostDelta(calcCostDelta(testA?.estimated_cost_usd, testB?.estimated_cost_usd))"></td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Cost per 1K Ops</td>
+                                <td class="text-right py-2 px-3" x-text="testA?.cost_per_1k_ops != null ? '$' + testA.cost_per_1k_ops.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.cost_per_1k_ops != null ? '$' + testB.cost_per_1k_ops.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" :class="getDeltaClass(calcCostDelta(testA?.cost_per_1k_ops, testB?.cost_per_1k_ops), true)" x-text="formatCostDelta(calcCostDelta(testA?.cost_per_1k_ops, testB?.cost_per_1k_ops))"></td>
+                            </tr>
+                            <tr class="border-b">
+                                <td class="py-2 px-3 font-medium">Credits Used</td>
+                                <td class="text-right py-2 px-3" x-text="testA?.credits_used != null ? testA.credits_used.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.credits_used != null ? testB.credits_used.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3 text-gray-500">—</td>
+                            </tr>
+                            <tr>
+                                <td class="py-2 px-3 font-medium">Credit Rate (cr/hr)</td>
+                                <td class="text-right py-2 px-3" x-text="testA?.credits_per_hour != null ? testA.credits_per_hour.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.credits_per_hour != null ? testB.credits_per_hour.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3 text-gray-500">—</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
                 <div class="text-xs text-gray-500 mt-3">
                     Total queries: Primary=<span x-text="statisticsA?.total_queries ?? '—'"></span>, Secondary=<span x-text="statisticsB?.total_queries ?? '—'"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cost Efficiency Analysis Card -->
+        <div class="card" x-show="testA && testB">
+            <div class="card-title">Cost Efficiency Analysis</div>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem;">
+                <!-- Value Score: QPS per Dollar -->
+                <div style="background: linear-gradient(135deg, #dcfce7 0%, #f0fdf4 100%); border-radius: 0.5rem; padding: 1rem; border: 1px solid #bbf7d0;">
+                    <div style="font-weight: 600; color: #166534; margin-bottom: 0.5rem;">Value Score (QPS/$)</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; font-size: 0.875rem;">
+                        <div>
+                            <span style="color: #6b7280;">Primary:</span>
+                            <span style="font-weight: 600;" x-text="testA?.estimated_cost_usd > 0 ? ((testA?.qps || 0) / testA.estimated_cost_usd).toFixed(0) : '—'"></span>
+                        </div>
+                        <div>
+                            <span style="color: #6b7280;">Secondary:</span>
+                            <span style="font-weight: 600;" x-text="testB?.estimated_cost_usd > 0 ? ((testB?.qps || 0) / testB.estimated_cost_usd).toFixed(0) : '—'"></span>
+                        </div>
+                    </div>
+                    <div style="font-size: 0.75rem; color: #6b7280; margin-top: 0.5rem;">Higher is better (more throughput per dollar)</div>
+                </div>
+                <!-- Hourly Cost Difference -->
+                <div style="background: linear-gradient(135deg, #fef3c7 0%, #fffbeb 100%); border-radius: 0.5rem; padding: 1rem; border: 1px solid #fde68a;">
+                    <div style="font-weight: 600; color: #92400e; margin-bottom: 0.5rem;">Hourly Cost Difference</div>
+                    <div style="font-size: 1.25rem; font-weight: 700;" 
+                         :style="{ color: (testA?.cost_per_hour || 0) < (testB?.cost_per_hour || 0) ? '#166534' : '#dc2626' }"
+                         x-text="'$' + Math.abs((testA?.cost_per_hour || 0) - (testB?.cost_per_hour || 0)).toFixed(2) + '/hr ' + ((testA?.cost_per_hour || 0) < (testB?.cost_per_hour || 0) ? 'savings' : 'more')">
+                    </div>
+                    <div style="font-size: 0.75rem; color: #6b7280; margin-top: 0.5rem;">
+                        Primary: $<span x-text="(testA?.cost_per_hour || 0).toFixed(2)"></span>/hr |
+                        Secondary: $<span x-text="(testB?.cost_per_hour || 0).toFixed(2)"></span>/hr
+                    </div>
                 </div>
             </div>
         </div>

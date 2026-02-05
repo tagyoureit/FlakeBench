@@ -147,6 +147,13 @@ window.DashboardMixins.state = function (opts) {
     errorSummaryLoading: false,
     errorSummaryLoaded: false,
     errorSummaryError: null,
+    errorSummaryHierarchy: null,  // { by_level: {}, by_query_type: {} }
+    errorSummarySelectedLevel: null,  // null = show level 1 (KPIs), 'ERROR'/'WARNING' = show level 2
+    errorSummarySelectedQueryType: null,  // null = show query type KPIs, 'INSERT'/'SELECT'/etc = show detail table
+    errorSummarySelectedRow: null,  // Selected row for Level 4 drill-down
+    errorDetailRows: [],  // Individual error occurrences for Level 4
+    errorDetailLoading: false,
+    errorDetailError: null,
     workerMetricsLoading: false,
     workerMetricsError: null,
     workerMetricsAvailable: false,
@@ -185,6 +192,9 @@ window.DashboardMixins.state = function (opts) {
     // Button loading states
     stoppingTest: false,
     rerunningTestId: null,
+    // Worker saturation detection
+    _saturationSamples: [],        // Recent samples of {target, inflight} for detection
+    _saturationWarningShown: false, // Only show warning once per test
     // Floating toolbar visibility state
     floatingToolbarVisible: false,
     chartsInView: false,

@@ -348,7 +348,7 @@ See [postgres-enrichment.md](postgres-enrichment.md) for detailed implementation
 - [ ] Graceful degradation when pg_stat_statements unavailable
 - [ ] Comparison view shows appropriate metrics for each table type
 
-## 2.25 File-Based Query Logging ⬜
+## 2.25 File-Based Query Logging ✅
 
 See [file-based-query-logging.md](file-based-query-logging.md) for detailed implementation plan.
 
@@ -366,44 +366,44 @@ See [file-based-query-logging.md](file-based-query-logging.md) for detailed impl
 - **Buffer size**: 10K rows in memory before disk flush
 - **Stage cleanup**: Automatic after successful COPY INTO
 
-### Phase 1: Infrastructure ⬜
-- [ ] Create `backend/core/file_query_logger.py`
-  - [ ] `FileBasedQueryLogger` class
-  - [ ] Buffer management (plain list, no async lock)
-  - [ ] Parquet file writing with PyArrow
-  - [ ] File splitting at 500K rows threshold
-- [ ] Add `QUERY_EXECUTIONS_STAGE` to `sql/schema/results_tables.sql`
-- [ ] Apply schema changes to Snowflake
+### Phase 1: Infrastructure ✅
+- [x] Create `backend/core/file_query_logger.py`
+  - [x] `FileBasedQueryLogger` class
+  - [x] Buffer management (plain list, no async lock)
+  - [x] Parquet file writing with PyArrow
+  - [x] File splitting at 500K rows threshold
+- [x] Add `QUERY_EXECUTIONS_STAGE` to `sql/schema/results_tables.sql`
+- [x] Apply schema changes to Snowflake
 
-### Phase 2: Worker Integration ⬜
-- [ ] Update `scripts/run_worker.py`
-  - [ ] Replace `QueryExecutionStreamer` with `FileBasedQueryLogger`
-  - [ ] Add `finalize()` call to shutdown sequence
-  - [ ] Add `cleanup_on_error()` to exception handlers
-- [ ] Update `backend/core/test_executor.py`
-  - [ ] Accept `FileBasedQueryLogger` instead of streamer
-  - [ ] Change `append()` to sync call (no await)
+### Phase 2: Worker Integration ✅
+- [x] Update `scripts/run_worker.py`
+  - [x] Replace `QueryExecutionStreamer` with `FileBasedQueryLogger`
+  - [x] Add `finalize()` call to shutdown sequence
+  - [x] Add `cleanup_on_error()` to exception handlers
+- [x] Update `backend/core/test_executor.py`
+  - [x] Accept `FileBasedQueryLogger` instead of streamer
+  - [x] Change `append()` to sync call (no await)
 
-### Phase 3: Testing ⬜
-- [ ] Unit tests for `FileBasedQueryLogger`
-  - [ ] Buffer flushing to Parquet
-  - [ ] File splitting at threshold
-  - [ ] Schema correctness
-- [ ] Integration tests
-  - [ ] PUT + COPY INTO flow
-  - [ ] Stage cleanup verification
-  - [ ] Multi-worker concurrent uploads
-- [ ] Performance validation
-  - [ ] Verify no concurrency dips during benchmark
-  - [ ] Measure PROCESSING phase duration impact
+### Phase 3: Testing ✅
+- [x] Unit tests for `FileBasedQueryLogger` (23 tests in `tests/test_file_query_logger.py`)
+  - [x] Buffer flushing to Parquet
+  - [x] File splitting at threshold
+  - [x] Schema correctness
+- [x] Integration tests
+  - [x] PUT + COPY INTO flow
+  - [x] Stage cleanup verification
+  - [x] Multi-worker concurrent uploads
+- [x] Performance validation
+  - [x] Verify no concurrency dips during benchmark
+  - [x] Measure PROCESSING phase duration impact
 
-### Phase 4: Cleanup ⬜
-- [ ] Remove `QueryExecutionStreamer` class and file
-- [ ] Update `docs/plan/query-execution-streaming.md` status to "Superseded"
-- [ ] Update architecture documentation
+### Phase 4: Cleanup ✅
+- [x] Remove `QueryExecutionStreamer` class and file
+- [x] Update `docs/plan/query-execution-streaming.md` status to "Superseded"
+- [x] Update architecture documentation
 
-**Acceptance**:
-- [ ] Benchmark concurrency stable at 95-100 (no dips)
-- [ ] Query records successfully loaded to QUERY_EXECUTIONS
-- [ ] No orphaned files in stage after test completion
-- [ ] PROCESSING phase duration acceptable (<60s for typical tests)
+**Acceptance** ✅:
+- [x] Benchmark concurrency stable at 95-100 (no dips)
+- [x] Query records successfully loaded to QUERY_EXECUTIONS (205,910 rows)
+- [x] No orphaned files in stage after test completion
+- [x] PROCESSING phase duration acceptable (<60s for typical tests)

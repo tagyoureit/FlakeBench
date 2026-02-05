@@ -350,6 +350,15 @@ CREATE OR ALTER TABLE QUERY_EXECUTIONS (
 );
 
 -- =============================================================================
+-- QUERY_EXECUTIONS_STAGE: Internal stage for bulk loading query execution records
+-- Used by FileBasedQueryLogger for PUT + COPY INTO during PROCESSING phase
+-- =============================================================================
+CREATE STAGE IF NOT EXISTS QUERY_EXECUTIONS_STAGE
+    FILE_FORMAT = (TYPE = PARQUET)
+    DIRECTORY = (ENABLE = TRUE)
+    COMMENT = 'Temporary stage for query execution Parquet files during PROCESSING phase';
+
+-- =============================================================================
 -- WAREHOUSE_POLL_SNAPSHOTS: Controller-side warehouse metrics
 -- =============================================================================
 CREATE OR ALTER TABLE WAREHOUSE_POLL_SNAPSHOTS (

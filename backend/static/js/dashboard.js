@@ -1364,6 +1364,34 @@ function dashboard(opts) {
           this.metrics.target_workers = connections.target || 0;
         }
 
+        // Worker saturation detection - only during RUNNING phase
+        if (phaseUpper === "RUNNING" && connections && !this._saturationWarningShown) {
+          const target = connections.target || 0;
+          const inflight = connections.active || 0;
+          // Only check when we have meaningful target (> 50 to avoid noise on small tests)
+          if (target > 50) {
+            this._saturationSamples.push({ target, inflight, ts: Date.now() });
+            // Keep last 10 seconds of samples (updates come ~1/sec)
+            const cutoff = Date.now() - 10000;
+            this._saturationSamples = this._saturationSamples.filter(s => s.ts > cutoff);
+            // Check if we have 5+ samples and all show significant saturation
+            if (this._saturationSamples.length >= 5) {
+              const avgRatio = this._saturationSamples.reduce((sum, s) => {
+                return sum + (s.target > 0 ? s.inflight / s.target : 1);
+              }, 0) / this._saturationSamples.length;
+              // If average in-flight is < 70% of target for 5+ seconds, worker is saturated
+              if (avgRatio < 0.7) {
+                this._saturationWarningShown = true;
+                if (window.toast && typeof window.toast.warning === "function") {
+                  window.toast.warning(
+                    `Worker saturation detected: in-flight (${inflight}) is only ${Math.round(avgRatio * 100)}% of target (${target}). Consider using more workers with fewer threads each.`
+                  );
+                }
+              }
+            }
+          }
+        }
+
         const custom = payload.custom_metrics;
         if (custom) {
           const fmc = custom.find_max_controller;

@@ -100,6 +100,32 @@
             </div>
         </div>
 
+        <!-- Cost Summary Card -->
+        <div class="card" x-show="templateInfo">
+            <div class="card-title">Cost Summary</div>
+            <div class="text-sm text-gray-600">
+                <div class="mt-1">
+                    <strong>Estimated Cost:</strong>
+                    <span x-text="templateInfo?.estimated_cost_usd != null ? '$' + templateInfo.estimated_cost_usd.toFixed(4) : '—'"></span>
+                </div>
+                <div class="mt-1">
+                    <strong>Credits Used:</strong>
+                    <span x-text="templateInfo?.credits_used != null ? templateInfo.credits_used.toFixed(4) + ' credits' : '—'"></span>
+                </div>
+                <div class="mt-1">
+                    <strong>Credit Rate:</strong>
+                    <span x-text="templateInfo?.credits_per_hour != null ? templateInfo.credits_per_hour.toFixed(4) + ' cr/hr' : '—'"></span>
+                </div>
+                <div class="mt-1">
+                    <strong>Cost per 1K Ops:</strong>
+                    <span x-text="templateInfo?.cost_per_1k_ops != null ? '$' + templateInfo.cost_per_1k_ops.toFixed(4) : '—'"></span>
+                </div>
+                <div class="mt-1 text-xs text-gray-400">
+                    <span x-text="'Method: ' + (templateInfo?.cost_calculation_method || 'estimated')"></span>
+                </div>
+            </div>
+        </div>
+
         <div class="card">
             <div class="card-title">History View</div>
             <div style="color: #6b7280;">
@@ -1036,29 +1062,164 @@
             No errors found for this test.
         </div>
 
+        <!-- Hierarchical drill-down UI -->
         <div x-show="errorSummaryLoaded && !errorSummaryError && !errorSummaryLoading && errorSummaryRows && errorSummaryRows.length" style="margin-top: 1rem;">
-            <div class="table">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Source</th>
-                            <th>Error Summary</th>
-                            <th>Error Message</th>
-                            <th class="text-right">Count</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <template x-for="row in errorSummaryRows" :key="(row.source || '') + '|' + (row.summary || '') + '|' + (row.message || '')">
-                            <tr>
-                                <td x-text="row.source"></td>
-                                <td style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;" x-text="row.summary"></td>
-                                <td style="color: #374151;" x-text="row.message"></td>
-                                <td class="text-right" x-text="formatInt(row.count)"></td>
-                            </tr>
-                        </template>
-                    </tbody>
-                </table>
+            
+            <!-- Breadcrumb navigation -->
+            <div x-show="errorSummaryCanGoBack()" style="margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                <button
+                    type="button"
+                    class="btn btn-sm btn-secondary"
+                    @click="errorSummaryGoBack()"
+                    style="padding: 0.25rem 0.5rem;"
+                >
+                    ← Back
+                </button>
+                <span style="color: #6b7280; font-size: 0.875rem;" x-text="errorSummaryBreadcrumb()"></span>
             </div>
+
+            <!-- Level 1: Severity KPI Cards -->
+            <div x-show="errorSummaryShowLevel1()" class="error-summary-kpi-grid">
+                <div 
+                    class="error-summary-kpi-card error-summary-kpi-warning"
+                    :class="{ 'error-summary-kpi-clickable': errorSummaryLevelCount('WARNING') > 0 }"
+                    @click="errorSummaryLevelCount('WARNING') > 0 && selectErrorLevel('WARNING')"
+                >
+                    <div class="error-summary-kpi-icon">⚠️</div>
+                    <div class="error-summary-kpi-label">WARNINGS</div>
+                    <div class="error-summary-kpi-value" x-text="formatInt(errorSummaryLevelCount('WARNING'))"></div>
+                </div>
+                <div 
+                    class="error-summary-kpi-card error-summary-kpi-error"
+                    :class="{ 'error-summary-kpi-clickable': errorSummaryLevelCount('ERROR') > 0 }"
+                    @click="errorSummaryLevelCount('ERROR') > 0 && selectErrorLevel('ERROR')"
+                >
+                    <div class="error-summary-kpi-icon">❌</div>
+                    <div class="error-summary-kpi-label">ERRORS</div>
+                    <div class="error-summary-kpi-value" x-text="formatInt(errorSummaryLevelCount('ERROR'))"></div>
+                </div>
+                <div 
+                    class="error-summary-kpi-card error-summary-kpi-total"
+                    :class="{ 'error-summary-kpi-clickable': errorSummaryTotalCount() > 0 }"
+                    @click="errorSummaryTotalCount() > 0 && selectErrorLevel('TOTAL')"
+                >
+                    <div class="error-summary-kpi-icon">📊</div>
+                    <div class="error-summary-kpi-label">TOTAL</div>
+                    <div class="error-summary-kpi-value" x-text="formatInt(errorSummaryTotalCount())"></div>
+                </div>
+            </div>
+
+            <!-- Level 2: Query Type KPI Cards -->
+            <div x-show="errorSummaryShowLevel2()">
+                <div class="error-summary-kpi-grid" style="grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));">
+                    <template x-for="qt in errorSummaryQueryTypes(errorSummarySelectedLevel)" :key="qt.type">
+                        <div 
+                            class="error-summary-kpi-card error-summary-kpi-querytype error-summary-kpi-clickable"
+                            @click="selectErrorQueryType(qt.type)"
+                        >
+                            <div class="error-summary-kpi-label" x-text="qt.type"></div>
+                            <div class="error-summary-kpi-value" x-text="formatInt(qt.count)"></div>
+                        </div>
+                    </template>
+                    <!-- Show All option -->
+                    <div 
+                        class="error-summary-kpi-card error-summary-kpi-total error-summary-kpi-clickable"
+                        @click="selectErrorQueryType('TOTAL')"
+                    >
+                        <div class="error-summary-kpi-label">ALL</div>
+                        <div class="error-summary-kpi-value" x-text="formatInt(errorSummaryLevelCount(errorSummarySelectedLevel))"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Level 3: Detail Table (scrollable) -->
+            <div x-show="errorSummaryShowDetail() || (errorSummaryShowLevel2() && errorSummarySelectedQueryType === null)">
+                <div class="error-summary-detail-table">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 80px;">Source</th>
+                                <th>Error Summary</th>
+                                <th>Error Message</th>
+                                <th class="text-right" style="width: 80px;">Count</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="row in errorSummaryFilteredRows()" :key="(row.source || '') + '|' + (row.summary || '') + '|' + (row.message || '')">
+                                <tr 
+                                    class="cursor-pointer hover:bg-blue-50"
+                                    @click="selectErrorRow(row)"
+                                    :class="{ 'bg-blue-100': errorSummarySelectedRow && errorSummarySelectedRow.message === row.message }"
+                                >
+                                    <td x-text="row.source"></td>
+                                    <td style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 0.75rem;" x-text="row.summary"></td>
+                                    <td style="color: #374151; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="row.message" x-text="row.message"></td>
+                                    <td class="text-right" x-text="formatInt(row.count)"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Level 4: Individual Error Occurrences -->
+            <div x-show="errorSummarySelectedRow" class="mt-4">
+                <div class="flex items-center justify-between mb-2">
+                    <h4 class="text-sm font-semibold text-gray-700">
+                        Individual Occurrences
+                        <span x-show="errorDetailRows.length" class="text-gray-500 font-normal" x-text="'(' + errorDetailRows.length + ' entries)'"></span>
+                        <span class="text-gray-400 font-normal text-xs ml-2">(sampled)</span>
+                    </h4>
+                    <button 
+                        class="text-xs text-blue-600 hover:text-blue-800"
+                        @click="errorSummarySelectedRow = null; errorDetailRows = [];"
+                    >
+                        Close
+                    </button>
+                </div>
+                <div x-show="errorDetailLoading" class="text-sm text-gray-500">Loading...</div>
+                <div x-show="errorDetailError" class="text-sm text-red-600" x-text="errorDetailError"></div>
+                <div x-show="!errorDetailLoading && !errorDetailError && errorDetailRows.length" class="error-summary-detail-table" style="max-height: 200px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 160px;">Timestamp</th>
+                                <th style="width: 100px;">Worker</th>
+                                <th style="width: 80px;">Phase</th>
+                                <th>Error</th>
+                                <th style="width: 120px;">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template x-for="entry in errorDetailRows" :key="entry.execution_id">
+                                <tr>
+                                    <td style="font-family: ui-monospace, monospace; font-size: 0.7rem;" x-text="formatLogTimestamp(entry.timestamp)"></td>
+                                    <td>
+                                        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800" x-text="entry.worker_label || 'worker-' + entry.worker_id"></span>
+                                    </td>
+                                    <td>
+                                        <span 
+                                            class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                                            :class="entry.warmup ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'"
+                                            x-text="entry.warmup ? 'WARMUP' : 'RUN'"
+                                        ></span>
+                                    </td>
+                                    <td style="font-family: ui-monospace, monospace; font-size: 0.7rem; color: #dc2626; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :title="entry.error" x-text="entry.error"></td>
+                                    <td>
+                                        <button 
+                                            class="text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                                            @click="scrollToLogByTimestamp(entry.timestamp, entry.test_id, errorSummarySelectedRow?.message)"
+                                            x-text="'Filter to ' + (entry.worker_label || 'worker-' + entry.worker_id)"
+                                        >
+                                        </button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
         </div>
     </div>
 

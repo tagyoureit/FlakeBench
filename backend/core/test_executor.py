@@ -21,7 +21,7 @@ from uuid import uuid4
 import time
 
 if TYPE_CHECKING:
-    from backend.core.query_execution_streamer import QueryExecutionStreamer
+    from backend.core.file_query_logger import FileBasedQueryLogger
 
 from backend.models import (
     TestScenario,
@@ -229,8 +229,9 @@ class TestExecutor:
         # for backward compatibility with get_query_execution_records().
         self._query_execution_records: deque[_QueryExecutionRecord] = deque()
 
-        # Optional streamer for continuous persistence (replaces bulk-at-shutdown).
-        self._query_execution_streamer: Optional["QueryExecutionStreamer"] = None
+        # Optional file-based logger for high-throughput persistence.
+        # Writes to local Parquet files during benchmark, bulk loads at shutdown.
+        self._query_logger: Optional["FileBasedQueryLogger"] = None
 
         # Latency samples by kind (non-warmup only, for summary columns).
         self._lat_by_kind_ms: dict[str, list[float]] = {
@@ -278,6 +279,14 @@ class TestExecutor:
         """
         msg = str(exc or "")
         msg_l = msg.lower()
+
+        # HTTP 503 Service Unavailable - transient Snowflake connectivity issues.
+        # These are RetryRequest exceptions from the connector's network layer.
+        # The connector has built-in retry logic, so these typically recover.
+        if "503" in msg and "service unavailable" in msg_l:
+            return "SF_CONNECTION_503"
+        if type(exc).__name__ == "RetryRequest" and "503" in msg:
+            return "SF_CONNECTION_503"
 
         # Common Snowflake lock contention signature (from connector error strings).
         if "number of waiters for this lock exceeds" in msg_l:
@@ -359,32 +368,32 @@ class TestExecutor:
             logger.warning(f"Failed to suspend warehouse {warehouse_name}: {e}")
             return False
 
-    def set_query_execution_streamer(
-        self, streamer: Optional["QueryExecutionStreamer"]
+    def set_query_logger(
+        self, logger: Optional["FileBasedQueryLogger"]
     ) -> None:
         """
-        Set the query execution streamer for continuous persistence.
+        Set the file-based query logger for high-throughput persistence.
 
-        When set, records are streamed to Snowflake in the background instead of
-        being bulk-inserted at shutdown. The in-memory deque is still maintained
-        for backward compatibility with get_query_execution_records().
+        When set, records are written to local Parquet files during benchmark,
+        then bulk loaded to Snowflake during the PROCESSING phase. The in-memory
+        deque is still maintained for backward compatibility.
 
         Args:
-            streamer: QueryExecutionStreamer instance or None to disable streaming.
+            logger: FileBasedQueryLogger instance or None to disable logging.
         """
-        self._query_execution_streamer = streamer
+        self._query_logger = logger
 
-    async def _append_query_execution_record(
+    def _append_query_execution_record(
         self, record: _QueryExecutionRecord
     ) -> None:
         """
-        Append a query execution record to in-memory deque and optionally stream.
+        Append a query execution record to in-memory deque and file logger.
 
         This method maintains backward compatibility by always appending to the
-        in-memory deque, while also streaming to Snowflake if a streamer is set.
+        in-memory deque, while also logging to Parquet files if a logger is set.
 
-        NOTE: This method is intentionally non-blocking. Streaming is fire-and-forget
-        to avoid slowing down the hot query execution path.
+        NOTE: This method is intentionally synchronous and fast. File I/O only
+        occurs when the buffer fills (every 10K records), not on every append.
 
         Args:
             record: The query execution record to append.
@@ -392,11 +401,11 @@ class TestExecutor:
         # Always append to in-memory deque for backward compatibility
         self._query_execution_records.append(record)
 
-        # Stream if streamer is configured (fire-and-forget, non-blocking)
-        # Note: streamer.append() is safe - it only appends to a deque with a lock.
-        # Any errors are handled within the streamer's flush logic.
-        if self._query_execution_streamer is not None:
-            asyncio.create_task(self._query_execution_streamer.append(record))
+        # Log if file logger is configured (synchronous but fast - no disk I/O
+        # until buffer fills). This eliminates event loop contention that caused
+        # concurrency dips with the async streaming approach.
+        if self._query_logger is not None:
+            self._query_logger.append(record)
 
     @staticmethod
     def _is_postgres_pool(pool) -> bool:
@@ -3001,45 +3010,18 @@ class TestExecutor:
 
     async def _execute_operation(self, worker_id: int, warmup: bool = False):
         """
-        Execute a single operation based on workload type.
+        Execute a single operation.
+
+        NOTE: All workloads now use CUSTOM execution path exclusively.
+        Legacy workload types (READ_ONLY, WRITE_ONLY, MIXED, etc.) are no longer
+        supported at runtime. Templates are normalized to CUSTOM with explicit
+        query percentages during save.
 
         Args:
             worker_id: Worker identifier
             warmup: If True, don't record metrics
         """
-        workload = self.scenario.workload_type
-
-        # Determine operation type
-        if workload == WorkloadType.READ_ONLY:
-            await self._execute_read(worker_id, warmup)
-        elif workload == WorkloadType.WRITE_ONLY:
-            await self._execute_write(worker_id, warmup)
-        elif workload == WorkloadType.READ_HEAVY:
-            # 80% reads, 20% writes
-            import random
-
-            if random.random() < 0.8:
-                await self._execute_read(worker_id, warmup)
-            else:
-                await self._execute_write(worker_id, warmup)
-        elif workload == WorkloadType.WRITE_HEAVY:
-            # 20% reads, 80% writes
-            import random
-
-            if random.random() < 0.2:
-                await self._execute_read(worker_id, warmup)
-            else:
-                await self._execute_write(worker_id, warmup)
-        elif workload == WorkloadType.MIXED:
-            # 50/50 reads/writes
-            import random
-
-            if random.random() < 0.5:
-                await self._execute_read(worker_id, warmup)
-            else:
-                await self._execute_write(worker_id, warmup)
-        elif workload == WorkloadType.CUSTOM:
-            await self._execute_custom(worker_id, warmup)
+        await self._execute_custom(worker_id, warmup)
 
     async def _execute_read(self, worker_id: int, warmup: bool = False):
         """Execute read operation."""
@@ -3189,7 +3171,7 @@ class TestExecutor:
                     network_overhead_ms = None
                     if sf_execution_ms is not None and sf_execution_ms >= 0:
                         network_overhead_ms = max(0.0, app_elapsed_ms - sf_execution_ms)
-                    await self._append_query_execution_record(
+                    self._append_query_execution_record(
                         _QueryExecutionRecord(
                             execution_id=str(uuid4()),
                             test_id=str(self.test_id),
@@ -3295,7 +3277,7 @@ class TestExecutor:
                     self._setup_error = critical_msg
                     logger.error("CRITICAL_CONFIG_ERROR: %s", critical_msg)
 
-            await self._append_query_execution_record(
+            self._append_query_execution_record(
                 _QueryExecutionRecord(
                     execution_id=str(uuid4()),
                     test_id=str(self.test_id),
@@ -3512,7 +3494,7 @@ class TestExecutor:
                     network_overhead_ms = None
                     if sf_execution_ms is not None and sf_execution_ms >= 0:
                         network_overhead_ms = max(0.0, app_elapsed_ms - sf_execution_ms)
-                    await self._append_query_execution_record(
+                    self._append_query_execution_record(
                         _QueryExecutionRecord(
                             execution_id=str(uuid4()),
                             test_id=str(self.test_id),
@@ -3617,7 +3599,7 @@ class TestExecutor:
                     self._setup_error = critical_msg
                     logger.error("CRITICAL_CONFIG_ERROR: %s", critical_msg)
 
-            await self._append_query_execution_record(
+            self._append_query_execution_record(
                 _QueryExecutionRecord(
                     execution_id=str(uuid4()),
                     test_id=str(self.test_id),
@@ -4281,7 +4263,7 @@ class TestExecutor:
             if warmup or getattr(self.scenario, "collect_query_history", False):
                 pool_obj = getattr(manager, "pool", None)
                 pool_warehouse = str(getattr(pool_obj, "warehouse", "")).strip() or None
-                await self._append_query_execution_record(
+                self._append_query_execution_record(
                     _QueryExecutionRecord(
                         execution_id=str(uuid4()),
                         test_id=str(self.test_id),
@@ -4397,7 +4379,7 @@ class TestExecutor:
                     self._setup_error = critical_msg
                     logger.error("CRITICAL_CONFIG_ERROR: %s", critical_msg)
 
-            await self._append_query_execution_record(
+            self._append_query_execution_record(
                 _QueryExecutionRecord(
                     execution_id=str(uuid4()),
                     test_id=str(self.test_id),

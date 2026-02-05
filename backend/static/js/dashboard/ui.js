@@ -208,4 +208,197 @@ window.DashboardMixins.ui = {
       this._floatingToolbarObserver = null;
     }
   },
+
+  // Error Summary Drill-Down UI Methods
+  errorSummaryTotalCount() {
+    const h = this.errorSummaryHierarchy;
+    if (!h || !h.by_level) return 0;
+    return Object.values(h.by_level).reduce((sum, n) => sum + n, 0);
+  },
+
+  errorSummaryLevelCount(level) {
+    const h = this.errorSummaryHierarchy;
+    if (!h || !h.by_level) return 0;
+    return h.by_level[level] || 0;
+  },
+
+  errorSummaryQueryTypeCount(level, queryType) {
+    const h = this.errorSummaryHierarchy;
+    if (!h || !h.by_query_type || !h.by_query_type[level]) return 0;
+    return h.by_query_type[level][queryType] || 0;
+  },
+
+  errorSummaryQueryTypes(level) {
+    const h = this.errorSummaryHierarchy;
+    if (!h || !h.by_query_type || !h.by_query_type[level]) return [];
+    const types = Object.entries(h.by_query_type[level])
+      .filter(([_, count]) => count > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([type, count]) => ({ type, count }));
+    return types;
+  },
+
+  selectErrorLevel(level) {
+    if (level === 'TOTAL') {
+      this.errorSummarySelectedLevel = null;
+      this.errorSummarySelectedQueryType = null;
+    } else {
+      this.errorSummarySelectedLevel = level;
+      this.errorSummarySelectedQueryType = null;
+    }
+  },
+
+  selectErrorQueryType(queryType) {
+    if (queryType === 'TOTAL') {
+      this.errorSummarySelectedQueryType = null;
+    } else {
+      this.errorSummarySelectedQueryType = queryType;
+    }
+  },
+
+  errorSummaryBreadcrumb() {
+    const parts = ['All'];
+    if (this.errorSummarySelectedLevel) {
+      parts.push(this.errorSummarySelectedLevel);
+    }
+    if (this.errorSummarySelectedQueryType) {
+      parts.push(this.errorSummarySelectedQueryType);
+    }
+    return parts.join(' > ');
+  },
+
+  errorSummaryCanGoBack() {
+    return this.errorSummarySelectedLevel || this.errorSummarySelectedQueryType;
+  },
+
+  errorSummaryGoBack() {
+    if (this.errorSummarySelectedQueryType) {
+      this.errorSummarySelectedQueryType = null;
+    } else if (this.errorSummarySelectedLevel) {
+      this.errorSummarySelectedLevel = null;
+    }
+  },
+
+  errorSummaryFilteredRows() {
+    const rows = this.errorSummaryRows || [];
+    const level = this.errorSummarySelectedLevel;
+    const queryType = this.errorSummarySelectedQueryType;
+    
+    return rows.filter(row => {
+      if (level && row.level !== level) return false;
+      if (queryType && row.query_type !== queryType) return false;
+      return true;
+    }).sort((a, b) => {
+      // Sort by earliest_occurrence ascending (oldest first)
+      const timeA = a.earliest_occurrence ? new Date(a.earliest_occurrence).getTime() : Infinity;
+      const timeB = b.earliest_occurrence ? new Date(b.earliest_occurrence).getTime() : Infinity;
+      return timeA - timeB;
+    });
+  },
+
+  errorSummaryShowLevel1() {
+    return !this.errorSummarySelectedLevel && !this.errorSummarySelectedQueryType;
+  },
+
+  errorSummaryShowLevel2() {
+    return this.errorSummarySelectedLevel && !this.errorSummarySelectedQueryType;
+  },
+
+  errorSummaryShowDetail() {
+    return this.errorSummarySelectedQueryType !== null;
+  },
+
+  async selectErrorRow(row) {
+    if (this.errorSummarySelectedRow && this.errorSummarySelectedRow.message === row.message) {
+      this.errorSummarySelectedRow = null;
+      this.errorDetailRows = [];
+      return;
+    }
+    this.errorSummarySelectedRow = row;
+    this.errorDetailLoading = true;
+    this.errorDetailError = null;
+    this.errorDetailRows = [];
+
+    try {
+      const searchKey = this.extractErrorKey(row.message);
+      const resp = await fetch(`/api/tests/${this.testId}/error-details?message=${encodeURIComponent(searchKey)}&limit=50`);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      // Sort by timestamp ascending (oldest first)
+      this.errorDetailRows = (data.rows || []).sort((a, b) => {
+        const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return timeA - timeB;
+      });
+    } catch (e) {
+      this.errorDetailError = e.message || String(e);
+    } finally {
+      this.errorDetailLoading = false;
+    }
+  },
+
+  extractErrorKey(message) {
+    const m = message.match(/\(o_orderkey\)=\((\d+)\)/);
+    if (m) return m[1];
+    const m2 = message.match(/Key \([^)]+\)=\(([^)]+)\)/);
+    if (m2) return m2[1];
+    return message.substring(0, 100);
+  },
+
+  scrollToLogByTimestamp(timestamp, workerTestId, errorMessage) {
+    const logSection = document.querySelector('.log-output');
+    if (!logSection) return;
+
+    if (workerTestId && this.logTargets) {
+      const target = this.logTargets.find(t => String(t.test_id) === String(workerTestId));
+      if (target && target.target_id) {
+        this.logSelectedTargetIds = [String(target.target_id)];
+        if (typeof this.onLogTargetChange === 'function') {
+          this.onLogTargetChange();
+        }
+      }
+    }
+
+    logSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    setTimeout(() => {
+      const targetTime = new Date(timestamp).getTime();
+      const logLines = logSection.querySelectorAll('.log-line');
+      let closest = null;
+      let closestDiff = Infinity;
+      let exactMatch = null;
+
+      logLines.forEach(line => {
+        const tsEl = line.querySelector('.log-ts');
+        const msgEl = line.querySelector('.log-msg');
+        if (tsEl) {
+          const lineTime = new Date(tsEl.getAttribute('data-ts') || tsEl.textContent).getTime();
+          const diff = Math.abs(lineTime - targetTime);
+          
+          if (errorMessage && msgEl) {
+            const msgText = msgEl.textContent || '';
+            if (msgText.includes(errorMessage) && diff < 60000) {
+              exactMatch = line;
+            }
+          }
+          
+          if (diff < closestDiff) {
+            closestDiff = diff;
+            closest = line;
+          }
+        }
+      });
+
+      const targetLine = exactMatch || closest;
+      if (targetLine) {
+        targetLine.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        targetLine.style.backgroundColor = '#fef3c7';
+        setTimeout(() => {
+          targetLine.style.backgroundColor = '';
+        }, 3000);
+      }
+    }, 500);
+  },
 };

@@ -93,6 +93,7 @@ async def list_databases(table_type: str = Query("standard")):
         pool_type = _postgres_pool_type(t)
         try:
             # Connect to 'postgres' database (always exists) to list available databases
+            # Catalog operations use direct PostgreSQL (port 5432), not PgBouncer
             rows = await postgres_pool.fetch_from_database(
                 database="postgres",
                 query="""
@@ -103,6 +104,7 @@ async def list_databases(table_type: str = Query("standard")):
                     ORDER BY datname
                 """,
                 pool_type=pool_type,
+                use_pgbouncer=False,
             )
             # Preserve original case for Postgres (it's case-sensitive)
             return [{"name": str(r["datname"]), "type": "DATABASE"} for r in rows]
@@ -162,6 +164,7 @@ async def list_schemas(
                     ORDER BY schema_name
                 """,
                 pool_type=pool_type,
+                use_pgbouncer=False,
             )
             return [{"name": str(r["schema_name"]), "type": "SCHEMA"} for r in rows]
         except Exception as e:
@@ -284,6 +287,7 @@ async def list_objects(
                     """,
                     schema_name,
                     pool_type=pool_type,
+                    use_pgbouncer=False,
                 )
                 out.extend(
                     {
@@ -306,6 +310,7 @@ async def list_objects(
                     """,
                     schema_name,
                     pool_type=pool_type,
+                    use_pgbouncer=False,
                 )
                 out.extend(
                     {
@@ -494,7 +499,9 @@ async def get_postgres_capabilities(
         )
 
     pool_type = "snowflake_postgres" if table_type_upper == "SNOWFLAKE_POSTGRES" else "default"
-    params = postgres_pool.get_postgres_connection_params(pool_type)
+    # Catalog operations use direct PostgreSQL (port 5432), not PgBouncer
+    # PgBouncer is only for benchmark workloads where connection pooling helps
+    params = postgres_pool.get_postgres_connection_params(pool_type, use_pgbouncer=False)
 
     conn = None
     try:

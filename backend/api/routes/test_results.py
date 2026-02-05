@@ -3265,6 +3265,34 @@ class ErrorSummaryRow(BaseModel):
     summary: str
     message: str
     count: int
+    level: str = "ERROR"  # ERROR or WARNING
+    query_type: str = "OTHER"  # INSERT, SELECT, UPDATE, DELETE, TIMEOUT, CONNECTION, OTHER
+    earliest_occurrence: str | None = None  # ISO timestamp of first occurrence
+
+
+class ErrorDetailEntry(BaseModel):
+    execution_id: str
+    test_id: str
+    worker_id: str | None = None
+    worker_label: str | None = None
+    timestamp: str
+    query_kind: str | None = None
+    warmup: bool = False
+    error: str
+
+
+class ErrorDetailsResponse(BaseModel):
+    test_id: str
+    message_filter: str
+    entries: list[ErrorDetailEntry] = []
+    total_count: int = 0
+
+
+class ErrorSummaryHierarchy(BaseModel):
+    """Hierarchical aggregation for drill-down UI."""
+
+    by_level: dict[str, int] = {}  # {"ERROR": 100, "WARNING": 50}
+    by_query_type: dict[str, dict[str, int]] = {}  # {"ERROR": {"INSERT": 50, "SELECT": 50}}
 
 
 class ErrorSummaryResponse(BaseModel):
@@ -3272,6 +3300,7 @@ class ErrorSummaryResponse(BaseModel):
     query_tag: str | None = None
     available: bool = True
     rows: list[ErrorSummaryRow] = []
+    hierarchy: ErrorSummaryHierarchy | None = None
 
 
 @router.get("/{test_id}/error-summary", response_model=ErrorSummaryResponse)
@@ -3401,24 +3430,107 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
         # If QUERY_HISTORY is available (sf_available), only query LOCAL_ to avoid double-counting.
         # If QUERY_HISTORY is unavailable (no query_tag), query ALL failed executions.
         local_filter = "AND QUERY_ID LIKE 'LOCAL\\_%'" if sf_available else ""
-        app_query = f"""
-        SELECT
-          COALESCE(WARMUP, FALSE) AS WARMUP,
-          COALESCE(QUERY_KIND, '(NULL)') AS QUERY_KIND,
-          ERROR,
-          COUNT(*) AS N
-        FROM {prefix}.QUERY_EXECUTIONS
-        WHERE TEST_ID = ?
-          AND SUCCESS = FALSE
-          {local_filter}
-        GROUP BY 1, 2, 3
-        ORDER BY N DESC
-        LIMIT 1000
-        """
-        app_rows = await pool.execute_query(app_query, params=[test_id])
+
+        # Check if this is a parent run (multi-worker) - QUERY_EXECUTIONS data is stored
+        # under worker TEST_IDs, not the parent TEST_ID.
+        run_id_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+        is_parent_run = bool(run_id) and str(run_id) == str(test_id)
+
+        if is_parent_run:
+            # For parent runs, query all worker TEST_IDs
+            app_query = f"""
+            SELECT
+              COALESCE(qe.WARMUP, FALSE) AS WARMUP,
+              COALESCE(qe.QUERY_KIND, '(NULL)') AS QUERY_KIND,
+              qe.ERROR,
+              COUNT(*) AS N,
+              MIN(qe.START_TIME) AS EARLIEST
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            JOIN {prefix}.TEST_RESULTS tr ON tr.TEST_ID = qe.TEST_ID
+            WHERE tr.RUN_ID = ?
+              AND qe.SUCCESS = FALSE
+              {local_filter}
+            GROUP BY 1, 2, 3
+            ORDER BY N DESC
+            LIMIT 1000
+            """
+            app_rows = await pool.execute_query(app_query, params=[test_id])
+        else:
+            app_query = f"""
+            SELECT
+              COALESCE(WARMUP, FALSE) AS WARMUP,
+              COALESCE(QUERY_KIND, '(NULL)') AS QUERY_KIND,
+              ERROR,
+              COUNT(*) AS N,
+              MIN(START_TIME) AS EARLIEST
+            FROM {prefix}.QUERY_EXECUTIONS
+            WHERE TEST_ID = ?
+              AND SUCCESS = FALSE
+              {local_filter}
+            GROUP BY 1, 2, 3
+            ORDER BY N DESC
+            LIMIT 1000
+            """
+            app_rows = await pool.execute_query(app_query, params=[test_id])
 
         # Normalize + aggregate in Python to collapse statement IDs/txns.
-        agg: dict[tuple[str, str, str], int] = {}
+        # Key: (source, summary, msg_norm, level, query_type)
+        # Value: (count, earliest_timestamp)
+        agg: dict[tuple[str, str, str, str, str], tuple[int, Any]] = {}
+
+        def classify_error(msg: str) -> tuple[str, str]:
+            """Classify error message into (level, query_type)."""
+            msg_lower = msg.lower() if msg else ""
+            # Determine query type from message or context
+            query_type = "OTHER"
+            if "insert" in msg_lower:
+                query_type = "INSERT"
+            elif "select" in msg_lower:
+                query_type = "SELECT"
+            elif "update" in msg_lower:
+                query_type = "UPDATE"
+            elif "delete" in msg_lower:
+                query_type = "DELETE"
+            elif "timeout" in msg_lower or "timed out" in msg_lower:
+                query_type = "TIMEOUT"
+            elif "connection" in msg_lower or "connect" in msg_lower:
+                query_type = "CONNECTION"
+
+            # Determine severity level
+            # Warnings: constraint violations, duplicate keys (often expected in benchmarks)
+            # Errors: timeouts, connection failures, syntax errors
+            level = "ERROR"
+            if any(
+                x in msg_lower
+                for x in [
+                    "duplicate key",
+                    "unique constraint",
+                    "unique violation",
+                    "already exists",
+                    "constraint violation",
+                ]
+            ):
+                level = "WARNING"
+            elif any(
+                x in msg_lower
+                for x in [
+                    "timeout",
+                    "connection refused",
+                    "connection reset",
+                    "connection failed",
+                    "network error",
+                    "syntax error",
+                    "permission denied",
+                    "access denied",
+                ]
+            ):
+                level = "ERROR"
+
+            return level, query_type
 
         for qt, code, msg, n in sf_rows:
             qt_s = str(qt or "").strip().upper() or "(NULL)"
@@ -3428,10 +3540,14 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
             summary = f"SNOWFLAKE {qt_s} ERROR_CODE={code_i}" + (
                 f" - {reason}" if reason else ""
             )
-            key = ("SNOWFLAKE", summary, msg_norm)
-            agg[key] = int(agg.get(key, 0)) + int(n or 0)
+            level, _ = classify_error(msg_norm)
+            # Use Snowflake's query type directly
+            query_type = qt_s if qt_s in ("INSERT", "SELECT", "UPDATE", "DELETE") else "OTHER"
+            key = ("SNOWFLAKE", summary, msg_norm, level, query_type)
+            prev_count, prev_earliest = agg.get(key, (0, None))
+            agg[key] = (int(prev_count) + int(n or 0), prev_earliest)  # SF rows don't have timestamps
 
-        for warmup, kind, msg, n in app_rows:
+        for warmup, kind, msg, n, earliest in app_rows:
             kind_s = str(kind or "").strip().upper() or "(NULL)"
             phase = "WARMUP" if bool(warmup) else "RUN"
             msg_s = str(msg or "")
@@ -3442,6 +3558,12 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
             if is_sf and sf_available:
                 # If QUERY_HISTORY is available, avoid double-counting Snowflake errors.
                 continue
+
+            level, _ = classify_error(msg_norm)
+            # Map query kind to query type
+            query_type = kind_s if kind_s in ("INSERT", "SELECT", "UPDATE", "DELETE", "POINT_LOOKUP", "RANGE_SCAN") else "OTHER"
+            if query_type in ("POINT_LOOKUP", "RANGE_SCAN"):
+                query_type = "SELECT"
 
             if is_sf and m:
                 code_i = int(m.group(1))
@@ -3457,31 +3579,208 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
                 reason = _error_reason(msg_norm)
                 summary = f"APP {kind_s} ({phase})" + (f" - {reason}" if reason else "")
 
-            key = (source, summary, msg_norm)
-            agg[key] = int(agg.get(key, 0)) + int(n or 0)
+            key = (source, summary, msg_norm, level, query_type)
+            prev_count, prev_earliest = agg.get(key, (0, None))
+            # Track earliest timestamp
+            if earliest:
+                if prev_earliest is None or earliest < prev_earliest:
+                    new_earliest = earliest
+                else:
+                    new_earliest = prev_earliest
+            else:
+                new_earliest = prev_earliest
+            agg[key] = (int(prev_count) + int(n or 0), new_earliest)
 
+        # Build output rows with level and query_type
         out_rows: list[ErrorSummaryRow] = []
-        for (source, summary, msg_norm), n in agg.items():
+        for (source, summary, msg_norm, level, query_type), (n, earliest) in agg.items():
+            earliest_str = None
+            if earliest:
+                earliest_str = earliest.isoformat() if hasattr(earliest, "isoformat") else str(earliest)
             out_rows.append(
                 ErrorSummaryRow(
                     source=source,
                     summary=summary,
                     message=msg_norm or "(no message)",
                     count=int(n),
+                    level=level,
+                    query_type=query_type,
+                    earliest_occurrence=earliest_str,
                 )
             )
         out_rows.sort(key=lambda r: int(r.count), reverse=True)
+
+        # Build hierarchy for drill-down UI
+        by_level: dict[str, int] = {}
+        by_query_type: dict[str, dict[str, int]] = {}
+        for row in out_rows:
+            by_level[row.level] = by_level.get(row.level, 0) + row.count
+            if row.level not in by_query_type:
+                by_query_type[row.level] = {}
+            by_query_type[row.level][row.query_type] = (
+                by_query_type[row.level].get(row.query_type, 0) + row.count
+            )
+
+        hierarchy = ErrorSummaryHierarchy(
+            by_level=by_level,
+            by_query_type=by_query_type,
+        )
 
         return ErrorSummaryResponse(
             test_id=test_id,
             query_tag=qtag,
             available=True,
             rows=out_rows[:200],
+            hierarchy=hierarchy,
         )
     except HTTPException:
         raise
     except Exception as e:
         raise http_exception("get error summary", e)
+
+
+class ErrorDetailRow(BaseModel):
+    execution_id: str
+    test_id: str
+    worker_id: int | None = None
+    worker_label: str | None = None
+    query_kind: str | None = None
+    warmup: bool = False
+    error: str
+    timestamp: str
+    log_id: str | None = None
+
+
+class ErrorDetailResponse(BaseModel):
+    test_id: str
+    message_filter: str
+    rows: list[ErrorDetailRow] = []
+    total_count: int = 0
+
+
+@router.get("/{test_id}/error-details", response_model=ErrorDetailResponse)
+async def get_error_details(
+    test_id: str,
+    message: str = Query(..., description="Error message to filter by (exact or partial match)"),
+    level: str = Query(None, description="ERROR or WARNING"),
+    query_type: str = Query(None, description="INSERT, SELECT, UPDATE, DELETE, etc."),
+    warmup: bool | None = Query(None, description="Filter by warmup phase"),
+    limit: int = Query(50, ge=1, le=200),
+) -> ErrorDetailResponse:
+    """
+    Get individual error occurrences for a specific error message.
+    Used for Level 4 drill-down from aggregated error summary.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        run_id_rows = await pool.execute_query(
+            f"SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?",
+            params=[test_id],
+        )
+        run_id = run_id_rows[0][0] if run_id_rows and run_id_rows[0] else None
+        is_parent_run = bool(run_id) and str(run_id) == str(test_id)
+
+        warmup_filter = ""
+        if warmup is not None:
+            warmup_filter = f"AND qe.WARMUP = {str(warmup).upper()}"
+
+        if is_parent_run:
+            query = f"""
+            SELECT
+                qe.EXECUTION_ID,
+                qe.TEST_ID,
+                qe.WORKER_ID,
+                qe.QUERY_KIND,
+                qe.WARMUP,
+                qe.ERROR,
+                qe.START_TIME
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            JOIN {prefix}.TEST_RESULTS tr ON tr.TEST_ID = qe.TEST_ID
+            WHERE tr.RUN_ID = ?
+              AND qe.SUCCESS = FALSE
+              AND qe.ERROR LIKE ?
+              {warmup_filter}
+            ORDER BY qe.START_TIME DESC
+            LIMIT ?
+            """
+            rows = await pool.execute_query(
+                query,
+                params=[test_id, f"%{message}%", limit],
+            )
+        else:
+            query = f"""
+            SELECT
+                qe.EXECUTION_ID,
+                qe.TEST_ID,
+                qe.WORKER_ID,
+                qe.QUERY_KIND,
+                qe.WARMUP,
+                qe.ERROR,
+                qe.START_TIME
+            FROM {prefix}.QUERY_EXECUTIONS qe
+            WHERE qe.TEST_ID = ?
+              AND qe.SUCCESS = FALSE
+              AND qe.ERROR LIKE ?
+              {warmup_filter}
+            ORDER BY qe.START_TIME DESC
+            LIMIT ?
+            """
+            rows = await pool.execute_query(
+                query,
+                params=[test_id, f"%{message}%", limit],
+            )
+
+        worker_labels: dict[str, str] = {}
+        if is_parent_run:
+            label_rows = await pool.execute_query(
+                f"""
+                SELECT DISTINCT TEST_ID, WORKER_ID
+                FROM {prefix}.TEST_LOGS
+                WHERE TEST_ID IN (
+                    SELECT TEST_ID FROM {prefix}.TEST_RESULTS
+                    WHERE RUN_ID = ? AND TEST_ID != RUN_ID
+                )
+                AND WORKER_ID IS NOT NULL
+                AND WORKER_ID != 'ORCHESTRATOR'
+                """,
+                params=[test_id],
+            )
+            for tid, worker_id in label_rows:
+                worker_labels[str(tid)] = str(worker_id)
+
+        out_rows: list[ErrorDetailRow] = []
+        for row in rows:
+            exec_id, tid, worker_id, query_kind, warmup_val, error, start_time = row
+            timestamp_str = (
+                start_time.isoformat() if hasattr(start_time, "isoformat") else str(start_time)
+            )
+            worker_label = worker_labels.get(str(tid), f"worker-{worker_id}" if worker_id else None)
+
+            out_rows.append(
+                ErrorDetailRow(
+                    execution_id=str(exec_id),
+                    test_id=str(tid),
+                    worker_id=int(worker_id) if worker_id is not None else None,
+                    worker_label=worker_label,
+                    query_kind=str(query_kind) if query_kind else None,
+                    warmup=bool(warmup_val),
+                    error=str(error) if error else "",
+                    timestamp=timestamp_str,
+                )
+            )
+
+        return ErrorDetailResponse(
+            test_id=test_id,
+            message_filter=message,
+            rows=out_rows,
+            total_count=len(out_rows),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise http_exception("get error details", e)
 
 
 @router.get("/{test_id}/logs")
