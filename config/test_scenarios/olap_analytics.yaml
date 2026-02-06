@@ -15,7 +15,6 @@ category: "OLAP"
 table:
   name: "olap_test"
   table_type: "STANDARD"  # Standard tables for OLAP
-  database: "UNISTORE_BENCHMARK"
   schema: "PUBLIC"
   # NOTE: Table creation is disabled. This table/view must already exist.
   # The schema/clustering sections below are informational only and are ignored at runtime.

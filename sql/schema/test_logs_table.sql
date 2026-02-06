@@ -7,7 +7,7 @@
 -- - Inserted by the app in batches (see backend/core/results_store.py).
 -- - Ordered within a test by SEQ (monotonic per test).
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 CREATE TABLE IF NOT EXISTS TEST_LOGS (

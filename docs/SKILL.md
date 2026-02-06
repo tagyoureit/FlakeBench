@@ -1,12 +1,12 @@
 ---
-name: unistore-rules
+name: flakebench-rules
 description: >-
-  Authoritative index for current Unistore Benchmark docs. Use when updating
+  Authoritative index for current FlakeBench docs. Use when updating
   or verifying behavior, orchestration, templates, and persistence.
 version: 1.3.0
 ---
 
-# SKILL: Unistore Benchmark Docs Index
+# SKILL: FlakeBench Docs Index
 
 This file is the authoritative index for agents working in this repository.
 
@@ -40,7 +40,7 @@ This file is the authoritative index for agents working in this repository.
 
 - No DDL or table creation at runtime; schema changes live in `sql/schema/`.
 - No migration framework exists in this repository.
-- Templates are stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES` with
+- Templates are stored in `FLAKEBENCH.TEST_RESULTS.TEST_TEMPLATES` with
   `CONFIG` as the authoritative payload.
 - YAML templates in `config/test_scenarios/` are reference-only for the UI.
 - Snowflake is the authoritative results store.

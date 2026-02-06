@@ -4,7 +4,7 @@ Last updated: 2026-02-01
 
 ## System Purpose
 
-Unistore Benchmark is a FastAPI app that benchmarks existing Snowflake and
+FlakeBench is a FastAPI app that benchmarks existing Snowflake and
 Postgres-family tables. It runs controlled workloads, captures app-side latency
 and throughput, and persists results to Snowflake.
 
@@ -19,7 +19,7 @@ and throughput, and persists results to Snowflake.
     (`backend/core/test_registry.py`, `backend/core/test_executor.py`).
 - **WebSocket**: `/ws/test/{test_id}` streams live metrics from the in-memory cache.
 - **Live metrics cache**: populated by workers via `/api/runs/{run_id}/metrics/live`.
-- **Results store**: Snowflake (`UNISTORE_BENCHMARK.TEST_RESULTS`).
+- **Results store**: Snowflake (`FLAKEBENCH.TEST_RESULTS`).
 - **Postgres**: optional target for Postgres-family benchmarks.
 
 ## High-Level Components
@@ -37,7 +37,7 @@ and throughput, and persists results to Snowflake.
   Interactive/Postgres table types (no DDL at runtime).
 - **Connectors**: `backend/connectors/snowflake_pool.py`,
   `backend/connectors/postgres_pool.py`.
-- **Templates**: stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`.
+- **Templates**: stored in `FLAKEBENCH.TEST_RESULTS.TEST_TEMPLATES`.
 
 ### Helper Packages (Modular Structure)
 

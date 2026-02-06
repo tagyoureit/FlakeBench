@@ -1,5 +1,5 @@
 [project]
-name = "unistore-benchmark"
+name = "flakebench"
 version = "0.1.0"
 description = "Performance benchmarking tool for Snowflake (Standard, Hybrid, Interactive Tables) and Postgres - 3DMark for databases"
 requires-python = ">=3.11"

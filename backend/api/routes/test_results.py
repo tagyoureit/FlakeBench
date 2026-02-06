@@ -4329,11 +4329,17 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     for cm in custom_list
                     if isinstance(cm.get("resources"), dict)
                 ]
+                qps_list = [
+                    cm.get("qps", {})
+                    for cm in custom_list
+                    if isinstance(cm.get("qps"), dict)
+                ]
                 custom_agg = {
                     "app_ops_breakdown": _sum_dicts(app_ops_list),
                     "sf_bench": _sum_dicts(sf_bench_list),
                     "warehouse": _sum_dicts(warehouse_list),
                     "resources": _avg_dicts(resources_list),
+                    "qps": _avg_dicts(qps_list),
                 }
                 if first_measurement_timestamp is not None and agg.timestamp:
                     try:
@@ -4404,6 +4410,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
             app_ops: dict[str, Any] = {}
             warehouse: dict[str, Any] = {}
             resources: dict[str, Any] = {}
+            qps_data: dict[str, Any] = {}
             if isinstance(cm, dict):
                 maybe_sf = cm.get("sf_bench")
                 if isinstance(maybe_sf, dict):
@@ -4417,6 +4424,23 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 maybe_res = cm.get("resources")
                 if isinstance(maybe_res, dict):
                     resources = maybe_res
+                maybe_qps = cm.get("qps")
+                if isinstance(maybe_qps, dict):
+                    qps_data = maybe_qps
+
+            # Use smoothed or windowed QPS when raw QPS is an outlier.
+            # This handles the case where a burst of errors at test end
+            # causes an unrealistically high instantaneous QPS.
+            if qps_data:
+                raw_qps = float(ops_per_sec or 0)
+                smoothed_qps = float(qps_data.get("smoothed") or 0)
+                windowed_qps = float(qps_data.get("windowed") or 0)
+                # If raw QPS is more than 3x the smoothed value, use smoothed
+                if smoothed_qps > 0 and raw_qps > smoothed_qps * 3:
+                    ops_per_sec = smoothed_qps
+                # Fallback to windowed if smoothed is 0 but raw is suspiciously high
+                elif windowed_qps > 0 and smoothed_qps == 0 and raw_qps > windowed_qps * 3:
+                    ops_per_sec = windowed_qps
 
             def _to_int(v: Any) -> int:
                 try:

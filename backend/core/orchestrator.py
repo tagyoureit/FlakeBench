@@ -36,7 +36,8 @@ from backend.core.test_log_stream import (
     CURRENT_WORKER_ID,
     TestLogQueueHandler,
 )
-from backend.models.test_config import TableType, TestScenario
+from backend.core.table_managers import create_table_manager
+from backend.models.test_config import TableConfig, TableType, TestScenario
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def build_worker_targets(
             target = min(cap, remaining)
             remaining -= target
             entry: dict[str, Any] = {
-                "target_threads": int(target),
+                "target_connections": int(target),
                 "worker_group_id": int(idx),
             }
             if per_worker_qps is not None:
@@ -136,7 +137,7 @@ def build_worker_targets(
         for idx in range(worker_count):
             target = base + (1 if idx < remainder else 0)
             entry = {
-                "target_threads": int(target),
+                "target_connections": int(target),
                 "worker_group_id": int(idx),
             }
             if per_worker_qps is not None:
@@ -179,7 +180,7 @@ async def _stream_worker_output(
     run_id: str,
 ) -> None:
     """Stream worker stdout/stderr to console in real-time.
-    
+
     NOTE: We print directly instead of using logger.log() to avoid duplicate
     entries in TEST_LOGS - workers already persist their own logs via
     TestLogQueueHandler.
@@ -328,9 +329,7 @@ class OrchestratorService:
         warnings: list[dict[str, Any]] = []
 
         # Extract relevant config values
-        table_type = str(
-            scenario_config.get("table_type", "standard")
-        ).lower()
+        table_type = str(scenario_config.get("table_type", "standard")).lower()
         workload_cfg = scenario_config.get("workload", {})
         workload_type = str(workload_cfg.get("workload_type", "read_only")).lower()
         total_threads = int(scenario_config.get("total_threads", 10))
@@ -365,54 +364,65 @@ class OrchestratorService:
         LOCK_WAITER_LIMIT = 20
 
         if table_type == "standard" and expected_concurrent_writes > LOCK_WAITER_LIMIT:
-            warnings.append({
-                "severity": "high",
-                "title": "Lock Contention Risk",
-                "message": (
-                    f"Standard tables use TABLE-LEVEL LOCKING for writes. "
-                    f"With {total_threads} threads and ~{write_pct*100:.0f}% writes, "
-                    f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
-                    f"Snowflake's lock waiter limit is {LOCK_WAITER_LIMIT} statements. "
-                    f"If any write takes >1 second, you WILL hit SF_LOCK_WAITER_LIMIT errors."
-                ),
-                "recommendations": [
-                    "Use a HYBRID table for concurrent write workloads (row-level locking)",
-                    f"Reduce concurrency to ≤{int(LOCK_WAITER_LIMIT / write_pct) if write_pct > 0 else total_threads} threads",
-                    "Use READ_ONLY workload to benchmark read performance separately",
-                ],
-                "details": {
-                    "table_type": table_type,
-                    "table_name": table_name,
-                    "total_threads": total_threads,
-                    "write_percentage": round(write_pct * 100, 1),
-                    "expected_concurrent_writes": round(expected_concurrent_writes, 1),
-                    "lock_waiter_limit": LOCK_WAITER_LIMIT,
-                },
-            })
-        elif table_type == "standard" and expected_concurrent_writes > LOCK_WAITER_LIMIT * 0.5:
+            warnings.append(
+                {
+                    "severity": "high",
+                    "title": "Lock Contention Risk",
+                    "message": (
+                        f"Standard tables use TABLE-LEVEL LOCKING for writes. "
+                        f"With {total_threads} threads and ~{write_pct * 100:.0f}% writes, "
+                        f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
+                        f"Snowflake's lock waiter limit is {LOCK_WAITER_LIMIT} statements. "
+                        f"If any write takes >1 second, you WILL hit SF_LOCK_WAITER_LIMIT errors."
+                    ),
+                    "recommendations": [
+                        "Use a HYBRID table for concurrent write workloads (row-level locking)",
+                        f"Reduce concurrency to ≤{int(LOCK_WAITER_LIMIT / write_pct) if write_pct > 0 else total_threads} threads",
+                        "Use READ_ONLY workload to benchmark read performance separately",
+                    ],
+                    "details": {
+                        "table_type": table_type,
+                        "table_name": table_name,
+                        "total_threads": total_threads,
+                        "write_percentage": round(write_pct * 100, 1),
+                        "expected_concurrent_writes": round(
+                            expected_concurrent_writes, 1
+                        ),
+                        "lock_waiter_limit": LOCK_WAITER_LIMIT,
+                    },
+                }
+            )
+        elif (
+            table_type == "standard"
+            and expected_concurrent_writes > LOCK_WAITER_LIMIT * 0.5
+        ):
             # Warning for approaching the limit (>50% of limit)
-            warnings.append({
-                "severity": "medium",
-                "title": "Potential Lock Contention",
-                "message": (
-                    f"With {total_threads} threads and ~{write_pct*100:.0f}% writes on a STANDARD table, "
-                    f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
-                    f"This approaches Snowflake's {LOCK_WAITER_LIMIT}-waiter limit. "
-                    f"Slow writes could trigger SF_LOCK_WAITER_LIMIT errors."
-                ),
-                "recommendations": [
-                    "Monitor for SF_LOCK_WAITER_LIMIT errors during the run",
-                    "Consider using a HYBRID table for better write concurrency",
-                ],
-                "details": {
-                    "table_type": table_type,
-                    "table_name": table_name,
-                    "total_threads": total_threads,
-                    "write_percentage": round(write_pct * 100, 1),
-                    "expected_concurrent_writes": round(expected_concurrent_writes, 1),
-                    "lock_waiter_limit": LOCK_WAITER_LIMIT,
-                },
-            })
+            warnings.append(
+                {
+                    "severity": "medium",
+                    "title": "Potential Lock Contention",
+                    "message": (
+                        f"With {total_threads} threads and ~{write_pct * 100:.0f}% writes on a STANDARD table, "
+                        f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
+                        f"This approaches Snowflake's {LOCK_WAITER_LIMIT}-waiter limit. "
+                        f"Slow writes could trigger SF_LOCK_WAITER_LIMIT errors."
+                    ),
+                    "recommendations": [
+                        "Monitor for SF_LOCK_WAITER_LIMIT errors during the run",
+                        "Consider using a HYBRID table for better write concurrency",
+                    ],
+                    "details": {
+                        "table_type": table_type,
+                        "table_name": table_name,
+                        "total_threads": total_threads,
+                        "write_percentage": round(write_pct * 100, 1),
+                        "expected_concurrent_writes": round(
+                            expected_concurrent_writes, 1
+                        ),
+                        "lock_waiter_limit": LOCK_WAITER_LIMIT,
+                    },
+                }
+            )
 
         return warnings
 
@@ -892,14 +902,44 @@ class OrchestratorService:
         target_cfg = scenario_config.get("target") or {}
         table_type = str(target_cfg.get("table_type") or "").strip().upper()
         warehouse_name = str(target_cfg.get("warehouse") or "").strip().upper()
-        logger.info("Pre-spawn warehouse check: table_type=%s, warehouse=%s", table_type, warehouse_name)
+        logger.info(
+            "Pre-spawn warehouse check: table_type=%s, warehouse=%s",
+            table_type,
+            warehouse_name,
+        )
         if table_type in ("HYBRID", "INTERACTIVE") and warehouse_name:
-            logger.info("Detected Interactive/Hybrid table - ensuring warehouse %s is running...", warehouse_name)
+            logger.info(
+                "Detected Interactive/Hybrid table - ensuring warehouse %s is running...",
+                warehouse_name,
+            )
             await self._ensure_warehouse_running(ctx, warehouse_name)
         else:
-            logger.info("Skipping warehouse resume: table_type=%s not in (HYBRID, INTERACTIVE) or no warehouse", table_type)
+            logger.info(
+                "Skipping warehouse resume: table_type=%s not in (HYBRID, INTERACTIVE) or no warehouse",
+                table_type,
+            )
 
-        # 5. Spawn workers as local subprocesses
+        # 5. Pre-validate tables (once, before spawning workers)
+        # This avoids N workers each doing identical schema validation queries.
+        validation_results = await self._pre_validate_tables(scenario_config)
+        if validation_results:
+            scenario_config["validation_results"] = validation_results
+            # Update RUN_STATUS with enriched scenario_config
+            await self._pool.execute_query(
+                f"""
+                UPDATE {prefix}.RUN_STATUS
+                SET SCENARIO_CONFIG = PARSE_JSON(?),
+                    UPDATED_AT = CURRENT_TIMESTAMP()
+                WHERE RUN_ID = ?
+                """,
+                params=[json.dumps(scenario_config), run_id],
+            )
+            logger.info(
+                "Pre-validated %d table(s), cached in SCENARIO_CONFIG",
+                len(validation_results),
+            )
+
+        # 6. Spawn workers as local subprocesses
         await self._spawn_workers(ctx)
 
         # 5. Start background poll loop for this run
@@ -917,29 +957,41 @@ class OrchestratorService:
             initial_phase,
         )
 
-    async def _ensure_warehouse_running(self, ctx: RunContext, warehouse_name: str) -> None:
+    async def _ensure_warehouse_running(
+        self, ctx: RunContext, warehouse_name: str
+    ) -> None:
         """
         Ensure the warehouse is running for Interactive/Hybrid tables.
-        
+
         Checks warehouse state and resumes if suspended.
         Tracks whether we resumed it so we can suspend on teardown.
         """
         try:
-            rows = await self._pool.execute_query(f"SHOW WAREHOUSES LIKE '{warehouse_name}'")
+            rows = await self._pool.execute_query(
+                f"SHOW WAREHOUSES LIKE '{warehouse_name}'"
+            )
             state = None
             for row in rows or []:
                 # SHOW WAREHOUSES columns: name(0), state(1), type(2), size(3), ...
                 if len(row) >= 2 and str(row[0]).upper() == warehouse_name:
                     state = str(row[1]).upper()
                     break
-            
+
             logger.info("Warehouse %s state: %s", warehouse_name, state)
-            
+
             if state == "SUSPENDED":
-                logger.info("Resuming suspended warehouse %s for Interactive/Hybrid table...", warehouse_name)
-                await self._pool.execute_query(f"ALTER WAREHOUSE {warehouse_name} RESUME")
+                logger.info(
+                    "Resuming suspended warehouse %s for Interactive/Hybrid table...",
+                    warehouse_name,
+                )
+                await self._pool.execute_query(
+                    f"ALTER WAREHOUSE {warehouse_name} RESUME"
+                )
                 ctx.did_resume_warehouse = True
-                logger.info("✅ Resumed warehouse %s, waiting for it to be ready...", warehouse_name)
+                logger.info(
+                    "✅ Resumed warehouse %s, waiting for it to be ready...",
+                    warehouse_name,
+                )
                 await asyncio.sleep(3)
             elif state == "RESUMING":
                 logger.info("Warehouse %s is resuming, waiting...", warehouse_name)
@@ -948,9 +1000,105 @@ class OrchestratorService:
             elif state == "STARTED":
                 logger.info("Warehouse %s is already running", warehouse_name)
             else:
-                logger.warning("Unknown warehouse state %s for %s", state, warehouse_name)
+                logger.warning(
+                    "Unknown warehouse state %s for %s", state, warehouse_name
+                )
         except Exception as e:
-            logger.error("Failed to ensure warehouse %s is running: %s", warehouse_name, e)
+            logger.error(
+                "Failed to ensure warehouse %s is running: %s", warehouse_name, e
+            )
+
+    async def _pre_validate_tables(
+        self, scenario_config: dict[str, Any]
+    ) -> dict[str, dict[str, Any]]:
+        """
+        Pre-validate tables before spawning workers.
+
+        This runs schema validation and stats collection ONCE in the orchestrator,
+        caching results so workers can skip redundant validation queries.
+
+        Args:
+            scenario_config: The scenario configuration dict
+
+        Returns:
+            Dict mapping table names to validation results (columns, object_type, stats)
+        """
+        target_cfg = scenario_config.get("target") or {}
+        table_name = str(target_cfg.get("table_name") or "").strip()
+        if not table_name:
+            logger.warning("No table_name in scenario_config, skipping pre-validation")
+            return {}
+
+        table_type_str = str(target_cfg.get("table_type") or "").strip().upper()
+        database = str(target_cfg.get("database") or "").strip()
+        schema = str(target_cfg.get("schema") or "").strip()
+
+        # Map string to TableType enum
+        type_map = {
+            "STANDARD": TableType.STANDARD,
+            "HYBRID": TableType.HYBRID,
+            "INTERACTIVE": TableType.INTERACTIVE,
+            "POSTGRES": TableType.POSTGRES,
+            "SNOWFLAKE_POSTGRES": TableType.SNOWFLAKE_POSTGRES,
+        }
+        table_type = type_map.get(table_type_str)
+        if not table_type:
+            logger.warning(
+                "Unknown table_type '%s', skipping pre-validation", table_type_str
+            )
+            return {}
+
+        try:
+            # Build TableConfig for the target table
+            # columns is required but will be populated during validate_schema()
+            config = TableConfig(
+                name=table_name,
+                table_type=table_type,
+                database=database or None,
+                schema_name=schema or None,
+                columns={},  # Will be populated by validate_schema()
+            )
+
+            # Create table manager and run validation
+            manager = create_table_manager(config)
+
+            # For Snowflake types, inject the orchestrator's pool
+            if table_type in (
+                TableType.STANDARD,
+                TableType.HYBRID,
+                TableType.INTERACTIVE,
+            ):
+                manager.pool = self._pool
+
+            logger.info(
+                "Pre-validating table: %s (type=%s)", table_name, table_type_str
+            )
+            ok = await manager.setup()
+            if not ok:
+                logger.error("Pre-validation failed for %s", table_name)
+                return {}
+
+            # Extract validation results to cache
+            results = {
+                table_name: {
+                    "columns": dict(manager.config.columns)
+                    if manager.config.columns
+                    else {},
+                    "object_type": manager.object_type,
+                    "stats": dict(manager.stats) if manager.stats else {},
+                }
+            }
+            logger.info(
+                "✅ Pre-validation complete: %s (object_type=%s, rows=%s)",
+                table_name,
+                manager.object_type,
+                manager.stats.get("row_count"),
+            )
+            return results
+
+        except Exception as e:
+            logger.error("Pre-validation error for %s: %s", table_name, e)
+            return {}
 
     async def _emit_control_event(
         self, *, run_id: str, event_type: str, event_data: dict[str, Any]
@@ -1243,24 +1391,65 @@ class OrchestratorService:
         find_max_max_error_pct = float(find_max_cfg.get("max_error_rate_pct") or 1.0)
         target_qps_total = _coerce_optional_float(workload_cfg.get("target_qps"))
 
-        max_concurrency = (
-            _coerce_optional_int(workload_cfg.get("concurrent_connections"))
-            or find_max_start
+        # Calculate max_concurrency ceiling for FIND_MAX mode
+        # IMPORTANT: For FIND_MAX mode, we need a high ceiling to discover the true maximum.
+        # The ceiling is NOT the target - it's the upper bound for exploration.
+        _configured_concurrent_connections = _coerce_optional_int(
+            workload_cfg.get("concurrent_connections")
         )
+        if load_mode == "FIND_MAX_CONCURRENCY":
+            # FIND_MAX mode: ALWAYS use a high ceiling to allow discovering the true max.
+            # The algorithm stops when degradation is detected, not at this ceiling.
+            # CRITICAL: Ignore concurrent_connections entirely - it's not meant for FIND_MAX mode.
+            # concurrent_connections is for CONSTANT load mode to set a fixed concurrency level.
+            max_concurrency = 10000
+            # CRITICAL: Also override per_worker_threads so build_worker_targets doesn't clamp targets.
+            # Without this, targets would be clamped to per_worker_threads (e.g., 10) even though
+            # max_concurrency is 10000.
+            per_worker_threads = None
+        else:
+            # Other modes: Use concurrent_connections or fall back to find_max_start
+            max_concurrency = _configured_concurrent_connections or find_max_start
         max_concurrency = max(find_max_start, max_concurrency)
-        if effective_max_threads_per_worker is not None:
-            max_concurrency = min(
-                max_concurrency,
-                int(effective_max_threads_per_worker) * worker_group_count,
-            )
-        if max_workers is not None and effective_max_threads_per_worker is not None:
-            max_concurrency = min(
-                max_concurrency,
-                int(max_workers) * int(effective_max_threads_per_worker),
-            )
-        bounded_max_configured = scaling_mode == "BOUNDED" and (
-            max_workers is not None or max_threads_per_worker is not None
+
+        # Only apply thread/worker caps when explicitly configured (BOUNDED mode)
+        # CRITICAL: For FIND_MAX mode, these caps should NOT limit exploration.
+        # FIND_MAX needs freedom to scale up and find the true max through degradation detection.
+        if scaling_mode == "BOUNDED" and load_mode != "FIND_MAX_CONCURRENCY":
+            if effective_max_threads_per_worker is not None:
+                max_concurrency = min(
+                    max_concurrency,
+                    int(effective_max_threads_per_worker) * worker_group_count,
+                )
+            if max_workers is not None and effective_max_threads_per_worker is not None:
+                max_concurrency = min(
+                    max_concurrency,
+                    int(max_workers) * int(effective_max_threads_per_worker),
+                )
+        # For FIND_MAX mode, bounded_max_configured should always be False
+        # so the algorithm continues exploring until degradation is detected
+        bounded_max_configured = (
+            scaling_mode == "BOUNDED"
+            and load_mode != "FIND_MAX_CONCURRENCY"
+            and (max_workers is not None or max_threads_per_worker is not None)
         )
+
+        # DEBUG: Log FIND_MAX configuration
+        if load_mode == "FIND_MAX_CONCURRENCY":
+            logger.info(
+                "FIND_MAX config for run %s: max_concurrency=%s, bounded_max_configured=%s, "
+                "scaling_mode=%s, max_workers=%s, effective_max_threads_per_worker=%s, "
+                "concurrent_connections=%s, find_max_start=%s, find_max_increment=%s",
+                run_id,
+                max_concurrency,
+                bounded_max_configured,
+                scaling_mode,
+                max_workers,
+                effective_max_threads_per_worker,
+                _configured_concurrent_connections,
+                find_max_start,
+                find_max_increment,
+            )
 
         last_metrics_ts: datetime | None = None
         last_heartbeat_update: datetime | None = None
@@ -1285,6 +1474,11 @@ class OrchestratorService:
         find_max_best_qps = 0.0
         find_max_completed = False
         find_max_final_reason: str | None = None
+        find_max_backoff_attempted = False
+        find_max_is_backoff_step = False  # Track if CURRENT step is a backoff step
+        find_max_termination_reason: str | None = None
+        find_max_failed_concurrency: int | None = None  # Track where degradation occurred
+        find_max_midpoint_attempted = False  # Track if midpoint has been tried
 
         # Postgres stats capture setup
         is_postgres_test = str(target_cfg.get("table_type", "")).strip().upper() in {
@@ -1312,7 +1506,9 @@ class OrchestratorService:
                             run_id,
                         )
             except Exception as e:
-                logger.warning("Failed to check Postgres capabilities for %s: %s", run_id, e)
+                logger.warning(
+                    "Failed to check Postgres capabilities for %s: %s", run_id, e
+                )
                 pg_stats_enabled = False
 
         async def _poll_warehouse(elapsed: float | None) -> None:
@@ -1573,7 +1769,7 @@ class OrchestratorService:
                                 stats.get("mean_exec_time", 0),
                                 stats.get("cache_hit_ratio", 0) * 100,
                             )
-                        
+
                         # Persist Postgres enrichment data to TEST_RESULTS
                         pg_caps_dict = None
                         if ctx.pg_capabilities:
@@ -1584,18 +1780,27 @@ class OrchestratorService:
                             }
                         await update_postgres_enrichment(
                             test_id=test_id,
-                            pg_delta_measurement=delta_to_dict(ctx.pg_delta_measurement) if ctx.pg_delta_measurement else None,
-                            pg_delta_warmup=delta_to_dict(ctx.pg_delta_warmup) if ctx.pg_delta_warmup else None,
-                            pg_delta_total=delta_to_dict(ctx.pg_delta_total) if ctx.pg_delta_total else None,
+                            pg_delta_measurement=delta_to_dict(ctx.pg_delta_measurement)
+                            if ctx.pg_delta_measurement
+                            else None,
+                            pg_delta_warmup=delta_to_dict(ctx.pg_delta_warmup)
+                            if ctx.pg_delta_warmup
+                            else None,
+                            pg_delta_total=delta_to_dict(ctx.pg_delta_total)
+                            if ctx.pg_delta_total
+                            else None,
                             pg_capabilities=pg_caps_dict,
                         )
-                        
+
                         await update_enrichment_status(
                             test_id=test_id,
                             status="COMPLETED",
                             error=None,
                         )
-                        logger.info("Postgres pg_stat_statements enrichment completed for %s", test_id)
+                        logger.info(
+                            "Postgres pg_stat_statements enrichment completed for %s",
+                            test_id,
+                        )
                     else:
                         logger.info(
                             "Skipping QUERY_HISTORY enrichment for Postgres test %s "
@@ -1889,10 +2094,14 @@ class OrchestratorService:
                     # NOTE: We capture ALL queries (no filter) because PostgreSQL's pg_stat_statements
                     # strips comments during query normalization, so UB_KIND markers won't be present.
                     # Query classification happens in extract_query_kind() based on SQL patterns.
-                    if pg_stats_enabled and pg_stats_conn and ctx.pg_snapshot_before_warmup is None:
+                    if (
+                        pg_stats_enabled
+                        and pg_stats_conn
+                        and ctx.pg_snapshot_before_warmup is None
+                    ):
                         try:
-                            ctx.pg_snapshot_before_warmup = await capture_pg_stat_snapshot(
-                                pg_stats_conn
+                            ctx.pg_snapshot_before_warmup = (
+                                await capture_pg_stat_snapshot(pg_stats_conn)
                             )
                             logger.info(
                                 "Captured pg_stat_statements snapshot 1 (before_warmup) for %s: %d queries",
@@ -1900,7 +2109,11 @@ class OrchestratorService:
                                 len(ctx.pg_snapshot_before_warmup.stats),
                             )
                         except Exception as e:
-                            logger.warning("Failed to capture pg_stat snapshot 1 for %s: %s", run_id, e)
+                            logger.warning(
+                                "Failed to capture pg_stat snapshot 1 for %s: %s",
+                                run_id,
+                                e,
+                            )
 
                 guardrail_reason = None
                 if (
@@ -2029,10 +2242,14 @@ class OrchestratorService:
                     phase = "MEASUREMENT"
 
                     # Capture second pg_stat_statements snapshot (after warmup, before measurement)
-                    if pg_stats_enabled and pg_stats_conn and ctx.pg_snapshot_after_warmup is None:
+                    if (
+                        pg_stats_enabled
+                        and pg_stats_conn
+                        and ctx.pg_snapshot_after_warmup is None
+                    ):
                         try:
-                            ctx.pg_snapshot_after_warmup = await capture_pg_stat_snapshot(
-                                pg_stats_conn
+                            ctx.pg_snapshot_after_warmup = (
+                                await capture_pg_stat_snapshot(pg_stats_conn)
                             )
                             logger.info(
                                 "Captured pg_stat_statements snapshot 2 (after_warmup) for %s: %d queries",
@@ -2046,7 +2263,11 @@ class OrchestratorService:
                                     ctx.pg_snapshot_after_warmup,
                                 )
                         except Exception as e:
-                            logger.warning("Failed to capture pg_stat snapshot 2 for %s: %s", run_id, e)
+                            logger.warning(
+                                "Failed to capture pg_stat snapshot 2 for %s: %s",
+                                run_id,
+                                e,
+                            )
 
                 effective_elapsed_seconds = elapsed_seconds
                 if warmup_seconds > 0 and warmup_elapsed_seconds is not None:
@@ -2090,10 +2311,14 @@ class OrchestratorService:
                     status = "STOPPING"
 
                     # Capture third pg_stat_statements snapshot (after measurement)
-                    if pg_stats_enabled and pg_stats_conn and ctx.pg_snapshot_after_measurement is None:
+                    if (
+                        pg_stats_enabled
+                        and pg_stats_conn
+                        and ctx.pg_snapshot_after_measurement is None
+                    ):
                         try:
-                            ctx.pg_snapshot_after_measurement = await capture_pg_stat_snapshot(
-                                pg_stats_conn
+                            ctx.pg_snapshot_after_measurement = (
+                                await capture_pg_stat_snapshot(pg_stats_conn)
                             )
                             logger.info(
                                 "Captured pg_stat_statements snapshot 3 (after_measurement) for %s: %d queries",
@@ -2125,7 +2350,11 @@ class OrchestratorService:
                                 ctx.pg_delta_total is not None,
                             )
                         except Exception as e:
-                            logger.warning("Failed to capture pg_stat snapshot 3 for %s: %s", run_id, e)
+                            logger.warning(
+                                "Failed to capture pg_stat snapshot 3 for %s: %s",
+                                run_id,
+                                e,
+                            )
 
                 total_ops = 0
                 error_count = 0
@@ -2401,6 +2630,7 @@ class OrchestratorService:
                             elif (
                                 p95_vs_baseline_pct is not None
                                 and p95_vs_baseline_pct > find_max_latency_stability_pct
+                                and not find_max_is_backoff_step  # Skip latency check for backoff steps
                             ):
                                 stable = False
                                 stop_reason = (
@@ -2418,6 +2648,17 @@ class OrchestratorService:
                                     f"vs prior (limit {find_max_qps_stability_pct:.1f}%)"
                                 )
                                 outcome = "DEGRADED"
+
+                            # Reset backoff flag after step evaluation
+                            if find_max_is_backoff_step:
+                                logger.info(
+                                    "FIND_MAX backoff step %d: P95 baseline check skipped "
+                                    "(p95_vs_baseline_pct=%.1f%%, stable=%s)",
+                                    find_max_step_number,
+                                    p95_vs_baseline_pct or 0.0,
+                                    stable,
+                                )
+                                find_max_is_backoff_step = False
 
                             if find_max_baseline_p95 is None and aggregate_p95:
                                 find_max_baseline_p95 = float(aggregate_p95)
@@ -2477,15 +2718,22 @@ class OrchestratorService:
                             )
                             await _persist_find_max_state(state)
 
-                            if stable and find_max_step_target < max_concurrency:
+                            # Helper to setup next step
+                            async def _setup_next_step(
+                                next_target: int, reason: str, is_backoff: bool = False
+                            ) -> int:
+                                nonlocal find_max_step_number, find_max_step_id
+                                nonlocal find_max_step_target, find_max_step_started_at
+                                nonlocal find_max_step_started_epoch_ms, find_max_step_end_epoch_ms
+                                nonlocal find_max_step_start_ops, find_max_step_start_errors
+                                nonlocal find_max_prev_step_qps, find_max_is_backoff_step
+
+                                find_max_is_backoff_step = is_backoff
                                 find_max_prev_step_qps = float(step_qps)
                                 find_max_step_number += 1
                                 find_max_step_id = str(uuid.uuid4())
-                                find_max_step_target = min(
-                                    max_concurrency,
-                                    int(find_max_step_target) + int(find_max_increment),
-                                )
-                                find_max_step_started_at = now
+                                find_max_step_target = next_target
+                                find_max_step_started_at = datetime.now(UTC)
                                 find_max_step_started_epoch_ms = int(
                                     datetime.now(UTC).timestamp() * 1000
                                 )
@@ -2500,13 +2748,146 @@ class OrchestratorService:
                                 find_max_step_start_ops = total_ops
                                 find_max_step_start_errors = error_count
 
-                                find_max_step_target = await _apply_worker_targets(
+                                return await _apply_worker_targets(
                                     total_target=find_max_step_target,
                                     step_id=str(find_max_step_id),
                                     step_number=find_max_step_number,
-                                    reason="step_advance",
+                                    reason=reason,
                                 )
+
+                            should_continue = False
+                            should_stop = False
+
+                            # DEBUG: Log step completion decision inputs
+                            logger.info(
+                                "FIND_MAX step %d decision: stable=%s, find_max_step_target=%s, "
+                                "max_concurrency=%s, find_max_best_concurrency=%s, "
+                                "find_max_backoff_attempted=%s, stop_reason=%s",
+                                find_max_step_number,
+                                stable,
+                                find_max_step_target,
+                                max_concurrency,
+                                find_max_best_concurrency,
+                                find_max_backoff_attempted,
+                                stop_reason,
+                            )
+
+                            if stable:
+                                # Step was stable - continue scaling or stop at ceiling
+                                if find_max_step_target < max_concurrency:
+                                    # Continue to next step
+                                    should_continue = True
+                                    next_target = min(
+                                        max_concurrency,
+                                        int(find_max_step_target) + int(find_max_increment),
+                                    )
+                                    find_max_step_target = await _setup_next_step(
+                                        next_target, "step_advance"
+                                    )
+                                else:
+                                    # Reached ceiling while stable
+                                    should_stop = True
+                                    if bounded_max_configured:
+                                        find_max_final_reason = "Reached bounded max"
+                                    else:
+                                        find_max_final_reason = "Reached max workers"
                             else:
+                                # Step was NOT stable - try backoff/retry before stopping
+                                if find_max_termination_reason is None and stop_reason:
+                                    find_max_termination_reason = str(stop_reason).strip() or None
+
+                                if (
+                                    not find_max_backoff_attempted
+                                    and find_max_best_concurrency > 0
+                                    and find_max_best_concurrency < find_max_step_target
+                                ):
+                                    # Try backoff: go back to best_concurrency and verify stability
+                                    find_max_backoff_attempted = True
+                                    find_max_failed_concurrency = int(find_max_step_target)
+                                    logger.info(
+                                        "FIND_MAX: Degradation detected at %d workers. "
+                                        "Backing off to verify %d is stable...",
+                                        find_max_step_target,
+                                        find_max_best_concurrency,
+                                    )
+
+                                    # Setup backoff step
+                                    find_max_step_target = await _setup_next_step(
+                                        find_max_best_concurrency, "backoff", is_backoff=True
+                                    )
+
+                                    # Continue the loop to run backoff step
+                                    should_continue = True
+                                else:
+                                    # Backoff already attempted or no better concurrency to try
+                                    should_stop = True
+                                    find_max_final_reason = (
+                                        find_max_termination_reason
+                                        or stop_reason
+                                        or "Degradation detected"
+                                    )
+
+                            # After backoff step is stable, try midpoint
+                            if (
+                                stable
+                                and find_max_backoff_attempted
+                                and not find_max_midpoint_attempted
+                                and find_max_failed_concurrency is not None
+                                and find_max_step_target == find_max_best_concurrency
+                            ):
+                                # Backoff was stable - try midpoint between best and failed
+                                midpoint = find_max_best_concurrency + (
+                                    find_max_failed_concurrency - find_max_best_concurrency
+                                ) // 2
+                                if (
+                                    midpoint > find_max_best_concurrency
+                                    and midpoint < find_max_failed_concurrency
+                                ):
+                                    find_max_midpoint_attempted = True
+                                    logger.info(
+                                        "FIND_MAX: Backoff confirmed - %d workers is stable @ %.1f QPS. "
+                                        "Trying midpoint %d workers...",
+                                        find_max_best_concurrency,
+                                        step_qps,
+                                        midpoint,
+                                    )
+
+                                    # Setup midpoint step
+                                    find_max_step_target = await _setup_next_step(
+                                        midpoint, "midpoint"
+                                    )
+                                    should_continue = True
+                                    should_stop = False
+                                else:
+                                    # No room for midpoint, stop here
+                                    logger.info(
+                                        "FIND_MAX: Backoff confirmed - %d workers is stable @ %.1f QPS. "
+                                        "No room for midpoint, stopping.",
+                                        find_max_best_concurrency,
+                                        step_qps,
+                                    )
+                                    should_stop = True
+                                    find_max_final_reason = (
+                                        find_max_termination_reason or "Degradation detected"
+                                    )
+
+                            # After midpoint step, stop regardless of outcome
+                            if find_max_midpoint_attempted and stable and not should_stop:
+                                # Midpoint was stable - update best and stop
+                                if step_qps > find_max_best_qps:
+                                    find_max_best_concurrency = int(find_max_step_target)
+                                    find_max_best_qps = float(step_qps)
+                                    logger.info(
+                                        "FIND_MAX: Midpoint %d is better! New best: %.1f QPS",
+                                        find_max_step_target,
+                                        find_max_best_qps,
+                                    )
+                                should_stop = True
+                                find_max_final_reason = (
+                                    find_max_termination_reason or "Degradation detected"
+                                )
+
+                            if should_stop:
                                 find_max_completed = True
                                 max_type = None
                                 bounded = False
@@ -2516,14 +2897,8 @@ class OrchestratorService:
                                     if bounded_max_configured:
                                         bounded = True
                                         max_type = "BOUNDED_MAX"
-                                        find_max_final_reason = "Reached bounded max"
                                     else:
                                         max_type = "TRUE_MAX"
-                                        find_max_final_reason = "Reached max workers"
-                                else:
-                                    find_max_final_reason = (
-                                        stop_reason or "Degradation detected"
-                                    )
 
                                 final_state = dict(state)
                                 final_state.update(
@@ -2676,11 +3051,20 @@ class OrchestratorService:
                 warehouse_name = str(target_cfg.get("warehouse") or "").strip().upper()
                 if warehouse_name:
                     try:
-                        logger.info("Suspending warehouse %s (we resumed it on startup)...", warehouse_name)
-                        await self._pool.execute_query(f"ALTER WAREHOUSE {warehouse_name} SUSPEND")
+                        logger.info(
+                            "Suspending warehouse %s (we resumed it on startup)...",
+                            warehouse_name,
+                        )
+                        await self._pool.execute_query(
+                            f"ALTER WAREHOUSE {warehouse_name} SUSPEND"
+                        )
                         logger.info("✅ Suspended warehouse %s", warehouse_name)
                     except Exception as suspend_err:
-                        logger.warning("Failed to suspend warehouse %s: %s", warehouse_name, suspend_err)
+                        logger.warning(
+                            "Failed to suspend warehouse %s: %s",
+                            warehouse_name,
+                            suspend_err,
+                        )
 
             # Clean up Postgres stats connection
             if pg_stats_conn:
@@ -2688,7 +3072,11 @@ class OrchestratorService:
                     await pg_stats_conn.close()
                     logger.debug("Closed Postgres stats connection for run %s", run_id)
                 except Exception as pg_close_err:
-                    logger.warning("Failed to close Postgres stats connection for %s: %s", run_id, pg_close_err)
+                    logger.warning(
+                        "Failed to close Postgres stats connection for %s: %s",
+                        run_id,
+                        pg_close_err,
+                    )
 
             # Clean up log streaming
             ctx = self._active_runs.get(run_id)

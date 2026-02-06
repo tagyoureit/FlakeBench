@@ -17,7 +17,7 @@
 -- DROP TABLE + CREATE HYBRID TABLE for schema changes.
 -- =============================================================================
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 -- =============================================================================

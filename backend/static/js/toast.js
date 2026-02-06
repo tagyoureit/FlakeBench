@@ -1,6 +1,6 @@
 (() => {
   const CONTAINER_ID = "toast-container";
-  const NEXT_TOASTS_KEY = "unistore_toast_next";
+  const NEXT_TOASTS_KEY = "flakebench_toast_next";
 
   const DEFAULT_CONFIRMATION_DURATION_MS = 10_000;
   const DEFAULT_CONFIRM_DURATION_MS = 10_000;

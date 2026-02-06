@@ -4,7 +4,7 @@
 -- This schema stores test results, metrics, and configurations for 
 -- Snowflake/Postgres performance benchmarking.
 --
--- Database: UNISTORE_BENCHMARK
+-- Database: FLAKEBENCH
 -- Schema: TEST_RESULTS
 -- =============================================================================
 
@@ -13,11 +13,11 @@
 -- -----------------------------------------------------------------------------
 -- Uses CREATE OR ALTER for declarative, idempotent DDL.
 -- Reference: https://docs.snowflake.com/en/sql-reference/sql/create-or-alter
-CREATE OR ALTER DATABASE UNISTORE_BENCHMARK;
+CREATE OR ALTER DATABASE FLAKEBENCH;
 
-CREATE OR ALTER SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
+CREATE OR ALTER SCHEMA FLAKEBENCH.TEST_RESULTS;
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 -- =============================================================================
@@ -141,7 +141,7 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     warehouse_config_snapshot VARIANT,
 
     -- Per-test query tag used to filter INFORMATION_SCHEMA.QUERY_HISTORY for this test.
-    -- Format: "unistore_benchmark:test_id={test_id}"
+    -- Format: "flakebench:test_id={test_id}"
     query_tag VARCHAR(200),
 
     -- FIND_MAX_CONCURRENCY mode results (step history, best concurrency, etc.)

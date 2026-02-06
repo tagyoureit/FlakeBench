@@ -630,7 +630,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--results-database",
-        default=os.environ.get("RESULTS_DATABASE", "UNISTORE_BENCHMARK"),
+        default=os.environ.get("RESULTS_DATABASE", "FLAKEBENCH"),
         help="Snowflake database for results/smoke data",
     )
     parser.add_argument(

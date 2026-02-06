@@ -34,8 +34,8 @@ This document outlines the transition plan to the new multi-worker architecture.
 - AWS or Azure commercial region (Hybrid Tables not available on GCP)
 
 **Schema Layout**:
-- `UNISTORE_BENCHMARK.TEST_RESULTS`: all running tests, results, and control-plane state.
-- `UNISTORE_BENCHMARK.CONFIG`: templates and scenario config.
+- `FLAKEBENCH.TEST_RESULTS`: all running tests, results, and control-plane state.
+- `FLAKEBENCH.CONFIG`: templates and scenario config.
 
 See [phase-2-checklist.md](phase-2-checklist.md) for detailed implementation tasks.
 
@@ -100,7 +100,7 @@ See [query-execution-streaming.md](query-execution-streaming.md) for detailed de
 
 - No DDL is executed at runtime.
 - Schema changes are rerunnable DDL in `sql/schema/`.
-- Templates remain stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`
+- Templates remain stored in `FLAKEBENCH.TEST_RESULTS.TEST_TEMPLATES`
   with `CONFIG` as the authoritative payload for runs.
 
 ## Related Documents

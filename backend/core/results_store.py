@@ -2,7 +2,7 @@
 Snowflake Results Store
 
 Persists test runs, test results, and time-series metrics snapshots into
-UNISTORE_BENCHMARK.TEST_RESULTS.* tables.
+FLAKEBENCH.TEST_RESULTS.* tables.
 """
 
 from __future__ import annotations
@@ -887,7 +887,7 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         int(total_operations or 0),
         int(read_operations or 0),
         int(write_operations or 0),
-        int(failed_operations or 0),
+        max(int(failed_operations or 0), int(error_count or 0)),
         float(qps or 0.0),
         float(reads_per_second or 0.0),
         float(writes_per_second or 0.0),
@@ -916,7 +916,7 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         int(total_operations or 0),
         int(read_operations or 0),
         int(write_operations or 0),
-        int(failed_operations or 0),
+        max(int(failed_operations or 0), int(error_count or 0)),
         float(qps or 0.0),
         float(reads_per_second or 0.0),
         float(writes_per_second or 0.0),
@@ -1434,7 +1434,7 @@ async def enrich_query_executions_from_query_history(
     # Strip :test_id= suffix to match ALL workers in a multi-worker run
     if query_tag and ":test_id=" in query_tag:
         query_tag = query_tag.split(":test_id=")[0]
-    query_tag_like = f"{query_tag}%" if query_tag else "unistore_benchmark%"
+    query_tag_like = f"{query_tag}%" if query_tag else "flakebench%"
 
     start_buf = (start_dt - timedelta(minutes=5)).isoformat()
     current_end_dt = end_dt + timedelta(minutes=5)
@@ -1633,29 +1633,39 @@ async def enrich_query_executions_with_retry(
         poll_interval_seconds: Time between enrichment attempts (default 10)
     """
     id_for_log = run_id or test_id
-    initial_stats = await get_enrichment_stats(test_id=test_id, run_id=run_id)
-    if initial_stats.total_queries == 0:
-        logger.info("No queries to enrich for test %s", id_for_log)
-        return initial_stats
-
-    max_pages = max(10, (initial_stats.total_queries // 10_000) + 2)
-    logger.info(
-        "Enrichment for %s: %d queries -> max_pages=%d",
-        id_for_log,
-        initial_stats.total_queries,
-        max_pages,
-    )
-
     start = datetime.now(UTC)
     deadline = start + timedelta(seconds=max_wait_seconds)
     best_stats = EnrichmentStats(0, 0, 0.0)
     attempt = 0
     last_enriched = 0
+    last_total = 0
     stalled_attempts = 0
+    max_pages = 10
 
     while datetime.now(UTC) < deadline:
         attempt += 1
         elapsed = int((datetime.now(UTC) - start).total_seconds())
+
+        stats = await get_enrichment_stats(test_id=test_id, run_id=run_id)
+
+        if stats.total_queries == 0:
+            if attempt == 1:
+                logger.info(
+                    "⏳ Waiting for queries for %s (COPY INTO in progress)...",
+                    id_for_log,
+                )
+            await asyncio.sleep(poll_interval_seconds)
+            continue
+
+        if stats.total_queries != last_total:
+            max_pages = max(10, (stats.total_queries // 10_000) + 2)
+            last_total = stats.total_queries
+            logger.info(
+                "Enrichment for %s: %d queries -> max_pages=%d",
+                id_for_log,
+                stats.total_queries,
+                max_pages,
+            )
 
         await enrich_query_executions_from_query_history(
             test_id=test_id, run_id=run_id, max_pages=max_pages
@@ -1703,7 +1713,13 @@ async def enrich_query_executions_with_retry(
         await asyncio.sleep(poll_interval_seconds)
 
     elapsed = int((datetime.now(UTC) - start).total_seconds())
-    if best_stats.enrichment_ratio < target_ratio and best_stats.total_queries > 0:
+    if best_stats.total_queries == 0:
+        logger.warning(
+            "⚠️ No queries found for %s after %ds - worker may have failed to upload",
+            id_for_log,
+            elapsed,
+        )
+    elif best_stats.enrichment_ratio < target_ratio:
         logger.warning(
             "⚠️ Enrichment ended for %s: %.1f%% (%d/%d queries) after %ds",
             id_for_log,

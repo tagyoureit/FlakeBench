@@ -781,5 +781,5 @@ as a fallback if workers do not exit within 10 seconds of STOP event.
 
 - No DDL is executed at runtime. All tables are pre-created.
 - Schema changes are rerunnable DDL in `sql/schema/`.
-- Templates remain stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`
+- Templates remain stored in `FLAKEBENCH.TEST_RESULTS.TEST_TEMPLATES`
   with `CONFIG` as the authoritative payload for runs.

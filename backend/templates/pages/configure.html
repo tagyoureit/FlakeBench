@@ -4,7 +4,7 @@
 {% extends "base.html" %}
 {% endif %}
 
-{% block title %}Template Editor - Unistore Benchmark{% endblock %}
+{% block title %}Template Editor - FlakeBench{% endblock %}
 
 {% block content %}
 <div x-data="testConfiguration()" x-cloak>
@@ -509,6 +509,12 @@
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
                     <!-- Left: Load parameters -->
                     <div>
+                        <div style="padding: 0.75rem; border-radius: 0.25rem; margin-bottom: 0.75rem; background-color: #eff6ff; border: 1px solid #bfdbfe;">
+                            <div style="font-size: 0.875rem; color: #1e40af;">
+                                <strong>Fixed Threads</strong> maintains constant concurrency throughout the test.
+                                All threads run continuously for the specified duration.
+                            </div>
+                        </div>
                         <!-- Threads field - hidden when FIXED scaling -->
                         <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() !== 'FIXED'">
                             <label class="form-label">Total Threads</label>
@@ -604,6 +610,12 @@
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
                     <!-- Left: Load parameters -->
                     <div>
+                        <div style="padding: 0.75rem; border-radius: 0.25rem; margin-bottom: 0.75rem; background-color: #eff6ff; border: 1px solid #bfdbfe;">
+                            <div style="font-size: 0.875rem; color: #1e40af;">
+                                <strong>Target Throughput</strong> adjusts threads dynamically to achieve desired QPS.
+                                System adds or removes threads to maintain the specified operations per second.
+                            </div>
+                        </div>
                         <div class="form-group">
                             <label class="form-label">Target QPS</label>
                             <input type="number" class="form-input" x-model.number="config.target_qps" min="1" max="100000" step="1">
@@ -686,70 +698,119 @@
 
             <!-- FIND_MAX_CONCURRENCY mode options -->
             <div x-show="String(config.load_mode || 'CONCURRENCY').toUpperCase() === 'FIND_MAX_CONCURRENCY'">
-                <div style="padding: 0.75rem; border-radius: 0.25rem; margin-bottom: 0.75rem; background-color: #eff6ff; border: 1px solid #bfdbfe;">
-                    <div style="font-size: 0.875rem; color: #1e40af;">
-                        <strong>Find Max Throughput</strong> runs until degradation or max threads reached.
-                        Starts at initial threads, increments each step until QPS drops, latency spikes, or errors increase.
-                    </div>
-                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                    <!-- Left: Find Max parameters -->
+                    <div>
+                        <div style="padding: 0.75rem; border-radius: 0.25rem; margin-bottom: 0.75rem; background-color: #eff6ff; border: 1px solid #bfdbfe;">
+                            <div style="font-size: 0.875rem; color: #1e40af;">
+                                <strong>Find Max Throughput</strong> runs until degradation or max threads reached.
+                                Starts at initial threads, increments each step until QPS drops, latency spikes, or errors increase.
+                            </div>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem;">
+                            <div class="form-group">
+                                <label class="form-label" style="font-size: 0.75rem;">Start Threads</label>
+                                <input type="number" class="form-input" x-model.number="config.start_concurrency" min="1" max="100" step="1">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" style="font-size: 0.75rem;">Increment</label>
+                                <input type="number" class="form-input" x-model.number="config.concurrency_increment" min="1" max="100" step="1">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" style="font-size: 0.75rem;">Step Duration (s)</label>
+                                <input type="number" class="form-input" x-model.number="config.step_duration_seconds" min="10" max="300" step="5">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" style="font-size: 0.75rem;">Warmup (s)</label>
+                                <input type="number" class="form-input" x-model.number="config.warmup" min="0" max="300">
+                            </div>
+                        </div>
 
-                <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem;">
-                    <div class="form-group">
-                        <label class="form-label" style="font-size: 0.75rem;">Start Threads</label>
-                        <input type="number" class="form-input" x-model.number="config.start_concurrency" min="1" max="100" step="1">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" style="font-size: 0.75rem;">Increment</label>
-                        <input type="number" class="form-input" x-model.number="config.concurrency_increment" min="1" max="100" step="1">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" style="font-size: 0.75rem;">Step Duration (s)</label>
-                        <input type="number" class="form-input" x-model.number="config.step_duration_seconds" min="10" max="300" step="5">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" style="font-size: 0.75rem;">Max Threads</label>
-                        <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1" step="1">
-                    </div>
-                </div>
+                        <details style="margin-bottom: 0.75rem;">
+                            <summary style="font-size: 0.875rem; font-weight: 600; cursor: pointer; color: #6b7280;">
+                                Advanced: stability thresholds
+                            </summary>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem;">
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">QPS Drop %</label>
+                                    <input type="number" class="form-input" x-model.number="config.qps_stability_pct" min="1" max="50" step="1">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">P95 Latency %</label>
+                                    <input type="number" class="form-input" x-model.number="config.latency_stability_pct" min="5" max="100" step="5">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">Max Error %</label>
+                                    <input type="number" class="form-input" x-model.number="config.max_error_rate_pct" min="0" max="100" step="0.5">
+                                </div>
+                            </div>
+                        </details>
 
-                <details style="margin-bottom: 0.75rem;">
-                    <summary style="font-size: 0.875rem; font-weight: 600; cursor: pointer; color: #6b7280;">
-                        Advanced: stability thresholds
-                    </summary>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem;">
-                        <div class="form-group">
-                            <label class="form-label" style="font-size: 0.75rem;">QPS Drop %</label>
-                            <input type="number" class="form-input" x-model.number="config.qps_stability_pct" min="1" max="50" step="1">
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" style="font-size: 0.75rem;">P95 Latency %</label>
-                            <input type="number" class="form-input" x-model.number="config.latency_stability_pct" min="5" max="100" step="5">
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" style="font-size: 0.75rem;">Max Error %</label>
-                            <input type="number" class="form-input" x-model.number="config.max_error_rate_pct" min="0" max="100" step="0.5">
+                        <div style="padding: 0.5rem; border-radius: 0.25rem; background-color: #f9fafb; border: 1px solid #e5e7eb; max-width: 350px;">
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
+                                <input type="checkbox" x-model="config.guardrails.enabled" style="margin: 0;">
+                                <span>Resource Guardrails</span>
+                            </label>
+                            <div x-show="config.guardrails?.enabled !== false" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label" style="font-size: 0.75rem;">CPU %</label>
+                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label" style="font-size: 0.75rem;">Memory %</label>
+                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
+                                </div>
+                            </div>
+                            <small x-show="config.guardrails?.enabled === false" style="color: #9ca3af; font-size: 0.75rem;">
+                                No host resource limits
+                            </small>
                         </div>
                     </div>
-                </details>
 
-                <div style="padding: 0.5rem; border-radius: 0.25rem; background-color: #f9fafb; border: 1px solid #e5e7eb; max-width: 350px;">
-                    <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
-                        <input type="checkbox" x-model="config.guardrails.enabled" style="margin: 0;">
-                        <span>Resource Guardrails</span>
-                    </label>
-                    <div x-show="config.guardrails?.enabled !== false" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label class="form-label" style="font-size: 0.75rem;">CPU %</label>
-                            <input type="number" class="form-input" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
+                    <!-- Right: Scaling parameters -->
+                    <div>
+                        <!-- AUTO mode -->
+                        <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'AUTO'" style="padding: 0.5rem; border-radius: 0.25rem; font-size: 0.875rem; background-color: #f3f4f6; color: #6b7280; margin-bottom: 0.75rem;">
+                            Workers computed automatically as threads increase.
                         </div>
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label class="form-label" style="font-size: 0.75rem;">Memory %</label>
-                            <input type="number" class="form-input" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
+                        <!-- FIXED mode -->
+                        <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'FIXED'" style="margin-bottom: 0.75rem;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">Workers</label>
+                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">Threads/Worker</label>
+                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" step="1">
+                                </div>
+                            </div>
+                            <div style="padding: 0.5rem; border-radius: 0.25rem; font-size: 0.875rem; background-color: #dbeafe; color: #1e40af;">
+                                Find Max will increment threads within fixed worker count
+                            </div>
+                        </div>
+                        <!-- BOUNDED mode -->
+                        <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'" style="margin-bottom: 0.75rem;">
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">Min Workers</label>
+                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">Max Workers</label>
+                                    <input type="number" class="form-input" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="∞">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">Min Threads/Wkr</label>
+                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" step="1">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label" style="font-size: 0.75rem;">Max Threads/Wkr</label>
+                                    <input type="number" class="form-input" x-model.number="config.scaling.max_connections" min="1" step="1" placeholder="∞">
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <small x-show="config.guardrails?.enabled === false" style="color: #9ca3af; font-size: 0.75rem;">
-                        No host resource limits
-                    </small>
                 </div>
             </div>
         </div>
@@ -936,7 +997,7 @@ function testConfiguration() {
     return {
         config: {
             table_type: 'STANDARD',
-            database: 'UNISTORE_BENCHMARK',
+            database: '{{ default_database }}',
             schema: 'PUBLIC',
             table_name: '',
             warehouse_name: '',
@@ -1746,10 +1807,19 @@ function testConfiguration() {
                     }
                 }
                 if (next !== 'QPS' && prev === 'QPS') {
-                    const cur = Number(this.config.concurrent_connections);
-                    if (!Number.isFinite(cur) || cur < 1) {
-                        this.config.concurrent_connections = 10;
+                    // FIND_MAX doesn't use concurrent_connections - it discovers the max dynamically
+                    if (next === 'FIND_MAX_CONCURRENCY') {
+                        this.config.concurrent_connections = null;
+                    } else {
+                        const cur = Number(this.config.concurrent_connections);
+                        if (!Number.isFinite(cur) || cur < 1) {
+                            this.config.concurrent_connections = 10;
+                        }
                     }
+                }
+                // When switching TO FIND_MAX from any mode, clear concurrent_connections
+                if (next === 'FIND_MAX_CONCURRENCY' && prev !== 'FIND_MAX_CONCURRENCY') {
+                    this.config.concurrent_connections = null;
                 }
                 this._prevLoadMode = next;
             });
@@ -2728,7 +2798,7 @@ function testConfiguration() {
             if (confirmed) {
                 this.config = {
                     table_type: 'STANDARD',
-                    database: 'UNISTORE_BENCHMARK',
+                    database: '{{ default_database }}',
                     schema: 'PUBLIC',
                     table_name: '',
                     warehouse_name: '',

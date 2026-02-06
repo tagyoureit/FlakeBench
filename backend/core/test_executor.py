@@ -88,15 +88,25 @@ class TestExecutor:
     - Real-time metrics collection
     """
 
-    def __init__(self, scenario: TestScenario):
+    def __init__(
+        self,
+        scenario: TestScenario,
+        *,
+        worker_group_id: int = 0,
+        worker_group_count: int = 1,
+    ):
         """
         Initialize test executor.
 
         Args:
             scenario: Test scenario configuration
+            worker_group_id: Index of this worker process (0-based) for ID partitioning
+            worker_group_count: Total number of worker processes for ID partitioning
         """
         self.scenario = scenario
         self.test_id = uuid4()
+        self._worker_group_id = worker_group_id
+        self._worker_group_count = max(1, worker_group_count)
 
         # State
         self.status = TestStatus.PENDING
@@ -305,7 +315,9 @@ class TestExecutor:
         return type(exc).__name__
 
     @staticmethod
-    def _is_critical_config_error(category: str, exc: Exception) -> tuple[bool, str | None]:
+    def _is_critical_config_error(
+        category: str, exc: Exception
+    ) -> tuple[bool, str | None]:
         """
         Check if error indicates a critical configuration problem that should stop the test.
 
@@ -314,11 +326,24 @@ class TestExecutor:
         """
         msg = str(exc or "")
 
-        if category == "SF_SQLSTATE_55000" or "not bound to the current warehouse" in msg.lower():
-            return True, "Hybrid/Interactive table is not bound to the current warehouse. Run: ALTER WAREHOUSE <name> ADD TABLE <table_name>"
+        if (
+            category == "SF_SQLSTATE_55000"
+            or "not bound to the current warehouse" in msg.lower()
+        ):
+            return (
+                True,
+                "Hybrid/Interactive table is not bound to the current warehouse. Run: ALTER WAREHOUSE <name> ADD TABLE <table_name>",
+            )
 
-        if category == "SF_SQLSTATE_57P03" or "warehouse" in msg.lower() and "suspended" in msg.lower():
-            return True, "Interactive warehouse is suspended. The warehouse should be auto-resumed at test start."
+        if (
+            category == "SF_SQLSTATE_57P03"
+            or "warehouse" in msg.lower()
+            and "suspended" in msg.lower()
+        ):
+            return (
+                True,
+                "Interactive warehouse is suspended. The warehouse should be auto-resumed at test start.",
+            )
 
         return False, None
 
@@ -330,7 +355,9 @@ class TestExecutor:
                 return True
         return False
 
-    async def _check_warehouse_state(self, pool: Any, warehouse_name: str) -> str | None:
+    async def _check_warehouse_state(
+        self, pool: Any, warehouse_name: str
+    ) -> str | None:
         """
         Check the current state of a warehouse.
 
@@ -338,7 +365,9 @@ class TestExecutor:
             State string ('STARTED', 'SUSPENDED', 'RESUMING', etc.) or None if not found.
         """
         try:
-            results = await pool.execute_query(f"SHOW WAREHOUSES LIKE '{warehouse_name}'")
+            results = await pool.execute_query(
+                f"SHOW WAREHOUSES LIKE '{warehouse_name}'"
+            )
             if results:
                 for row in results:
                     if len(row) >= 4 and str(row[0]).upper() == warehouse_name.upper():
@@ -368,9 +397,7 @@ class TestExecutor:
             logger.warning(f"Failed to suspend warehouse {warehouse_name}: {e}")
             return False
 
-    def set_query_logger(
-        self, logger: Optional["FileBasedQueryLogger"]
-    ) -> None:
+    def set_query_logger(self, logger: Optional["FileBasedQueryLogger"]) -> None:
         """
         Set the file-based query logger for high-throughput persistence.
 
@@ -383,9 +410,7 @@ class TestExecutor:
         """
         self._query_logger = logger
 
-    def _append_query_execution_record(
-        self, record: _QueryExecutionRecord
-    ) -> None:
+    def _append_query_execution_record(self, record: _QueryExecutionRecord) -> None:
         """
         Append a query execution record to in-memory deque and file logger.
 
@@ -631,13 +656,20 @@ class TestExecutor:
         self._custom_pos_by_worker[worker_id] = (pos + 1) % n
         return kind
 
-    async def setup(self) -> bool:
+    async def setup(
+        self, validation_results: dict[str, dict[str, Any]] | None = None
+    ) -> bool:
         """
         Setup test environment.
 
         - Create table managers
-        - Setup tables
+        - Setup tables (or use cached validation results)
         - Initialize connection pools
+
+        Args:
+            validation_results: Optional pre-validated table data from orchestrator.
+                If provided, skips redundant schema validation and stats queries.
+                Format: {table_name: {"columns": {...}, "object_type": str, "stats": {...}}}
 
         Returns:
             bool: True if setup successful
@@ -681,38 +713,84 @@ class TestExecutor:
 
             # For Interactive/Hybrid tables, ensure the warehouse is running.
             # Track whether we resumed it so we can suspend it on teardown.
-            if self._benchmark_warehouse_name and sf_pool and self._requires_interactive_warehouse():
-                state = await self._check_warehouse_state(sf_pool, self._benchmark_warehouse_name)
-                logger.info(f"Warehouse {self._benchmark_warehouse_name} state: {state}")
+            if (
+                self._benchmark_warehouse_name
+                and sf_pool
+                and self._requires_interactive_warehouse()
+            ):
+                state = await self._check_warehouse_state(
+                    sf_pool, self._benchmark_warehouse_name
+                )
+                logger.info(
+                    f"Warehouse {self._benchmark_warehouse_name} state: {state}"
+                )
                 if state == "SUSPENDED":
-                    logger.info(f"Resuming suspended warehouse {self._benchmark_warehouse_name} for Interactive/Hybrid table...")
-                    if await self._resume_warehouse(sf_pool, self._benchmark_warehouse_name):
+                    logger.info(
+                        f"Resuming suspended warehouse {self._benchmark_warehouse_name} for Interactive/Hybrid table..."
+                    )
+                    if await self._resume_warehouse(
+                        sf_pool, self._benchmark_warehouse_name
+                    ):
                         self._did_resume_warehouse = True
                         await asyncio.sleep(2)
                     else:
                         self._setup_error = f"Failed to resume suspended warehouse {self._benchmark_warehouse_name}. Please resume it manually or use a running warehouse."
                         return False
                 elif state == "RESUMING":
-                    logger.info(f"Warehouse {self._benchmark_warehouse_name} is resuming, waiting...")
+                    logger.info(
+                        f"Warehouse {self._benchmark_warehouse_name} is resuming, waiting..."
+                    )
                     self._did_resume_warehouse = True
                     await asyncio.sleep(5)
 
-            # Setup tables in parallel
-            setup_tasks = [manager.setup() for manager in self.table_managers]
-            results = await asyncio.gather(*setup_tasks, return_exceptions=True)
+            # Setup tables - use cached validation if available, otherwise run full setup
+            if validation_results:
+                # Use pre-validated results from orchestrator (avoids redundant queries)
+                logger.info("Using pre-validated table data from orchestrator")
+                for manager in self.table_managers:
+                    cached = validation_results.get(manager.table_name)
+                    if cached:
+                        # Populate manager state from cached validation
+                        manager.object_type = cached.get("object_type")
+                        manager._stats = cached.get("stats") or {}
+                        if cached.get("columns"):
+                            manager.config.columns = cached["columns"]
+                        logger.info(
+                            "Loaded cached validation for %s (object_type=%s, rows=%s)",
+                            manager.table_name,
+                            manager.object_type,
+                            manager._stats.get("row_count"),
+                        )
+                    else:
+                        # Fallback to full setup if not in cache
+                        logger.info(
+                            "No cached validation for %s, running full setup",
+                            manager.table_name,
+                        )
+                        ok = await manager.setup()
+                        if not ok:
+                            self._setup_error = (
+                                f"Failed to setup table {manager.table_name}"
+                            )
+                            logger.error(self._setup_error)
+                            return False
+            else:
+                # No cached results - run full validation (parallel)
+                setup_tasks = [manager.setup() for manager in self.table_managers]
+                results = await asyncio.gather(*setup_tasks, return_exceptions=True)
 
-            # Check for failures
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    self._setup_error = f"Failed to setup table {self.table_managers[i].table_name}: {result}"
-                    logger.error(self._setup_error)
-                    return False
-                elif not result:
-                    self._setup_error = (
-                        f"Failed to setup table {self.table_managers[i].table_name}"
-                    )
-                    logger.error(self._setup_error)
-                    return False
+                # Check for failures
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        self._setup_error = f"Failed to setup table {self.table_managers[i].table_name}: {result}"
+                        logger.error(self._setup_error)
+                        return False
+                    elif not result:
+                        self._setup_error = (
+                            f"Failed to setup table {self.table_managers[i].table_name}"
+                        )
+                        logger.error(self._setup_error)
+                        return False
 
             logger.info(
                 f"✅ Test setup complete: {len(self.table_managers)} tables ready"
@@ -725,25 +803,18 @@ class TestExecutor:
                 for m in self.table_managers
             )
             if has_view:
-                workload = self.scenario.workload_type
-                writes_in_workload = workload in (
-                    WorkloadType.WRITE_ONLY,
-                    WorkloadType.READ_HEAVY,
-                    WorkloadType.WRITE_HEAVY,
-                    WorkloadType.MIXED,
-                )
+                # All workloads are now CUSTOM - check if any custom queries include writes
                 writes_in_custom = False
-                if workload == WorkloadType.CUSTOM:
-                    for q in self.scenario.custom_queries or []:
-                        kind = str(q.get("query_kind") or "").strip().upper()
-                        if kind in {"INSERT", "UPDATE"}:
-                            writes_in_custom = True
-                            break
+                for q in self.scenario.custom_queries or []:
+                    kind = str(q.get("query_kind") or "").strip().upper()
+                    if kind in {"INSERT", "UPDATE"}:
+                        writes_in_custom = True
+                        break
 
-                if writes_in_workload or writes_in_custom:
+                if writes_in_custom:
                     self._setup_error = (
-                        f"Selected object is a VIEW, but workload {getattr(workload, 'value', workload)} includes writes. "
-                        "Choose a TABLE or set workload_type=READ_ONLY."
+                        "Selected object is a VIEW, but workload includes writes. "
+                        "Choose a TABLE or remove INSERT/UPDATE from the workload."
                     )
                     logger.error(self._setup_error)
                     return False
@@ -869,17 +940,19 @@ class TestExecutor:
                     base = max_db_id if max_db_id is not None else max_key_id
                     insert_start = int(base) + 1 if base and int(base) > 0 else 1
                     state.insert_id_seq = count(insert_start)
-                    # Also update profile.id_max so per-worker insert sequences use the correct base
+                    # Update profile.id_max so per-worker insert sequences use the correct base
                     # TableProfile is frozen, so we create a new instance with updated id_max
-                    if state.profile and max_db_id is not None:
+                    if state.profile and base and int(base) > 0:
                         from dataclasses import replace
-                        state.profile = replace(state.profile, id_max=max_db_id)
+
+                        state.profile = replace(state.profile, id_max=int(base))
                     logger.info(
-                        "INSERT ID sequence starts at %d for %s (max_db_id=%s, max_key_pool=%s)",
+                        "INSERT ID sequence starts at %d for %s (max_db_id=%s, max_key_pool=%s, profile.id_max=%s)",
                         int(insert_start),
                         full_name,
                         str(max_db_id) if max_db_id is not None else "None",
                         str(max_key_id),
+                        str(state.profile.id_max) if state.profile else "None",
                     )
             return
 
@@ -1317,6 +1390,9 @@ class TestExecutor:
                     # - Never exceed max_workers/pool_size by counting ALL live tasks,
                     #   including stop-signaled ones that are still finishing an in-flight query.
                     if running < target:
+                        pool = getattr(self, "_snowflake_pool_override", None)
+                        if pool is not None and hasattr(pool, "prewarm"):
+                            await pool.prewarm(target)
                         spawn_n = min((target - running), max(0, target - live))
                         for _ in range(spawn_n):
                             await _spawn_one(warmup=warmup)
@@ -2037,6 +2113,9 @@ class TestExecutor:
                     running = len(running_ids)
 
                     if running < target:
+                        pool = getattr(self, "_snowflake_pool_override", None)
+                        if pool is not None and hasattr(pool, "prewarm"):
+                            await pool.prewarm(target)
                         for _ in range(target - running):
                             await _fmc_spawn_one(warmup=warmup)
                     elif running > target:
@@ -2845,7 +2924,9 @@ class TestExecutor:
 
             # If we resumed a suspended Interactive/Hybrid warehouse, suspend it to save costs.
             if self._did_resume_warehouse and self._benchmark_warehouse_name:
-                logger.info(f"Suspending warehouse {self._benchmark_warehouse_name} (we resumed it on startup)...")
+                logger.info(
+                    f"Suspending warehouse {self._benchmark_warehouse_name} (we resumed it on startup)..."
+                )
                 sf_pool = None
                 for manager in self.table_managers:
                     pool = getattr(manager, "pool", None)
@@ -2853,7 +2934,9 @@ class TestExecutor:
                         sf_pool = pool
                         break
                 if sf_pool:
-                    await self._suspend_warehouse(sf_pool, self._benchmark_warehouse_name)
+                    await self._suspend_warehouse(
+                        sf_pool, self._benchmark_warehouse_name
+                    )
 
             logger.info("✅ Test teardown complete")
             return True
@@ -3023,850 +3106,9 @@ class TestExecutor:
         """
         await self._execute_custom(worker_id, warmup)
 
-    async def _execute_read(self, worker_id: int, warmup: bool = False):
-        """Execute read operation."""
-        start_wall = datetime.now(UTC)
-        start_perf = time.perf_counter()
-        epoch_at_start = int(self._metrics_epoch)
-
-        query: str = ""
-        params: Optional[list] = None
-        query_kind = "RANGE_SCAN"
-        full_name: str | None = None
-        pool = None
-
-        try:
-            # Select random table
-            import random
-
-            manager = random.choice(self.table_managers)
-            full_name = manager.get_full_table_name()
-            pool = getattr(manager, "pool", None)
-
-            batch_size = self.scenario.read_batch_size
-            self._table_state.setdefault(full_name, _TableRuntimeState())
-            state = self._table_state[full_name]
-            profile = state.profile
-
-            # Choose read shape:
-            # - Point lookup (by ID) when possible
-            # - Otherwise range scan (time-based if possible, else id-based)
-            point_lookup_ratio = (
-                self.scenario.point_lookup_ratio
-                if hasattr(self.scenario, "point_lookup_ratio")
-                else 0.5
-            )
-            do_point_lookup = random.random() < point_lookup_ratio
-            used_point_lookup = False
-
-            if (
-                profile
-                and profile.id_column
-                and do_point_lookup
-                and (
-                    bool(self._pool_values("KEY", profile.id_column))
-                    or (
-                        profile.id_min is not None
-                        and profile.id_max is not None
-                        and profile.id_max >= profile.id_min
-                    )
-                )
-            ):
-                pooled = self._next_from_pool(worker_id, "KEY", profile.id_column)
-                if pooled is None:
-                    row_id = random.randint(profile.id_min, profile.id_max)  # type: ignore[arg-type]
-                else:
-                    row_id = pooled
-                select_list = self._select_list_sql()
-                id_col_quoted = self._quote_column(profile.id_column, pool)
-                query = (
-                    f"SELECT {select_list} FROM {full_name} WHERE {id_col_quoted} = ?"
-                )
-                params = [row_id]
-                used_point_lookup = True
-                query_kind = "POINT_LOOKUP"
-            else:
-                query, params = self._build_range_scan(
-                    full_name, profile, batch_size, worker_id=worker_id, pool=pool
-                )
-
-            # Execute query via pool
-            sf_execution_ms: Optional[float] = None
-            if pool is not None:
-                if hasattr(pool, "execute_query_with_info"):
-                    # Snowflake
-                    query = self._annotate_query_for_sf_kind(query, query_kind)
-                    result, info = await pool.execute_query_with_info(
-                        query, params=params, fetch=True
-                    )
-                    sf_query_id = str(info.get("query_id") or "")
-                    sf_rowcount = info.get("rowcount")
-                    sf_execution_ms = info.get("total_elapsed_time_ms")
-                else:
-                    # Postgres - use execute_query_with_info for timing breakdown
-                    result, info = await pool.execute_query_with_info(
-                        query, params=params, fetch=True
-                    )
-                    sf_query_id = f"LOCAL_{uuid4()}"
-                    sf_rowcount = info.get("rowcount")
-                    sf_execution_ms = info.get("total_elapsed_time_ms")
-
-                end_wall = datetime.now(UTC)
-                app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
-
-                # Update metrics
-                duration_ms = app_elapsed_ms
-
-                # Always update the real-time counters used by the websocket + METRICS_SNAPSHOTS,
-                # including during warmup. We still reset metrics after warmup so the final
-                # summary remains measurement-window only.
-                counted = False
-                async with self._metrics_lock:
-                    if int(self._metrics_epoch) == int(epoch_at_start):
-                        counted = True
-                        self.metrics.total_operations += 1
-                        self.metrics.successful_operations += 1
-                        self.metrics.read_metrics.count += 1
-                        self.metrics.read_metrics.success_count += 1
-                        self.metrics.read_metrics.total_duration_ms += duration_ms
-                        self.metrics.rows_read += len(result)
-                        self._latencies_ms.append(duration_ms)
-                        if (
-                            self._find_max_step_collecting
-                            and query_kind in self._find_max_step_ops_by_kind
-                        ):
-                            self._find_max_step_ops_by_kind[query_kind] = (
-                                int(self._find_max_step_ops_by_kind.get(query_kind, 0))
-                                + 1
-                            )
-                            self._find_max_step_lat_by_kind_ms[query_kind].append(
-                                duration_ms
-                            )
-                        if sf_execution_ms is not None and sf_execution_ms >= 0:
-                            self._latency_sf_execution_ms.append(sf_execution_ms)
-                            network_overhead = max(
-                                0.0, app_elapsed_ms - sf_execution_ms
-                            )
-                            self._latency_network_overhead_ms.append(network_overhead)
-
-                # Summary-only breakdowns exclude warmup.
-                if counted and not warmup:
-                    if used_point_lookup:
-                        self._point_lookup_count += 1
-                    else:
-                        self._range_scan_count += 1
-
-                    self._lat_read_ms.append(duration_ms)
-                    self._lat_by_kind_ms[query_kind].append(duration_ms)
-
-                # Capture per-operation record if enabled for this scenario.
-                #
-                # Even when full query history capture is disabled, we still capture warmup
-                # operations so they can be persisted for troubleshooting / visibility.
-                if warmup or getattr(self.scenario, "collect_query_history", False):
-                    pool_obj = getattr(manager, "pool", None)
-                    pool_warehouse = (
-                        str(getattr(pool_obj, "warehouse", "")).strip() or None
-                    )
-                    network_overhead_ms = None
-                    if sf_execution_ms is not None and sf_execution_ms >= 0:
-                        network_overhead_ms = max(0.0, app_elapsed_ms - sf_execution_ms)
-                    self._append_query_execution_record(
-                        _QueryExecutionRecord(
-                            execution_id=str(uuid4()),
-                            test_id=str(self.test_id),
-                            query_id=sf_query_id or f"LOCAL_{uuid4()}",
-                            query_text=query,
-                            start_time=start_wall,
-                            end_time=end_wall,
-                            duration_ms=app_elapsed_ms,
-                            success=True,
-                            error=None,
-                            warehouse=pool_warehouse,
-                            rows_affected=int(sf_rowcount)
-                            if sf_rowcount is not None
-                            else len(result),
-                            bytes_scanned=None,
-                            connection_id=None,
-                            custom_metadata={
-                                "rows_returned": len(result),
-                                "network_overhead_ms": network_overhead_ms,
-                            },
-                            query_kind=query_kind,
-                            worker_id=worker_id,
-                            warmup=warmup,
-                            app_elapsed_ms=app_elapsed_ms,
-                            sf_execution_ms=sf_execution_ms,
-                        )
-                    )
-
-        except Exception as e:
-            end_wall = datetime.now(UTC)
-            app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
-            # Per-operation SQL failures are expected under load (locks/timeouts, etc).
-            # Do not log each failure individually; rely on aggregated metrics/logging.
-
-            # Track failures during warmup too (metrics are reset after warmup).
-            category = self._classify_sql_error(e)
-            counted = False
-            sample_n: int | None = None
-            async with self._metrics_lock:
-                if int(self._metrics_epoch) == int(epoch_at_start):
-                    counted = True
-                    self.metrics.total_operations += 1
-                    self.metrics.failed_operations += 1
-                    self.metrics.read_metrics.count += 1
-                    self.metrics.read_metrics.error_count += 1
-                    if (
-                        self._find_max_step_collecting
-                        and query_kind in self._find_max_step_ops_by_kind
-                    ):
-                        self._find_max_step_ops_by_kind[query_kind] = (
-                            int(self._find_max_step_ops_by_kind.get(query_kind, 0)) + 1
-                        )
-                        self._find_max_step_errors_by_kind[query_kind] = (
-                            int(self._find_max_step_errors_by_kind.get(query_kind, 0))
-                            + 1
-                        )
-                    self._sql_error_categories[category] = (
-                        int(self._sql_error_categories.get(category, 0)) + 1
-                    )
-                    sample_n = int(self._sql_error_sample_counts.get(category, 0)) + 1
-                    self._sql_error_sample_counts[category] = int(sample_n)
-
-            # Sampled detailed log (first 10 per category per run) for debugging.
-            if counted and sample_n is not None and int(sample_n) <= 10:
-                backend = "unknown"
-                try:
-                    if pool is not None and self._is_postgres_pool(pool):
-                        backend = "postgres"
-                    elif pool is not None and hasattr(pool, "warehouse"):
-                        backend = "snowflake"
-                except Exception:
-                    backend = "unknown"
-
-                payload = {
-                    "category": category,
-                    "sample_n": int(sample_n),
-                    "sample_max": 10,
-                    "backend": backend,
-                    "query_kind": str(query_kind or ""),
-                    "table": str(full_name or ""),
-                    "worker_id": int(worker_id),
-                    "warmup": bool(warmup),
-                    "elapsed_ms": round(float(app_elapsed_ms), 2),
-                    "exception": {
-                        "type": type(e).__name__,
-                        "message": self._truncate_str_for_log(e, max_chars=800),
-                        **self._sql_error_meta_for_log(e),
-                    },
-                    "query": self._preview_query_for_log(query, max_chars=2000),
-                    "params": self._preview_params_for_log(
-                        cast(Optional[list[Any]], params),
-                        max_items=10,
-                        max_value_chars=200,
-                    ),
-                }
-                logger.warning(
-                    "SQL_ERROR_SAMPLE %s",
-                    json.dumps(payload, ensure_ascii=False),
-                )
-
-                is_critical, critical_msg = self._is_critical_config_error(category, e)
-                if is_critical and self._setup_error is None:
-                    self._setup_error = critical_msg
-                    logger.error("CRITICAL_CONFIG_ERROR: %s", critical_msg)
-
-            self._append_query_execution_record(
-                _QueryExecutionRecord(
-                    execution_id=str(uuid4()),
-                    test_id=str(self.test_id),
-                    query_id=f"LOCAL_{uuid4()}",
-                    query_text=query or "READ_FAILED",
-                    start_time=start_wall,
-                    end_time=end_wall,
-                    duration_ms=app_elapsed_ms,
-                    success=False,
-                    error=str(e),
-                    warehouse=None,
-                    rows_affected=None,
-                    bytes_scanned=None,
-                    connection_id=None,
-                    custom_metadata={"params_count": len(params or [])},
-                    query_kind=query_kind,
-                    worker_id=worker_id,
-                    warmup=warmup,
-                    app_elapsed_ms=app_elapsed_ms,
-                )
-            )
-
-    def _build_range_scan(
-        self,
-        full_name: str,
-        profile: Optional[TableProfile],
-        batch_size: int,
-        range_width: int = 100,
-        *,
-        worker_id: int = 0,
-        pool=None,
-    ) -> tuple[str, Optional[list]]:
-        import random
-
-        if profile and profile.time_column and profile.time_max is not None:
-            # Prefer a persisted pool of cutoffs (reduces identical range scans under concurrency).
-            pooled = self._next_from_pool(worker_id, "RANGE", profile.time_column)
-            if pooled is not None:
-                cutoff = pooled
-            elif profile.time_min is not None and profile.time_min < profile.time_max:
-                # Pick a cutoff inside [min,max] so it should match some data.
-                #
-                # Randomize the choice (vs a constant midpoint) to avoid accidentally
-                # generating identical range scans when RANGE pools are absent.
-                span = profile.time_max - profile.time_min
-                cutoff = profile.time_min + (span * random.random())
-            else:
-                cutoff = profile.time_max - timedelta(days=7)
-
-            select_list = self._select_list_sql()
-            time_col_quoted = self._quote_column(profile.time_column, pool)
-            query = (
-                f"SELECT {select_list} FROM {full_name} WHERE {time_col_quoted} >= ? "
-                f"ORDER BY {time_col_quoted} DESC LIMIT {batch_size}"
-            )
-            return query, [cutoff]
-
-        if (
-            profile
-            and profile.id_column
-            and profile.id_min is not None
-            and profile.id_max is not None
-        ):
-            start_id = profile.id_min
-            if profile.id_max > profile.id_min + range_width:
-                start_id = random.randint(profile.id_min, profile.id_max - range_width)
-            end_id = start_id + range_width
-
-            select_list = self._select_list_sql()
-            id_col_quoted = self._quote_column(profile.id_column, pool)
-            query = (
-                f"SELECT {select_list} FROM {full_name} WHERE {id_col_quoted} BETWEEN ? AND ? "
-                f"ORDER BY {id_col_quoted} LIMIT {batch_size}"
-            )
-            return query, [start_id, end_id]
-
-        select_list = self._select_list_sql()
-        return f"SELECT {select_list} FROM {full_name} LIMIT {batch_size}", None
-
-    async def _execute_write(self, worker_id: int, warmup: bool = False):
-        """Execute write operation."""
-        start_wall = datetime.now(UTC)
-        start_perf = time.perf_counter()
-        epoch_at_start = int(self._metrics_epoch)
-
-        query: str = ""
-        params: Optional[list] = None
-        query_kind = "INSERT"
-        rows_written = 0
-        full_name: str | None = None
-        pool = None
-
-        try:
-            # Select random table
-            import random
-
-            manager = random.choice(self.table_managers)
-            full_name = manager.get_full_table_name()
-            pool = getattr(manager, "pool", None)
-            self._table_state.setdefault(full_name, _TableRuntimeState())
-            state = self._table_state[full_name]
-            profile = state.profile
-
-            # Decide between insert/update. If update_ratio isn't set, default to 30% updates.
-            update_ratio = (
-                self.scenario.update_ratio if self.scenario.update_ratio > 0 else 0.3
-            )
-            do_update = (
-                profile is not None
-                and profile.id_column is not None
-                and (
-                    bool(self._pool_values("KEY", profile.id_column))
-                    or (
-                        profile.id_min is not None
-                        and profile.id_max is not None
-                        and profile.id_max >= profile.id_min
-                    )
-                )
-                and random.random() < update_ratio
-            )
-
-            if do_update:
-                # `do_update` guarantees profile is present and has id bounds.
-                if profile is None:
-                    raise ValueError(
-                        "Internal error: do_update=True but profile is None"
-                    )
-                if full_name is None:
-                    raise ValueError("Internal error: missing table name for UPDATE")
-                query, params = self._build_update(
-                    full_name, manager, profile, pool=pool
-                )
-                rows_written = 1
-                query_kind = "UPDATE"
-                if not warmup:
-                    self._update_count += 1
-            else:
-                query, params = self._build_insert(full_name, manager, state, pool=pool, worker_id=worker_id)
-                rows_written = self.scenario.write_batch_size
-                query_kind = "INSERT"
-                if not warmup:
-                    self._insert_count += 1
-
-            # Execute write
-            sf_execution_ms: Optional[float] = None
-            if pool is not None:
-                if hasattr(pool, "execute_query_with_info"):
-                    # Snowflake
-                    query = self._annotate_query_for_sf_kind(query, query_kind)
-                    _, info = await pool.execute_query_with_info(
-                        query, params=params, fetch=False
-                    )
-                    sf_query_id = str(info.get("query_id") or "")
-                    sf_rowcount = info.get("rowcount")
-                    sf_execution_ms = info.get("total_elapsed_time_ms")
-                else:
-                    # Postgres - use execute_query_with_info for timing breakdown
-                    _, info = await pool.execute_query_with_info(
-                        query, params=params, fetch=False
-                    )
-                    sf_query_id = f"LOCAL_{uuid4()}"
-                    sf_rowcount = info.get("rowcount")
-                    sf_execution_ms = info.get("total_elapsed_time_ms")
-
-                end_wall = datetime.now(UTC)
-                app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
-
-                # Update metrics
-                duration_ms = app_elapsed_ms
-
-                # Always update the real-time counters used by the websocket + METRICS_SNAPSHOTS,
-                # including during warmup. We still reset metrics after warmup so the final
-                # summary remains measurement-window only.
-                counted = False
-                async with self._metrics_lock:
-                    if int(self._metrics_epoch) == int(epoch_at_start):
-                        counted = True
-                        self.metrics.total_operations += 1
-                        self.metrics.successful_operations += 1
-                        self.metrics.write_metrics.count += 1
-                        self.metrics.write_metrics.success_count += 1
-                        self.metrics.write_metrics.total_duration_ms += duration_ms
-                        self.metrics.rows_written += rows_written
-                        self._latencies_ms.append(duration_ms)
-                        if (
-                            self._find_max_step_collecting
-                            and query_kind in self._find_max_step_ops_by_kind
-                        ):
-                            self._find_max_step_ops_by_kind[query_kind] = (
-                                int(self._find_max_step_ops_by_kind.get(query_kind, 0))
-                                + 1
-                            )
-                            self._find_max_step_lat_by_kind_ms[query_kind].append(
-                                duration_ms
-                            )
-                        if sf_execution_ms is not None and sf_execution_ms >= 0:
-                            self._latency_sf_execution_ms.append(sf_execution_ms)
-                            network_overhead = max(
-                                0.0, app_elapsed_ms - sf_execution_ms
-                            )
-                            self._latency_network_overhead_ms.append(network_overhead)
-
-                # Summary-only breakdowns exclude warmup.
-                if counted and not warmup:
-                    self._latencies_measurement_ms.append(duration_ms)
-                    self._lat_write_ms.append(duration_ms)
-                    self._lat_by_kind_ms[query_kind].append(duration_ms)
-
-                if warmup or getattr(self.scenario, "collect_query_history", False):
-                    pool_obj = getattr(manager, "pool", None)
-                    pool_warehouse = (
-                        str(getattr(pool_obj, "warehouse", "")).strip() or None
-                    )
-                    network_overhead_ms = None
-                    if sf_execution_ms is not None and sf_execution_ms >= 0:
-                        network_overhead_ms = max(0.0, app_elapsed_ms - sf_execution_ms)
-                    self._append_query_execution_record(
-                        _QueryExecutionRecord(
-                            execution_id=str(uuid4()),
-                            test_id=str(self.test_id),
-                            query_id=sf_query_id or f"LOCAL_{uuid4()}",
-                            query_text=query,
-                            start_time=start_wall,
-                            end_time=end_wall,
-                            duration_ms=app_elapsed_ms,
-                            success=True,
-                            error=None,
-                            warehouse=pool_warehouse,
-                            rows_affected=int(sf_rowcount)
-                            if sf_rowcount is not None
-                            else rows_written,
-                            bytes_scanned=None,
-                            connection_id=None,
-                            custom_metadata={
-                                "rows_written": rows_written,
-                                "network_overhead_ms": network_overhead_ms,
-                            },
-                            query_kind=query_kind,
-                            worker_id=worker_id,
-                            warmup=warmup,
-                            app_elapsed_ms=app_elapsed_ms,
-                            sf_execution_ms=sf_execution_ms,
-                        )
-                    )
-
-        except Exception as e:
-            end_wall = datetime.now(UTC)
-            app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0
-            # Per-operation SQL failures are expected under load (locks/timeouts, etc).
-            # Do not log each failure individually; rely on aggregated metrics/logging.
-
-            # Track failures during warmup too (metrics are reset after warmup).
-            category = self._classify_sql_error(e)
-            counted = False
-            sample_n: int | None = None
-            async with self._metrics_lock:
-                if int(self._metrics_epoch) == int(epoch_at_start):
-                    counted = True
-                    self.metrics.total_operations += 1
-                    self.metrics.failed_operations += 1
-                    self.metrics.write_metrics.count += 1
-                    self.metrics.write_metrics.error_count += 1
-                    if (
-                        self._find_max_step_collecting
-                        and query_kind in self._find_max_step_ops_by_kind
-                    ):
-                        self._find_max_step_ops_by_kind[query_kind] = (
-                            int(self._find_max_step_ops_by_kind.get(query_kind, 0)) + 1
-                        )
-                        self._find_max_step_errors_by_kind[query_kind] = (
-                            int(self._find_max_step_errors_by_kind.get(query_kind, 0))
-                            + 1
-                        )
-                    self._sql_error_categories[category] = (
-                        int(self._sql_error_categories.get(category, 0)) + 1
-                    )
-                    sample_n = int(self._sql_error_sample_counts.get(category, 0)) + 1
-                    self._sql_error_sample_counts[category] = int(sample_n)
-
-            if counted and sample_n is not None and int(sample_n) <= 10:
-                backend = "unknown"
-                try:
-                    if pool is not None and self._is_postgres_pool(pool):
-                        backend = "postgres"
-                    elif pool is not None and hasattr(pool, "warehouse"):
-                        backend = "snowflake"
-                except Exception:
-                    backend = "unknown"
-
-                payload = {
-                    "category": category,
-                    "sample_n": int(sample_n),
-                    "sample_max": 10,
-                    "backend": backend,
-                    "query_kind": str(query_kind or ""),
-                    "table": str(full_name or ""),
-                    "worker_id": int(worker_id),
-                    "warmup": bool(warmup),
-                    "elapsed_ms": round(float(app_elapsed_ms), 2),
-                    "exception": {
-                        "type": type(e).__name__,
-                        "message": self._truncate_str_for_log(e, max_chars=800),
-                        **self._sql_error_meta_for_log(e),
-                    },
-                    "query": self._preview_query_for_log(query, max_chars=2000),
-                    "params": self._preview_params_for_log(
-                        cast(Optional[list[Any]], params),
-                        max_items=10,
-                        max_value_chars=200,
-                    ),
-                }
-                logger.warning(
-                    "SQL_ERROR_SAMPLE %s",
-                    json.dumps(payload, ensure_ascii=False),
-                )
-
-                is_critical, critical_msg = self._is_critical_config_error(category, e)
-                if is_critical and self._setup_error is None:
-                    self._setup_error = critical_msg
-                    logger.error("CRITICAL_CONFIG_ERROR: %s", critical_msg)
-
-            self._append_query_execution_record(
-                _QueryExecutionRecord(
-                    execution_id=str(uuid4()),
-                    test_id=str(self.test_id),
-                    query_id=f"LOCAL_{uuid4()}",
-                    query_text=query or "WRITE_FAILED",
-                    start_time=start_wall,
-                    end_time=end_wall,
-                    duration_ms=app_elapsed_ms,
-                    success=False,
-                    error=str(e),
-                    warehouse=None,
-                    rows_affected=None,
-                    bytes_scanned=None,
-                    connection_id=None,
-                    custom_metadata={"params_count": len(params or [])},
-                    query_kind=query_kind,
-                    worker_id=worker_id,
-                    warmup=warmup,
-                    app_elapsed_ms=app_elapsed_ms,
-                )
-            )
-
     def get_query_execution_records(self) -> list[_QueryExecutionRecord]:
         """Get captured per-operation records (including warmup if enabled)."""
         return list(self._query_execution_records)
-
-    def _build_insert(
-        self,
-        full_name: str,
-        manager: TableManager,
-        state: _TableRuntimeState,
-        pool=None,
-        worker_id: int = 0,
-    ) -> tuple[str, Optional[list]]:
-        import random
-
-        columns = list(manager.config.columns.keys())
-        batch_size = self.scenario.write_batch_size
-        id_col = state.profile.id_column if state.profile else None
-        is_postgres = self._is_postgres_pool(pool)
-        use_params = hasattr(getattr(manager, "pool", None), "execute_query_with_info")
-
-        # If template specifies explicit insert columns, honor them.
-        tpl_cfg = getattr(self, "_template_config", None)
-        if isinstance(tpl_cfg, dict):
-            ai_cfg = tpl_cfg.get("ai_workload")
-            if isinstance(ai_cfg, dict) and isinstance(
-                ai_cfg.get("insert_columns"), list
-            ):
-                desired = [
-                    str(c).upper()
-                    for c in ai_cfg.get("insert_columns")
-                    if str(c).strip()
-                ]
-                available = {str(c).upper() for c in manager.config.columns.keys()}
-                chosen = [c for c in desired if c in available]
-                if chosen:
-                    columns = chosen
-                    # Ensure key column is inserted if required.
-                    if (
-                        id_col
-                        and id_col.upper() in available
-                        and id_col.upper() not in columns
-                    ):
-                        columns = [id_col.upper(), *columns]
-
-        if not use_params:
-            # Legacy literal SQL path (used by non-Snowflake pools)
-            values_list: list[str] = []
-            for _ in range(batch_size):
-                row_values: list[str] = []
-                for col in columns:
-                    col_upper = col.upper()
-                    col_type = manager.config.columns[col].upper()
-
-                    if (
-                        id_col
-                        and col_upper == id_col.upper()
-                        and any(
-                            t in col_type
-                            for t in ("NUMBER", "INT", "DECIMAL", "SERIAL")
-                        )
-                    ):
-                        # Use per-worker insert sequences to avoid PK conflicts
-                        if state.insert_id_seqs is None:
-                            state.insert_id_seqs = {}
-                        if worker_id not in state.insert_id_seqs:
-                            duration = (self.scenario.warmup_seconds or 30) + (
-                                self.scenario.duration_seconds or 120
-                            )
-                            range_size = max(duration * 1000 * 10, 100_000)
-                            base = (state.profile.id_max or 0) + 1 if state.profile else 1
-                            start_id = base + (worker_id * range_size)
-                            state.insert_id_seqs[worker_id] = count(start_id)
-                            logger.debug(
-                                "Per-worker INSERT seq for worker %d: start_id=%d (base=%d, id_max=%s, range_size=%d)",
-                                worker_id, start_id, base,
-                                state.profile.id_max if state.profile else None,
-                                range_size,
-                            )
-                        row_values.append(str(next(state.insert_id_seqs[worker_id])))
-                        continue
-
-                    if "TIMESTAMP" in col_type:
-                        row_values.append("CURRENT_TIMESTAMP")
-                    elif "DATE" in col_type:
-                        row_values.append("CURRENT_DATE")
-                    elif (
-                        "NUMBER" in col_type
-                        or "INT" in col_type
-                        or "DECIMAL" in col_type
-                        or "SERIAL" in col_type
-                    ):
-                        row_values.append(str(random.randint(1, 1_000_000)))
-                    elif (
-                        "VARCHAR" in col_type
-                        or "TEXT" in col_type
-                        or "STRING" in col_type
-                    ):
-                        # Keep literals short; this path is primarily for debugging/non-Snowflake pools.
-                        row_values.append(f"'T{random.randint(0, 9)}'")
-                    else:
-                        row_values.append("NULL")
-
-                values_list.append(f"({', '.join(row_values)})")
-
-            # For PostgreSQL, use unquoted lowercase column names
-            if is_postgres:
-                cols_sql = ", ".join(c.lower() for c in columns)
-            else:
-                cols_sql = ", ".join(columns)
-            return (
-                f"INSERT INTO {full_name} ({cols_sql}) VALUES {', '.join(values_list)}",
-                None,
-            )
-
-        # Parameterized Snowflake insert - generate synthetic values.
-        placeholders: list[str] = []
-        params: list[Any] = []
-        for i in range(batch_size):
-            row_ph: list[str] = []
-            for col in columns:
-                col_upper = col.upper()
-                col_type = manager.config.columns[col].upper()
-
-                if id_col and col_upper == id_col.upper():
-                    # Prefer monotonic unique IDs for numeric keys; otherwise use UUID.
-                    if any(
-                        t in col_type for t in ("NUMBER", "INT", "DECIMAL", "SERIAL")
-                    ):
-                        # Use per-worker insert sequences to avoid PK conflicts
-                        if state.insert_id_seqs is None:
-                            state.insert_id_seqs = {}
-                        if worker_id not in state.insert_id_seqs:
-                            # Partition ID space by worker
-                            duration = (self.scenario.warmup_seconds or 30) + (
-                                self.scenario.duration_seconds or 120
-                            )
-                            range_size = max(duration * 1000 * 10, 100_000)
-                            base = (state.profile.id_max or 0) + 1 if state.profile else 1
-                            start_id = base + (worker_id * range_size)
-                            state.insert_id_seqs[worker_id] = count(start_id)
-                            logger.debug(
-                                "Per-worker INSERT seq (SF path) for worker %d: start_id=%d (id_max=%s)",
-                                worker_id, start_id,
-                                state.profile.id_max if state.profile else None,
-                            )
-                        params.append(next(state.insert_id_seqs[worker_id]))
-                    else:
-                        params.append(str(uuid4()))
-                    row_ph.append("?")
-                    continue
-
-                if "TIMESTAMP" in col_type:
-                    params.append(datetime.now(UTC))
-                elif "DATE" in col_type:
-                    params.append(datetime.now(UTC).date())
-                elif (
-                    "NUMBER" in col_type
-                    or "INT" in col_type
-                    or "DECIMAL" in col_type
-                    or "SERIAL" in col_type
-                ):
-                    params.append(random.randint(1, 1000000))
-                elif (
-                    "VARCHAR" in col_type or "TEXT" in col_type or "STRING" in col_type
-                ):
-                    params.append(f"TEST_{random.randint(1, 1000000)}")
-                else:
-                    params.append(None)
-                row_ph.append("?")
-
-            placeholders.append(f"({', '.join(row_ph)})")
-
-        # For PostgreSQL, use unquoted lowercase column names
-        if is_postgres:
-            cols_sql = ", ".join(c.lower() for c in columns)
-        else:
-            cols_sql = ", ".join(f'"{c.upper()}"' for c in columns)
-        query = f"INSERT INTO {full_name} ({cols_sql}) VALUES {', '.join(placeholders)}"
-        return query, params
-
-    def _build_update(
-        self, full_name: str, manager: TableManager, profile: TableProfile, pool=None
-    ) -> tuple[str, list]:
-        import random
-
-        if not profile.id_column:
-            raise ValueError("Cannot build update without id_column")
-        id_col = str(profile.id_column)
-
-        # Prefer pooled keys if available.
-        pooled = self._next_from_pool(0, "KEY", id_col)
-        if pooled is not None:
-            target_id = pooled
-        elif profile.id_min is not None and profile.id_max is not None:
-            target_id = random.randint(profile.id_min, profile.id_max)
-        else:
-            raise ValueError("Cannot build update without key pool or id_min/id_max")
-
-        # If template specifies update columns, honor that first.
-        tpl_cfg = getattr(self, "_template_config", None)
-        update_cols = []
-        if isinstance(tpl_cfg, dict):
-            ai_cfg = tpl_cfg.get("ai_workload")
-            if isinstance(ai_cfg, dict) and isinstance(
-                ai_cfg.get("update_columns"), list
-            ):
-                update_cols = [
-                    str(c).upper()
-                    for c in ai_cfg.get("update_columns")
-                    if str(c).strip()
-                ]
-
-        is_postgres = self._is_postgres_pool(pool)
-        candidates = update_cols or [c.upper() for c in manager.config.columns.keys()]
-        for col_upper in candidates:
-            if col_upper == id_col.upper():
-                continue
-            col_type_raw = manager.config.columns.get(
-                col_upper
-            ) or manager.config.columns.get(col_upper.lower())
-            col_type = str(col_type_raw or "").upper()
-
-            id_col_quoted = self._quote_column(id_col, pool)
-            col_name = col_upper.lower() if is_postgres else col_upper
-            col_quoted = self._quote_column(col_name, pool)
-
-            if "TIMESTAMP" in col_type or "DATE" in col_type:
-                query = f"UPDATE {full_name} SET {col_quoted} = CURRENT_TIMESTAMP WHERE {id_col_quoted} = ?"
-                return query, [target_id]
-
-            if "VARCHAR" in col_type or "TEXT" in col_type or "STRING" in col_type:
-                query = (
-                    f"UPDATE {full_name} SET {col_quoted} = ? WHERE {id_col_quoted} = ?"
-                )
-                return query, [f"TEST_{random.randint(1, 1000000)}", target_id]
-
-            if "NUMBER" in col_type or "INT" in col_type or "DECIMAL" in col_type:
-                query = (
-                    f"UPDATE {full_name} SET {col_quoted} = ? WHERE {id_col_quoted} = ?"
-                )
-                return query, [random.randint(1, 1000000), target_id]
-
-        id_col_quoted = self._quote_column(id_col, pool)
-        query = f"UPDATE {full_name} SET {id_col_quoted} = {id_col_quoted} WHERE {id_col_quoted} = ?"
-        return query, [target_id]
 
     async def _execute_custom(self, worker_id: int, warmup: bool = False):
         """
@@ -4138,22 +3380,34 @@ class TestExecutor:
                         if state.insert_id_seqs is None:
                             state.insert_id_seqs = {}
                         if worker_id not in state.insert_id_seqs:
-                            # Partition ID space by worker
-                            # Estimate range based on test duration:
-                            # - 1000 inserts/sec max (conservative)
-                            # - 10x safety factor
-                            # - Minimum 100K for short tests
+                            # Partition ID space by worker process AND worker_id within process.
+                            # Each worker process gets a separate ID range, and within that,
+                            # each worker_id (concurrent connection) gets its own sub-range.
+                            #
+                            # Layout: base + (group_id * group_range) + (worker_id * per_worker_range)
+                            # This ensures no overlap even with multiple processes.
                             duration = (self.scenario.warmup_seconds or 30) + (
                                 self.scenario.duration_seconds or 120
                             )
-                            range_size = max(duration * 1000 * 10, 100_000)
+                            per_worker_range = max(duration * 1000 * 10, 100_000)
+                            # Max workers per process (conservative estimate)
+                            max_workers_per_group = max(
+                                self.scenario.total_threads, 500
+                            )
+                            group_range = per_worker_range * max_workers_per_group
+
                             base = (profile.id_max or 0) + 1
-                            start_id = base + (worker_id * range_size)
+                            group_offset = self._worker_group_id * group_range
+                            worker_offset = worker_id * per_worker_range
+                            start_id = base + group_offset + worker_offset
                             state.insert_id_seqs[worker_id] = count(start_id)
                             logger.debug(
-                                "Per-worker INSERT seq (CUSTOM path) for worker %d: start_id=%d (id_max=%s)",
-                                worker_id, start_id,
+                                "Per-worker INSERT seq (CUSTOM path) group=%d worker=%d: start_id=%d (id_max=%s, group_range=%d)",
+                                self._worker_group_id,
+                                worker_id,
+                                start_id,
                                 profile.id_max if profile else None,
+                                group_range,
                             )
                         params.append(next(state.insert_id_seqs[worker_id]))
                     else:
@@ -4622,7 +3876,9 @@ class TestExecutor:
                                     active_tagged = int(
                                         active_pl + active_rs + active_ins + active_upd
                                     )
-                                    active_other = max(0, int(active) - int(active_tagged))
+                                    active_other = max(
+                                        0, int(active) - int(active_tagged)
+                                    )
                                     self._postgres_query_status = {
                                         "sample_mono": float(sample_mono),
                                         "running": active,  # Map to same field name as Snowflake
@@ -4643,7 +3899,9 @@ class TestExecutor:
 
                         self._last_postgres_query_status_mono = now_mono
                         self._postgres_query_status_task = asyncio.create_task(
-                            _sample_postgres_query_status(self._postgres_pool_for_polling)
+                            _sample_postgres_query_status(
+                                self._postgres_pool_for_polling
+                            )
                         )
 
                 # Update elapsed time

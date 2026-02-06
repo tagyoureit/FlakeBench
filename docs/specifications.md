@@ -70,7 +70,7 @@ implementation. It fills gaps identified during plan review.
 
 ## Templates and Workloads
 
-- Templates are stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`.
+- Templates are stored in `FLAKEBENCH.TEST_RESULTS.TEST_TEMPLATES`.
 - All UI runs are template-based; there is no ad-hoc run UI.
 - Workload presets (READ_ONLY / WRITE_ONLY / READ_HEAVY / WRITE_HEAVY / MIXED) are
   UI convenience defaults only. The backend normalizes presets to `CUSTOM` on
@@ -85,7 +85,7 @@ implementation. It fills gaps identified during plan review.
 ## Post-Run Enrichment Notes
 
 - Enrichment merges `INFORMATION_SCHEMA.QUERY_HISTORY` into `QUERY_EXECUTIONS`
-  using the per-test query tag prefix (`unistore_benchmark:test_id=<id>%`).
+  using the per-test query tag prefix (`flakebench:test_id=<id>%`).
 - QUERY_HISTORY table functions return a maximum of 10,000 rows per call;
   enrichment paginates by `END_TIME` until it passes the test window.
 - `update_test_overhead_percentiles()` computes app overhead percentiles and
@@ -888,7 +888,7 @@ uv run python scripts/acceptance_test_multinode.py
 
 - No DDL is executed at runtime.
 - Schema changes are rerunnable DDL in `sql/schema/`.
-- Templates remain stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES`
+- Templates remain stored in `FLAKEBENCH.TEST_RESULTS.TEST_TEMPLATES`
   with `CONFIG` as the authoritative payload.
 - Snowflake is the authoritative results store.
 - No schema versioning - complete migration, single payload structure.

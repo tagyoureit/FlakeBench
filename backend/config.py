@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     SNOWFLAKE_USER: str = "your_username"
     SNOWFLAKE_PASSWORD: str = ""
     SNOWFLAKE_WAREHOUSE: str = "COMPUTE_WH"
-    SNOWFLAKE_DATABASE: str = "UNISTORE_BENCHMARK"
+    SNOWFLAKE_DATABASE: str = "FLAKEBENCH"
     SNOWFLAKE_SCHEMA: str = "PUBLIC"
     SNOWFLAKE_ROLE: str = "ACCOUNTADMIN"
 
@@ -131,10 +131,10 @@ class Settings(BaseSettings):
     # ========================================================================
     # Storage Settings
     # ========================================================================
-    RESULTS_DATABASE: str = "UNISTORE_BENCHMARK"
+    RESULTS_DATABASE: str = "FLAKEBENCH"
     RESULTS_SCHEMA: str = "TEST_RESULTS"
 
-    TEMP_DIR: str = "/tmp/unistore_benchmark"
+    TEMP_DIR: str = "/tmp/flakebench"
 
     # ========================================================================
     # Security Settings
@@ -164,7 +164,7 @@ class Settings(BaseSettings):
     # Logging Settings
     # ========================================================================
     LOG_LEVEL: str = "INFO"
-    LOG_FILE: str = "unistore_benchmark.log"
+    LOG_FILE: str = "flakebench.log"
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
     # ========================================================================

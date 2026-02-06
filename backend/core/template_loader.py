@@ -19,6 +19,7 @@ from backend.models.test_config import (
     TestScenario,
     WorkloadType,
 )
+from backend.config import settings
 
 
 class TemplateMetadata(BaseModel):
@@ -118,7 +119,7 @@ class TemplateLoader:
         config = TableConfig(
             name=table_data.get("name", "test_table"),
             table_type=table_type,
-            database=table_data.get("database", "UNISTORE_BENCHMARK"),
+            database=table_data.get("database", settings.SNOWFLAKE_DATABASE),
             schema_name=table_data.get("schema", "PUBLIC"),
             columns=table_data.get("columns", {}),
         )
@@ -188,14 +189,17 @@ class TemplateLoader:
 
         warehouse_config = self.template_to_warehouse_config(data)
 
-        workload_data = data.get("workload", {})
-        workload_type_str = str(workload_data.get("type", "MIXED")).lower()
-        try:
-            workload_type = WorkloadType(workload_type_str)
-        except ValueError:
-            workload_type = WorkloadType.MIXED
+        # All workloads now use CUSTOM - legacy types are no longer supported
+        workload_type = WorkloadType.CUSTOM
 
         test_data = data.get("test", {})
+
+        # FIND_MAX mode doesn't use concurrent_connections - it discovers the max dynamically
+        load_mode = str(test_data.get("load_mode", "CONCURRENCY")).strip().upper()
+        if load_mode == "FIND_MAX_CONCURRENCY":
+            concurrent_connections = test_data.get("concurrent_connections")  # No default
+        else:
+            concurrent_connections = test_data.get("concurrent_connections", 10)
 
         scenario = TestScenario(
             name=data.get("name", template_name),
@@ -204,7 +208,7 @@ class TemplateLoader:
             warehouse_configs=[warehouse_config],
             workload_type=workload_type,
             duration_seconds=test_data.get("duration_seconds", 300),
-            concurrent_connections=test_data.get("concurrent_connections", 10),
+            concurrent_connections=concurrent_connections,
             warmup_seconds=test_data.get("warmup_seconds", 30),
             think_time_ms=test_data.get("think_time_ms", 0),
         )

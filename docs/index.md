@@ -1,4 +1,4 @@
-# Unistore Benchmark Documentation
+# FlakeBench Documentation
 
 This is the human landing page for project docs. For agent-specific guidance,
 see `SKILL.md`.
@@ -24,6 +24,6 @@ see `SKILL.md`.
 
 ## Quick Facts
 
-- Results are stored in Snowflake (`UNISTORE_BENCHMARK.TEST_RESULTS`).
+- Results are stored in Snowflake (`FLAKEBENCH.TEST_RESULTS`).
 - Templates are stored in `TEST_TEMPLATES` with `CONFIG` as the canonical payload.
 - Runs are prepared from templates, then started from the dashboard.

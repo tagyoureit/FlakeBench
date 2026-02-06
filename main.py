@@ -1,5 +1,5 @@
 def main():
-    print("Hello from unistore-benchmark!")
+    print("Hello from flakebench!")
 
 
 if __name__ == "__main__":

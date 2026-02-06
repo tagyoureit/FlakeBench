@@ -269,7 +269,7 @@ class SnowflakeConnectionPool:
 
     def _get_connection_params(self) -> Dict[str, Any]:
         """Get connection parameters for snowflake.connector."""
-        session_params: Dict[str, Any] = {"QUERY_TAG": "unistore_benchmark"}
+        session_params: Dict[str, Any] = {"QUERY_TAG": "flakebench"}
         session_params.update(self._session_parameters)
         params = {
             "account": self.account,
@@ -607,7 +607,7 @@ class SnowflakeConnectionPool:
         Snowflake's QUERY_HISTORY can distinguish warmup vs measurement queries.
 
         Args:
-            new_tag: New QUERY_TAG value (e.g., "unistore_benchmark:test_id=XXX:phase=RUNNING")
+            new_tag: New QUERY_TAG value (e.g., "flakebench:test_id=XXX:phase=RUNNING")
 
         Returns:
             Number of connections successfully updated
@@ -671,9 +671,73 @@ class SnowflakeConnectionPool:
                 "max_overflow": self.max_overflow,
                 "available": len(self._pool),
                 "in_use": len(self._in_use),
+                "pending_creates": self._pending_creates,
                 "total": len(self._pool) + len(self._in_use),
                 "initialized": self._initialized,
             }
+
+    async def prewarm(self, target_size: int) -> int:
+        """
+        Pre-create connections up to target_size in parallel.
+
+        This is useful when scaling up workers dynamically (e.g., FIND_MAX mode)
+        to ensure connections are ready before workers start requesting them.
+        Without prewarming, workers would wait for on-demand connection creation.
+
+        Args:
+            target_size: Target total pool size (available + in_use)
+
+        Returns:
+            Number of new connections created
+        """
+        async with self._lock:
+            current_total = len(self._pool) + len(self._in_use)
+            max_allowed = int(self.pool_size) + int(self.max_overflow)
+            target_size = min(target_size, max_allowed)
+            to_create = max(0, target_size - current_total)
+
+            if to_create == 0:
+                return 0
+
+            logger.info(
+                "[%s] Prewarming pool: creating %d connections (current=%d, target=%d)",
+                self._pool_name,
+                to_create,
+                current_total,
+                target_size,
+            )
+
+        t0 = asyncio.get_running_loop().time()
+        connections: list[SnowflakeConnection | BaseException] = []
+        remaining = to_create
+
+        while remaining > 0:
+            batch_n = min(remaining, self._max_parallel_creates)
+            tasks = [self._create_connection() for _ in range(batch_n)]
+            batch = await asyncio.gather(*tasks, return_exceptions=True)
+            connections.extend(batch)
+            remaining -= batch_n
+
+        created_ok = 0
+        async with self._lock:
+            for conn in connections:
+                if isinstance(conn, BaseException):
+                    logger.warning("Prewarm connection creation failed: %s", conn)
+                else:
+                    self._pool.append(conn)
+                    self._connection_times[id(conn)] = datetime.now()
+                    self._last_health_check[id(conn)] = datetime.now()
+                    created_ok += 1
+
+        elapsed = asyncio.get_running_loop().time() - t0
+        logger.info(
+            "[%s] Prewarm complete: created %d/%d connections in %.2fs",
+            self._pool_name,
+            created_ok,
+            to_create,
+            elapsed,
+        )
+        return created_ok
 
     async def close_all(self):
         """

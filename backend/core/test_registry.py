@@ -47,18 +47,13 @@ def _parse_csv(value: Any) -> list[str]:
 
 
 def _workload_type(value: Any) -> WorkloadType:
-    if not value:
-        return WorkloadType.MIXED
-    raw = str(value).strip().lower()
-    mapping = {
-        "read_only": "read_only",
-        "write_only": "write_only",
-        "read_heavy": "read_heavy",
-        "write_heavy": "write_heavy",
-        "mixed": "mixed",
-        "custom": "custom",
-    }
-    return WorkloadType(mapping.get(raw, "mixed"))
+    """
+    Parse workload type from config.
+    
+    NOTE: All templates are now normalized to CUSTOM during save.
+    This function exists for backward compatibility but always returns CUSTOM.
+    """
+    return WorkloadType.CUSTOM
 
 
 def _table_type(value: Any) -> TableType:
@@ -179,6 +174,12 @@ class TestRegistry:
                 "custom_update_pct",
             )
             total = sum(_pct(k) for k in pct_fields)
+            logger.info(
+                "Building custom_queries: workload_type=%s, pct_total=%d, pcts=%s",
+                workload_type,
+                total,
+                {k: _pct(k) for k in pct_fields},
+            )
             if total != 100:
                 raise ValueError(
                     f"Template CUSTOM percentages must sum to 100 (currently {total})."

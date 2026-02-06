@@ -1,6 +1,6 @@
 # Failed Timer Implementation Learnings
 
-This document captures the history of timer-related issues in the Unistore Benchmark
+This document captures the history of timer-related issues in the FlakeBench
 dashboard and the lessons learned from failed approaches. It serves as a reference
 for the simplified timer implementation.
 

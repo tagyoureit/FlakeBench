@@ -186,7 +186,7 @@ const DEFAULT_DOLLARS_PER_CREDIT = 4.0;
 /**
  * localStorage key for user's cost settings.
  */
-const COST_SETTINGS_KEY = "unistore_cost_settings";
+const COST_SETTINGS_KEY = "flakebench_cost_settings";
 
 /**
  * Get user's cost settings from localStorage.

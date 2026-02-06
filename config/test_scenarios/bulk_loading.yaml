@@ -15,7 +15,6 @@ category: "BULK_LOAD"
 table:
   name: "bulk_load_test"
   table_type: "STANDARD"  # Standard for bulk loading
-  database: "UNISTORE_BENCHMARK"
   schema: "PUBLIC"
   # NOTE: Table creation is disabled. This table/view must already exist.
   # The schema/clustering sections below are informational only and are ignored at runtime.

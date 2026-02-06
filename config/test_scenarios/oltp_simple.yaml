@@ -15,7 +15,6 @@ category: "OLTP"
 table:
   name: "oltp_test"
   table_type: "HYBRID"  # Use Hybrid for low-latency OLTP
-  database: "UNISTORE_BENCHMARK"
   schema: "PUBLIC"
   # NOTE: Table creation is disabled. This table/view must already exist.
   # The schema/index sections below are informational only and are ignored at runtime.

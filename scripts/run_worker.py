@@ -148,9 +148,18 @@ def _resolve_per_worker_cap(
     initial_target: int,
     per_worker_connections: int | None,
 ) -> int:
+    # CRITICAL: For FIND_MAX_CONCURRENCY mode, the worker needs a high pool capacity
+    # to allow the algorithm to scale up and discover the true max throughput.
+    # The orchestrator will control how many concurrent queries actually run.
+    # The pool cap is just the ceiling - the algorithm stops based on degradation detection.
+    if load_mode == "FIND_MAX_CONCURRENCY":
+        # Use a high ceiling for FIND_MAX - the algorithm controls actual concurrency.
+        # 10000 is an arbitrary high number that shouldn't be reached in practice.
+        # The algorithm will stop at degradation, not at this ceiling.
+        return 10000
     if per_worker_connections is not None:
         return max(1, int(per_worker_connections))
-    if load_mode in {"QPS", "FIND_MAX_CONCURRENCY"}:
+    if load_mode == "QPS":
         return max(1, int(total_connections))
     return max(1, int(initial_target))
 
@@ -389,6 +398,22 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     )
     if load_mode == "QPS":
         initial_target = max(1, int(min_connections))
+    elif load_mode == "FIND_MAX_CONCURRENCY":
+        # CRITICAL: For FIND_MAX mode, start at find_max start_concurrency, not concurrent_connections.
+        # The orchestrator controls scaling via WORKER_TARGETS. Starting at concurrent_connections
+        # causes the worker to run at the wrong concurrency during warmup until the orchestrator
+        # sets the first step target.
+        find_max_start = _coerce_int(
+            find_max_cfg.get("start_concurrency") if find_max_cfg else None,
+            default=1,
+        )
+        initial_target = max(1, find_max_start)
+        logger.info(
+            "FIND_MAX mode: initial_target=%d (from find_max.start_concurrency), "
+            "ignoring concurrent_connections=%d",
+            initial_target,
+            total_connections,
+        )
     per_worker_cap = _resolve_per_worker_cap(
         load_mode=load_mode,
         total_connections=total_connections,
@@ -493,12 +518,16 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     scenario = TestScenario.model_validate(scenario_data)
     scenario.collect_query_history = True
 
-    executor = TestExecutor(scenario)
+    executor = TestExecutor(
+        scenario,
+        worker_group_id=cfg.worker_group_id,
+        worker_group_count=cfg.worker_group_count,
+    )
     executor.test_id = uuid4()  # Worker's own unique ID; RUN_ID links to parent
     executor._template_id = template_id  # type: ignore[attr-defined]
     executor._template_config = template_config  # type: ignore[attr-defined]
 
-    benchmark_query_tag_base = f"unistore_benchmark:test_id={executor.test_id}"
+    benchmark_query_tag_base = f"flakebench:test_id={executor.test_id}"
     benchmark_query_tag_warmup = f"{benchmark_query_tag_base}:phase=WARMUP"
     benchmark_query_tag_running = f"{benchmark_query_tag_base}:phase=RUNNING"
     executor._benchmark_query_tag_base = benchmark_query_tag_base  # type: ignore[attr-defined]
@@ -666,10 +695,12 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         # - PgBouncer (port 5431): Allow up to 1000 client connections - PgBouncer multiplexes
         #   these over its server-side pool (default_pool_size: 497) using transaction pooling
         DIRECT_POSTGRES_CAP = 200  # Safe limit for direct PostgreSQL connections
-        PGBOUNCER_CLIENT_CAP = 1000  # PgBouncer handles multiplexing, can have many clients
-        
+        PGBOUNCER_CLIENT_CAP = (
+            1000  # PgBouncer handles multiplexing, can have many clients
+        )
+
         pool_cap = PGBOUNCER_CLIENT_CAP if use_pgbouncer else DIRECT_POSTGRES_CAP
-        
+
         if max_workers > pool_cap:
             effective_max_workers = pool_cap
             logger.info(
@@ -693,15 +724,19 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         #
         # Without PgBouncer: Can initialize closer to max since we connect directly.
         PGBOUNCER_INITIAL_CAP = 100  # Conservative to avoid client_login_timeout
-        DIRECT_INITIAL_CAP = 497    # PostgreSQL max_connections is 500, leave small buffer
-        
+        DIRECT_INITIAL_CAP = (
+            497  # PostgreSQL max_connections is 500, leave small buffer
+        )
+
         if use_pgbouncer:
             # Start smaller, let pool grow on demand
             initial_pool = min(PGBOUNCER_INITIAL_CAP, max(1, int(initial_target or 1)))
         else:
-            initial_pool = max(1, min(effective_max_workers, max(1, int(initial_target or 1))))
+            initial_pool = max(
+                1, min(effective_max_workers, max(1, int(initial_target or 1)))
+            )
             initial_pool = min(initial_pool, DIRECT_INITIAL_CAP)
-        
+
         logger.info(
             "[benchmark] Postgres pool sizing: total_connections=%d, initial_target=%d, "
             "per_worker_cap=%d, max_workers=%d, initial_pool=%d, load_mode=%s, use_pgbouncer=%s",
@@ -831,8 +866,15 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             return 2
 
     # Setup executor (table profiling, value pools, etc.) before START
+    # Pass validation_results from orchestrator to skip redundant queries
+    validation_results = run_config.get("validation_results")
+    if validation_results:
+        logger.info(
+            "Using pre-validated table data from orchestrator (%d tables)",
+            len(validation_results),
+        )
     logger.info("Setting up executor...")
-    ok = await executor.setup()
+    ok = await executor.setup(validation_results=validation_results)
     if not ok:
         last_error = str(getattr(executor, "_setup_error", "Setup failed"))
         logger.error("Executor setup failed: %s", last_error)
@@ -1348,9 +1390,22 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                                 default=current_target,
                             )
                             if desired != current_target:
+                                logger.info(
+                                    "Target change detected: %d -> %d (worker_id=%s)",
+                                    current_target,
+                                    desired,
+                                    cfg.worker_id,
+                                )
                                 await _scale_to(
                                     desired, warmup=(current_phase == "WARMUP")
                                 )
+                        elif target_entry is not None:
+                            logger.warning(
+                                "Target entry not a dict: worker_id=%s, target_entry=%s, targets_keys=%s",
+                                cfg.worker_id,
+                                type(target_entry).__name__,
+                                list(targets.keys()),
+                            )
 
             if now - last_heartbeat >= 1.0:
                 last_heartbeat = now
@@ -1490,7 +1545,12 @@ async def _run_worker(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format=settings.LOG_FORMAT)
+    # **IMPORTANT**: Use uvicorn's colored "LEVEL:" format for consistent output with main app.
+    from uvicorn.logging import DefaultFormatter
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(DefaultFormatter(fmt="%(levelprefix)s %(asctime)s - %(message)s", use_colors=True))
+    logging.basicConfig(level=logging.INFO, handlers=[console_handler])
 
     # Suppress verbose Snowflake connector logging (matches backend/main.py)
     logging.getLogger("snowflake.connector.connection").setLevel(logging.WARNING)

@@ -66,7 +66,7 @@ class _FailFastPool:
             return []
 
         # Schema existence check - extract table name from fully qualified path
-        # e.g., "SELECT 1 FROM UNISTORE_BENCHMARK.TEST_RESULTS.RUN_STATUS LIMIT 1"
+        # e.g., "SELECT 1 FROM FLAKEBENCH.TEST_RESULTS.RUN_STATUS LIMIT 1"
         if "SELECT 1 FROM" in sql and "LIMIT 1" in sql:
             # Extract the table name (last part after the last dot before LIMIT)
             import re
@@ -451,7 +451,7 @@ class TestHealthEndpoint:
             result = await health_check()
 
         assert result["status"] == "healthy"
-        assert result["service"] == "unistore-benchmark"
+        assert result["service"] == "flakebench"
         assert "checks" in result
 
     @pytest.mark.asyncio

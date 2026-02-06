@@ -3,7 +3,7 @@
 Last updated: 2026-01-27
 
 This document is a practical map of entrypoints, scripts, and commands used to
-run and validate Unistore Benchmark.
+run and validate FlakeBench.
 
 ## Common entrypoints
 
@@ -231,5 +231,5 @@ the timezone bug is the cause.
 
 - No DDL is executed at runtime.
 - Schema changes are rerunnable DDL in `sql/schema/`.
-- Templates are stored in `UNISTORE_BENCHMARK.TEST_RESULTS.TEST_TEMPLATES` with
+- Templates are stored in `FLAKEBENCH.TEST_RESULTS.TEST_TEMPLATES` with
   `CONFIG` as the authoritative JSON payload.
