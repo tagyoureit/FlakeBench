@@ -3196,6 +3196,15 @@ class OrchestratorService:
                                 "max_concurrency": int(max_concurrency),
                                 "best_concurrency": int(find_max_best_concurrency),
                                 "best_qps": float(find_max_best_qps),
+                                "qps_stability_pct": float(find_max_qps_stability_pct),
+                                "latency_stability_pct": float(
+                                    find_max_latency_stability_pct
+                                ),
+                                "max_error_rate_pct": float(find_max_max_error_pct),
+                                "baseline_p95_ms": find_max_baseline_p95,
+                                "baseline_p95_latency_ms": find_max_baseline_p95,
+                                "baseline_p99_latency_ms": find_max_baseline_p99,
+                                "step_history": list(find_max_step_history),
                                 "last_updated": datetime.now(UTC).isoformat(),
                             }
                             logger.info(
@@ -3362,6 +3371,19 @@ class OrchestratorService:
                                 "current_step": int(find_max_step_number),
                                 "current_concurrency": int(find_max_step_target),
                                 "target_workers": int(find_max_step_target),
+                                "active_worker_count": int(workers_active),
+                                "current_qps": float(step_qps),
+                                "current_p95_latency_ms": aggregate_p95,
+                                "current_p99_latency_ms": aggregate_p99,
+                                "current_error_rate_pct": float(step_error_rate_pct),
+                                "qps": float(step_qps),
+                                "qps_vs_prior_pct": qps_vs_prior_pct,
+                                "baseline_p95_ms": find_max_baseline_p95,
+                                "baseline_p95_latency_ms": find_max_baseline_p95,
+                                "baseline_p99_latency_ms": find_max_baseline_p99,
+                                "p95_vs_baseline_pct": p95_vs_baseline_pct,
+                                "error_rate": float(step_error_rate),
+                                "queue_detected": bool(queue_detected),
                                 "step_duration_seconds": int(find_max_step_seconds),
                                 # Set the end time to "now + 1.5s" as a placeholder
                                 # This will be replaced by the real next step's end time shortly
@@ -3372,8 +3394,14 @@ class OrchestratorService:
                                 "start_concurrency": int(find_max_start),
                                 "concurrency_increment": int(find_max_increment),
                                 "max_concurrency": int(max_concurrency),
+                                "qps_stability_pct": float(find_max_qps_stability_pct),
+                                "latency_stability_pct": float(
+                                    find_max_latency_stability_pct
+                                ),
+                                "max_error_rate_pct": float(find_max_max_error_pct),
                                 "best_concurrency": int(find_max_best_concurrency),
                                 "best_qps": float(find_max_best_qps),
+                                "step_history": list(find_max_step_history),
                                 "last_updated": datetime.now(UTC).isoformat(),
                             }
                             await _persist_find_max_state(transitioning_state)
@@ -3540,6 +3568,17 @@ class OrchestratorService:
                                     "max_concurrency": int(max_concurrency),
                                     "best_concurrency": int(find_max_best_concurrency),
                                     "best_qps": float(find_max_best_qps),
+                                    "qps_stability_pct": float(
+                                        find_max_qps_stability_pct
+                                    ),
+                                    "latency_stability_pct": float(
+                                        find_max_latency_stability_pct
+                                    ),
+                                    "max_error_rate_pct": float(find_max_max_error_pct),
+                                    "baseline_p95_ms": find_max_baseline_p95,
+                                    "baseline_p95_latency_ms": find_max_baseline_p95,
+                                    "baseline_p99_latency_ms": find_max_baseline_p99,
+                                    "step_history": list(find_max_step_history),
                                     "is_backoff": bool(is_backoff),
                                     "last_updated": datetime.now(UTC).isoformat(),
                                 }

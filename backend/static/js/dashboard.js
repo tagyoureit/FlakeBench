@@ -1455,6 +1455,11 @@ function dashboard(opts) {
         const fmcFromExecutor = custom && custom.find_max_controller;
         const fmcFromOrchestrator = payload.find_max;
         if (fmcFromExecutor || fmcFromOrchestrator) {
+          const prevFindMax = this.findMaxController && typeof this.findMaxController === "object"
+            ? this.findMaxController
+            : null;
+          const hasRows = (rows) => Array.isArray(rows) && rows.length > 0;
+
           // Debug logging for FIND_MAX state sources
           if (this.debug) {
             console.log('[FM Debug] Sources:', {
@@ -1472,11 +1477,43 @@ function dashboard(opts) {
               } : null
             });
           }
-          // Start with orchestrator state (has step_history), overlay executor's real-time data
+          // Start with previous state to keep sticky values during sparse transition payloads,
+          // then overlay orchestrator state and executor real-time data.
           // Executor data includes step_end_at_epoch_ms which drives the countdown timer
-          const merged = { ...(fmcFromOrchestrator || {}), ...(fmcFromExecutor || {}) };
-          // Ensure step_history comes from orchestrator if executor doesn't have it
-          if (!merged.step_history && fmcFromOrchestrator && fmcFromOrchestrator.step_history) {
+          const merged = {
+            ...(prevFindMax || {}),
+            ...(fmcFromOrchestrator || {}),
+            ...(fmcFromExecutor || {}),
+          };
+          // Ensure step_history stays non-empty when one source sends a sparse/empty payload.
+          if (!hasRows(merged.step_history)) {
+            if (hasRows(fmcFromExecutor?.step_history)) {
+              merged.step_history = fmcFromExecutor.step_history;
+            } else if (hasRows(fmcFromOrchestrator?.step_history)) {
+              merged.step_history = fmcFromOrchestrator.step_history;
+            } else if (hasRows(prevFindMax?.step_history)) {
+              merged.step_history = prevFindMax.step_history;
+            }
+          }
+          // Preserve sticky baselines/thresholds if an incoming source omits them.
+          for (const stickyField of [
+            "baseline_p95_ms",
+            "baseline_p95_latency_ms",
+            "baseline_p99_latency_ms",
+            "qps_stability_pct",
+            "latency_stability_pct",
+            "max_error_rate_pct",
+          ]) {
+            if (
+              (merged[stickyField] === null || merged[stickyField] === undefined) &&
+              prevFindMax &&
+              prevFindMax[stickyField] !== null &&
+              prevFindMax[stickyField] !== undefined
+            ) {
+              merged[stickyField] = prevFindMax[stickyField];
+            }
+          }
+          if (!Array.isArray(merged.step_history) && fmcFromOrchestrator && fmcFromOrchestrator.step_history) {
             merged.step_history = fmcFromOrchestrator.step_history;
           }
           if (this.debug) {
@@ -1495,10 +1532,27 @@ function dashboard(opts) {
         const qpsFromExecutor = custom && custom.qps_controller;
         const qpsFromOrchestrator = payload.qps_controller_state;
         if (qpsFromExecutor || qpsFromOrchestrator) {
-          // Start with orchestrator state (has step_history), overlay executor's real-time data
-          const merged = { ...(qpsFromOrchestrator || {}), ...(qpsFromExecutor || {}) };
-          // Ensure step_history comes from orchestrator if executor doesn't have it
-          if (!merged.step_history && qpsFromOrchestrator && qpsFromOrchestrator.step_history) {
+          const prevQps = this.qpsController && typeof this.qpsController === "object"
+            ? this.qpsController
+            : null;
+          const hasRows = (rows) => Array.isArray(rows) && rows.length > 0;
+          // Start with previous state, then overlay orchestrator + executor updates.
+          const merged = {
+            ...(prevQps || {}),
+            ...(qpsFromOrchestrator || {}),
+            ...(qpsFromExecutor || {}),
+          };
+          // Ensure step_history stays non-empty when one source sends sparse payloads.
+          if (!hasRows(merged.step_history)) {
+            if (hasRows(qpsFromExecutor?.step_history)) {
+              merged.step_history = qpsFromExecutor.step_history;
+            } else if (hasRows(qpsFromOrchestrator?.step_history)) {
+              merged.step_history = qpsFromOrchestrator.step_history;
+            } else if (hasRows(prevQps?.step_history)) {
+              merged.step_history = prevQps.step_history;
+            }
+          }
+          if (!Array.isArray(merged.step_history) && qpsFromOrchestrator && qpsFromOrchestrator.step_history) {
             merged.step_history = qpsFromOrchestrator.step_history;
           }
           this.qpsController = merged;

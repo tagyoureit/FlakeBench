@@ -270,11 +270,39 @@ async def stream_run_metrics(websocket: WebSocket, test_id: str) -> None:
         find_max_state_live_mem = await live_controller_state.get_find_max_state(
             run_id=test_id
         )
-        find_max_state = (
-            find_max_state_live_mem
-            if find_max_state_live_mem is not None
-            else find_max_state_db
-        )
+        if find_max_state_live_mem is not None and find_max_state_db is not None:
+            find_max_state = {**find_max_state_db, **find_max_state_live_mem}
+
+            # Prefer non-empty persisted history if live state is sparse during transitions.
+            db_hist = find_max_state_db.get("step_history")
+            mem_hist = find_max_state_live_mem.get("step_history")
+            if (
+                (not isinstance(mem_hist, list) or len(mem_hist) == 0)
+                and isinstance(db_hist, list)
+                and len(db_hist) > 0
+            ):
+                find_max_state["step_history"] = db_hist
+
+            # Preserve baseline/threshold fields from DB when live state omits or nulls them.
+            for sticky_field in (
+                "baseline_p95_ms",
+                "baseline_p95_latency_ms",
+                "baseline_p99_latency_ms",
+                "qps_stability_pct",
+                "latency_stability_pct",
+                "max_error_rate_pct",
+            ):
+                if (
+                    find_max_state.get(sticky_field) is None
+                    and find_max_state_db.get(sticky_field) is not None
+                ):
+                    find_max_state[sticky_field] = find_max_state_db.get(sticky_field)
+        else:
+            find_max_state = (
+                find_max_state_live_mem
+                if find_max_state_live_mem is not None
+                else find_max_state_db
+            )
         # Debug: Log find_max sources
         fmc_from_live = None
         custom_metrics = metrics.get("custom_metrics") if metrics else None
