@@ -23,6 +23,9 @@ if (typeof Object.groupBy !== "function") {
 function testHistory() {
   const MAX_COMPARE = 2;
 
+  // Use shared DisplayUtils (loaded from display-utils.js)
+  const DU = window.DisplayUtils || {};
+
   const normalizeTestForCompare = (data) => {
     const t = data && typeof data === "object" ? data : {};
 
@@ -92,35 +95,6 @@ function testHistory() {
     } catch (_) {}
   };
 
-  const tableTypeKey = (test) =>
-    String(test?.table_type || "").trim().toUpperCase();
-
-  const tableTypeLabel = (test) => {
-    const t = tableTypeKey(test);
-    if (t === "POSTGRES") return "POSTGRES";
-    if (t === "HYBRID") return "HYBRID";
-    if (t === "STANDARD") return "STANDARD";
-    if (t === "INTERACTIVE") return "INTERACTIVE";
-    return t || "";
-  };
-
-  const tableTypeIconSrc = (test) => {
-    const t = tableTypeKey(test);
-    if (t === "POSTGRES") {
-      return "/static/img/postgres_elephant.svg";
-    }
-    if (t === "HYBRID") {
-      return "/static/img/table_hybrid.svg";
-    }
-    if (t === "STANDARD") {
-      return "/static/img/table_standard.svg";
-    }
-    if (t === "INTERACTIVE") {
-      return "/static/img/table_interactive.svg";
-    }
-    return "";
-  };
-
   return {
     tests: [],
     error: null,
@@ -131,6 +105,8 @@ function testHistory() {
       date_range: "all",
       start_date: "",
       end_date: "",
+      load_mode: "",
+      scaling_mode: "",
     },
     sortField: "created_at",
     sortDirection: "desc",
@@ -189,8 +165,55 @@ function testHistory() {
 
     _refreshInterval: null,
     multiNodeExpanded: {},
-    tableTypeLabel,
-    tableTypeIconSrc,
+
+    // Delegate display functions to shared DisplayUtils
+    tableTypeLabel(test) {
+      return DU.tableTypeLabel ? DU.tableTypeLabel(test) : "";
+    },
+
+    tableTypeIconSrc(test) {
+      return DU.tableTypeIconSrc ? DU.tableTypeIconSrc(test) : "";
+    },
+
+    loadModeDisplay(test) {
+      return DU.loadModeDisplay ? DU.loadModeDisplay(test) : "—";
+    },
+
+    scalingDisplay(test) {
+      return DU.scalingDisplay ? DU.scalingDisplay(test) : "—";
+    },
+
+    workloadMixDisplay(test) {
+      return DU.workloadMixDisplay ? DU.workloadMixDisplay(test) : "—";
+    },
+
+    durationDisplay(test) {
+      return DU.durationDisplay ? DU.durationDisplay(test) : "—";
+    },
+
+    warehouseDisplay(test) {
+      return DU.warehouseDisplay ? DU.warehouseDisplay(test) : "—";
+    },
+
+    sizeSimple(test) {
+      return DU.sizeSimple ? DU.sizeSimple(test) : "—";
+    },
+
+    sizeDisplay(test) {
+      return DU.sizeSimple ? DU.sizeSimple(test) : "—";
+    },
+
+    workloadMixCompact(test) {
+      return DU.workloadMixCompact ? DU.workloadMixCompact(test) : "—";
+    },
+
+    workloadReadsDisplay(test) {
+      return DU.workloadReadsDisplay ? DU.workloadReadsDisplay(test) : "—";
+    },
+
+    workloadWritesDisplay(test) {
+      return DU.workloadWritesDisplay ? DU.workloadWritesDisplay(test) : "—";
+    },
 
     init() {
       this.loadTests();
@@ -551,6 +574,8 @@ function testHistory() {
         date_range: "all",
         start_date: "",
         end_date: "",
+        load_mode: "",
+        scaling_mode: "",
       };
       this.applyFilters();
     },

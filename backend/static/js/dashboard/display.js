@@ -1,11 +1,21 @@
 /**
  * Dashboard Display Module
  * Methods for displaying test configuration and status information.
+ * 
+ * Delegates to shared DisplayUtils where possible for consistency.
  */
 window.DashboardMixins = window.DashboardMixins || {};
 
+// Reference to shared DisplayUtils (loaded from display-utils.js)
+const _DU = () => window.DisplayUtils || {};
+
 window.DashboardMixins.display = {
   tableTypeLabel() {
+    // Delegate to shared DisplayUtils
+    if (_DU().tableTypeLabel) {
+      return _DU().tableTypeLabel(this.templateInfo);
+    }
+    // Fallback
     const tableType = (this.templateInfo?.table_type || "").toUpperCase();
     if (tableType === "POSTGRES") return "POSTGRES";
     if (tableType === "HYBRID") return "HYBRID";
@@ -15,6 +25,11 @@ window.DashboardMixins.display = {
   },
 
   tableTypeIconSrc() {
+    // Delegate to shared DisplayUtils
+    if (_DU().tableTypeIconSrc) {
+      return _DU().tableTypeIconSrc(this.templateInfo);
+    }
+    // Fallback
     const tableType = (this.templateInfo?.table_type || "").toUpperCase();
     if (tableType === "POSTGRES") {
       return "/static/img/postgres_elephant.svg";
@@ -76,6 +91,11 @@ window.DashboardMixins.display = {
   },
 
   isPostgresTable() {
+    // Delegate to shared DisplayUtils
+    if (_DU().isPostgresType) {
+      return _DU().isPostgresType(this.templateInfo);
+    }
+    // Fallback
     const tableType = (this.templateInfo?.table_type || "").toLowerCase();
     return ["postgres", "snowflake_postgres"].includes(tableType);
   },
@@ -147,6 +167,11 @@ window.DashboardMixins.display = {
   },
 
   loadModeDisplay() {
+    // Delegate to shared DisplayUtils (verbose format for dashboard)
+    if (_DU().loadModeDisplayVerbose) {
+      return _DU().loadModeDisplayVerbose(this.templateInfo);
+    }
+    // Fallback
     const info = this.templateInfo;
     if (!info) return "";
 
@@ -158,6 +183,12 @@ window.DashboardMixins.display = {
       const startingThreads = info.starting_threads ?? info.starting_qps ?? 0;
       const maxThreadIncrease = info.max_thread_increase ?? info.max_qps_increase ?? 15;
       return `QPS Mode: Target ${targetQps} QPS (start: ${startingThreads}, ±${maxThreadIncrease}/~10s)`;
+    }
+
+    if (loadMode === "FIND_MAX_CONCURRENCY") {
+      const startConc = info.start_concurrency ?? 5;
+      const increment = info.concurrency_increment ?? 10;
+      return `Find Max: start ${startConc}, +${increment}/step`;
     }
 
     // CONCURRENCY mode - just show threads

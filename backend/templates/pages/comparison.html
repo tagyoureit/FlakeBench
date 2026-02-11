@@ -18,12 +18,15 @@
         
         <div class="form-group">
             <label class="form-label">Search Tests</label>
-            <input 
-                type="text" 
-                class="form-input" 
-                x-model="searchQuery"
-                @input.debounce.300ms="searchTests"
-                placeholder="Search by test name, table type, or date...">
+            <div class="relative">
+                <input 
+                    type="text" 
+                    class="form-input" 
+                    x-model="searchQuery"
+                    @input.debounce.300ms="searchTests"
+                    placeholder="Search by test name, table type, or date...">
+                <span class="loading-spinner absolute right-3 top-1/2 -translate-y-1/2" x-show="searching"></span>
+            </div>
         </div>
 
         <div x-show="error" class="alert alert-error mb-4">
@@ -222,6 +225,7 @@ function comparison() {
         searchResults: [],
         selectedTests: [],
         error: null,
+        searching: false,
         
         async searchTests() {
             if (this.searchQuery.length < 2) {
@@ -232,6 +236,7 @@ function comparison() {
             
             try {
                 this.error = null;
+                this.searching = true;
                 const response = await fetch(`/api/tests/search?q=${encodeURIComponent(this.searchQuery)}`);
                 if (!response.ok) {
                     const payload = await response.json().catch(() => ({}));
@@ -249,6 +254,8 @@ function comparison() {
                 console.error('Search failed:', error);
                 this.error = error?.message || String(error);
                 this.searchResults = [];
+            } finally {
+                this.searching = false;
             }
         },
         

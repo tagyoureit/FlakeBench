@@ -7,7 +7,7 @@
 {% block title %}Template Editor - FlakeBench{% endblock %}
 
 {% block content %}
-<div x-data="testConfiguration()" x-cloak>
+<div x-data="testConfiguration()">
     <!-- Initial load state (prevents "defaults then fill in later" flicker) -->
     <div x-show="isInitializing" class="card">
         <div class="flex items-center gap-3">
@@ -19,7 +19,7 @@
         </div>
     </div>
 
-    <div x-show="!isInitializing">
+    <div x-show="!isInitializing" x-cloak>
     <div class="card">
         <div
             class="card-title"
@@ -288,7 +288,19 @@
         </div>
 
         <div class="card">
-            <div class="card-title">Queries, Mix, and Targets</div>
+            <div class="card-title flex items-center gap-2">
+                Queries, Mix, and Targets
+                <button 
+                    type="button" 
+                    class="text-gray-400 hover:text-blue-600 transition-colors"
+                    @click="showQueryHelp = true"
+                    title="Learn about SQL parameters and value pools"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
+                    </svg>
+                </button>
+            </div>
             <p class="text-sm text-gray-700">
                 Templates store all SQL and mix weights. Mix presets only adjust weights (SQL is left unchanged).
             </p>
@@ -320,6 +332,7 @@
                     class="btn btn-secondary"
                     :disabled="aiSqlAdjustLoading || !hasSelectedTable()"
                     @click="aiAdjustCustomSql()"
+                    title="Generates SQL for the selected table only. For multi-table JOINs, edit the SQL manually."
                 >
                     <span class="loading-spinner" x-show="aiSqlAdjustLoading"></span>
                     <span x-text="aiSqlAdjustLoading ? 'Generating…' : 'Generate SQL for This Table Type'"></span>
@@ -1017,6 +1030,89 @@
         </div>
     </div>
 </div>
+
+    <!-- Query Help Modal -->
+    <div 
+        x-show="showQueryHelp" 
+        x-cloak
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50"
+        @click.self="showQueryHelp = false"
+        @keydown.escape.window="showQueryHelp = false"
+    >
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-semibold">SQL Parameters & Value Pools</h3>
+                <button 
+                    type="button" 
+                    class="text-gray-500 hover:text-gray-700 text-2xl"
+                    @click="showQueryHelp = false"
+                >&times;</button>
+            </div>
+            
+            <div class="space-y-4 text-sm">
+                <div>
+                    <h4 class="font-semibold text-gray-900 mb-1">Parameter Placeholders</h4>
+                    <p class="text-gray-700">
+                        Use <code class="bg-gray-100 px-1 rounded">?</code> (Snowflake) or 
+                        <code class="bg-gray-100 px-1 rounded">$1, $2</code> (Postgres) as parameter placeholders.
+                        These are replaced at runtime with values from the <strong>value pool</strong>.
+                    </p>
+                </div>
+
+                <div>
+                    <h4 class="font-semibold text-gray-900 mb-1">The {table} Placeholder</h4>
+                    <p class="text-gray-700">
+                        Use <code class="bg-gray-100 px-1 rounded">{table}</code> to reference your selected table.
+                        It expands to <code class="bg-gray-100 px-1 rounded">DATABASE.SCHEMA.TABLE_NAME</code> at runtime.
+                    </p>
+                </div>
+
+                <div>
+                    <h4 class="font-semibold text-gray-900 mb-1">Value Pools</h4>
+                    <p class="text-gray-700">
+                        When you click <strong>"Save & Prepare"</strong>, the system samples real values from your table's 
+                        key column (auto-detected) and stores them in a <em>value pool</em>. During benchmark execution, 
+                        the <code class="bg-gray-100 px-1 rounded">?</code> parameters are bound from this pool, ensuring 
+                        queries hit actual rows in your table.
+                    </p>
+                </div>
+
+                <div class="bg-blue-50 border border-blue-200 rounded p-3">
+                    <h4 class="font-semibold text-blue-900 mb-1">Single-Table Design</h4>
+                    <p class="text-blue-800">
+                        <strong>"Generate SQL"</strong> creates queries for the selected table only. For multi-table JOINs, 
+                        edit the SQL manually and hardcode the second table name. The <code class="bg-blue-100 px-1 rounded">?</code> 
+                        parameter will still bind from the primary table's key column.
+                    </p>
+                    <p class="text-blue-800 mt-2">
+                        <strong>Example JOIN:</strong>
+                    </p>
+                    <pre class="bg-blue-100 p-2 rounded text-xs mt-1 overflow-x-auto">SELECT o.*, c.C_NAME 
+FROM {table} o
+JOIN OTHER_DB.SCHEMA.CUSTOMER c ON o.CUST_ID = c.C_ID
+WHERE o.ORDER_KEY = ?</pre>
+                </div>
+
+                <div>
+                    <h4 class="font-semibold text-gray-900 mb-1">Query Types</h4>
+                    <ul class="list-disc list-inside text-gray-700 space-y-1">
+                        <li><strong>Point Lookup:</strong> Single-row fetch by key (uses KEY pool)</li>
+                        <li><strong>Range Scan:</strong> Multi-row fetch by range (uses KEY or RANGE pool)</li>
+                        <li><strong>Insert:</strong> New row with generated values</li>
+                        <li><strong>Update:</strong> Modify existing row by key</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="mt-6 flex justify-end">
+                <button 
+                    type="button" 
+                    class="btn btn-primary"
+                    @click="showQueryHelp = false"
+                >Got it</button>
+            </div>
+        </div>
+    </div>
     </div>
 {% endblock %}
 
@@ -1274,6 +1370,7 @@ function testConfiguration() {
         },
 
         editingSql: null, // tracks which SQL field is being edited: 'point_lookup', 'range_scan', 'insert', 'update', or null
+        showQueryHelp: false, // controls visibility of query help modal
 
         toggleSqlEdit(field) {
             this.editingSql = this.editingSql === field ? null : field;

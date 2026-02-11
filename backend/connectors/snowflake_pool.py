@@ -16,7 +16,9 @@ import snowflake.connector
 from snowflake.connector import SnowflakeConnection
 from snowflake.connector.errors import (
     OperationalError,
+    DatabaseError,
 )
+from snowflake.connector.vendored.requests.exceptions import ReadTimeout
 
 from backend.config import settings
 
@@ -505,38 +507,42 @@ class SnowflakeConnectionPool:
             warehouse: Optional warehouse override
 
         Returns:
-            List of result tuples
+            List of result tuples (empty list on network timeout)
         """
-        async with self.get_connection() as conn:
-            # Switch warehouse if specified
-            if warehouse and warehouse != self.warehouse:
-                cursor = await self._run_in_executor(conn.cursor)
-                await self._run_in_executor(
-                    cursor.execute, f"USE WAREHOUSE {warehouse}"
-                )
-                await self._run_in_executor(cursor.close)
-
-            # Execute query
-            cursor = await self._run_in_executor(conn.cursor)
-
-            try:
-                if params is None:
-                    await self._run_in_executor(cursor.execute, query)
-                else:
-                    # Snowflake connector supports both:
-                    # - qmark params: Sequence[Any] for `?` placeholders
-                    # - pyformat params: Mapping for `%(name)s` placeholders
-                    await self._run_in_executor(cursor.execute, query, params)
-
-                results = await self._run_in_executor(cursor.fetchall)
-                return results
-
-            finally:
-                try:
+        try:
+            async with self.get_connection() as conn:
+                # Switch warehouse if specified
+                if warehouse and warehouse != self.warehouse:
+                    cursor = await self._run_in_executor(conn.cursor)
+                    await self._run_in_executor(
+                        cursor.execute, f"USE WAREHOUSE {warehouse}"
+                    )
                     await self._run_in_executor(cursor.close)
-                except RuntimeError:
-                    # Executor already shut down - cursor will be cleaned up with connection
-                    pass
+
+                # Execute query
+                cursor = await self._run_in_executor(conn.cursor)
+
+                try:
+                    if params is None:
+                        await self._run_in_executor(cursor.execute, query)
+                    else:
+                        # Snowflake connector supports both:
+                        # - qmark params: Sequence[Any] for `?` placeholders
+                        # - pyformat params: Mapping for `%(name)s` placeholders
+                        await self._run_in_executor(cursor.execute, query, params)
+
+                    results = await self._run_in_executor(cursor.fetchall)
+                    return results
+
+                finally:
+                    try:
+                        await self._run_in_executor(cursor.close)
+                    except RuntimeError:
+                        # Executor already shut down - cursor will be cleaned up with connection
+                        pass
+        except (ReadTimeout, DatabaseError, OperationalError) as e:
+            logger.error("Network error during query execution: %s", e)
+            return []
 
     async def execute_query_with_info(
         self,
@@ -556,48 +562,53 @@ class SnowflakeConnectionPool:
               - query_id: Snowflake QUERY_ID (cursor.sfqid) when available
               - rowcount: cursor.rowcount (may be -1 depending on statement)
               - total_elapsed_time_ms: Snowflake execution time in milliseconds (if available)
+              - error: error message if network timeout occurred
         """
-        async with self.get_connection() as conn:
-            if warehouse and warehouse != self.warehouse:
-                cursor = await self._run_in_executor(conn.cursor)
-                await self._run_in_executor(
-                    cursor.execute, f"USE WAREHOUSE {warehouse}"
-                )
-                await self._run_in_executor(cursor.close)
-
-            cursor = await self._run_in_executor(conn.cursor)
-            try:
-                if params is None:
-                    await self._run_in_executor(cursor.execute, query)
-                else:
-                    await self._run_in_executor(cursor.execute, query, params)
-
-                query_id = getattr(cursor, "sfqid", None)
-                rowcount = getattr(cursor, "rowcount", None)
-                total_elapsed_time_ms: Optional[float] = None
-                query_result_format = getattr(cursor, "_query_result_format", None)
-                if query_result_format and hasattr(query_result_format, "get"):
-                    elapsed_raw = query_result_format.get("total_elapsed_time")
-                    if elapsed_raw is not None:
-                        try:
-                            total_elapsed_time_ms = float(elapsed_raw)
-                        except (ValueError, TypeError):
-                            pass
-                results: List[tuple] = []
-                if fetch:
-                    results = await self._run_in_executor(cursor.fetchall)
-
-                return results, {
-                    "query_id": query_id,
-                    "rowcount": rowcount,
-                    "total_elapsed_time_ms": total_elapsed_time_ms,
-                }
-            finally:
-                try:
+        try:
+            async with self.get_connection() as conn:
+                if warehouse and warehouse != self.warehouse:
+                    cursor = await self._run_in_executor(conn.cursor)
+                    await self._run_in_executor(
+                        cursor.execute, f"USE WAREHOUSE {warehouse}"
+                    )
                     await self._run_in_executor(cursor.close)
-                except RuntimeError:
-                    # Executor already shut down - cursor will be cleaned up with connection
-                    pass
+
+                cursor = await self._run_in_executor(conn.cursor)
+                try:
+                    if params is None:
+                        await self._run_in_executor(cursor.execute, query)
+                    else:
+                        await self._run_in_executor(cursor.execute, query, params)
+
+                    query_id = getattr(cursor, "sfqid", None)
+                    rowcount = getattr(cursor, "rowcount", None)
+                    total_elapsed_time_ms: Optional[float] = None
+                    query_result_format = getattr(cursor, "_query_result_format", None)
+                    if query_result_format and hasattr(query_result_format, "get"):
+                        elapsed_raw = query_result_format.get("total_elapsed_time")
+                        if elapsed_raw is not None:
+                            try:
+                                total_elapsed_time_ms = float(elapsed_raw)
+                            except (ValueError, TypeError):
+                                pass
+                    results: List[tuple] = []
+                    if fetch:
+                        results = await self._run_in_executor(cursor.fetchall)
+
+                    return results, {
+                        "query_id": query_id,
+                        "rowcount": rowcount,
+                        "total_elapsed_time_ms": total_elapsed_time_ms,
+                    }
+                finally:
+                    try:
+                        await self._run_in_executor(cursor.close)
+                    except RuntimeError:
+                        # Executor already shut down - cursor will be cleaned up with connection
+                        pass
+        except (ReadTimeout, DatabaseError, OperationalError) as e:
+            logger.error("Network error during query execution: %s", e)
+            return [], {"error": str(e)}
 
     async def update_query_tag(self, new_tag: str) -> int:
         """

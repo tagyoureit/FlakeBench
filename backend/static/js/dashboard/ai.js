@@ -83,7 +83,7 @@ window.DashboardMixins.ai = {
         throw new Error(err.detail || `HTTP ${resp.status}`);
       }
       const data = await resp.json();
-      this.aiAnalysis = data.analysis;
+      this.aiAnalysis = data;
     } catch (e) {
       console.error("AI analysis failed:", e);
       this.aiAnalysisError = e.message || String(e);

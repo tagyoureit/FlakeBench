@@ -678,6 +678,75 @@ async def _fetch_pg_enrichment(*, pool: Any, test_id: str) -> dict[str, Any]:
     }
 
 
+async def _fetch_find_max_step_history(*, pool: Any, test_id: str) -> dict[str, Any]:
+    """
+    Fetch FIND_MAX step history showing concurrency progression and degradation points.
+    
+    Returns step-by-step data showing:
+    - Each concurrency level tested
+    - QPS achieved at each level
+    - Latency metrics (P50, P95, P99)
+    - Outcome (STABLE/DEGRADED) and stop reason
+    """
+    prefix = _prefix()
+    
+    query = f"""
+    SELECT 
+        STEP_NUMBER, TARGET_WORKERS, 
+        QPS, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS,
+        ERROR_RATE, OUTCOME, STOP_REASON
+    FROM {prefix}.CONTROLLER_STEP_HISTORY
+    WHERE RUN_ID = ?
+    ORDER BY STEP_NUMBER
+    """
+    
+    rows = await pool.execute_query(query, params=[test_id])
+    
+    if not rows:
+        return {"find_max_history_available": False}
+    
+    steps = []
+    best_stable_concurrency = None
+    best_stable_qps = 0
+    degradation_points = []
+    
+    for row in rows:
+        step_num, target_workers, qps, p50, p95, p99, error_rate, outcome, stop_reason = row
+        
+        step_data = {
+            "step": int(step_num or 0),
+            "concurrency": int(target_workers or 0),
+            "qps": float(qps or 0),
+            "p50_ms": float(p50 or 0),
+            "p95_ms": float(p95 or 0),
+            "p99_ms": float(p99 or 0),
+            "error_rate": float(error_rate or 0),
+            "outcome": str(outcome or "UNKNOWN"),
+            "stop_reason": stop_reason,
+        }
+        steps.append(step_data)
+        
+        # Track best stable concurrency
+        if outcome == "STABLE" and qps and float(qps) > best_stable_qps:
+            best_stable_qps = float(qps)
+            best_stable_concurrency = int(target_workers or 0)
+        
+        # Track degradation points
+        if outcome == "DEGRADED":
+            degradation_points.append({
+                "concurrency": int(target_workers or 0),
+                "reason": stop_reason,
+            })
+    
+    return {
+        "find_max_history_available": True,
+        "steps": steps,
+        "best_stable_concurrency": best_stable_concurrency,
+        "best_stable_qps": best_stable_qps,
+        "degradation_points": degradation_points,
+    }
+
+
 async def _fetch_cluster_breakdown(*, pool: Any, test_id: str) -> dict[str, Any]:
     """
     Fetch per-cluster breakdown for MCW tests.
@@ -1579,6 +1648,8 @@ async def list_tests(
     date_range: str = "all",
     start_date: str = "",
     end_date: str = "",
+    load_mode: str = "",
+    scaling_mode: str = "",
 ) -> dict[str, Any]:
     try:
         pool = snowflake_pool.get_default_pool()
@@ -1595,6 +1666,12 @@ async def list_tests(
         if status_filter:
             where_clauses.append("tr.STATUS = ?")
             params.append(status_filter.upper())
+        if load_mode:
+            where_clauses.append("COALESCE(tr.TEST_CONFIG:template_config:load_mode::STRING, 'CONCURRENCY') = ?")
+            params.append(load_mode.upper())
+        if scaling_mode:
+            where_clauses.append("COALESCE(tr.TEST_CONFIG:template_config:scaling:mode::STRING, 'FIXED') = ?")
+            params.append(scaling_mode.upper())
 
         if date_range in {"today", "week", "month"}:
             days = {"today": 1, "week": 7, "month": 30}[date_range]
@@ -1635,6 +1712,15 @@ async def list_tests(
             tr.FAILURE_REASON,
             tr.ENRICHMENT_STATUS,
             tr.TEST_CONFIG:template_config:postgres_instance_size::STRING AS POSTGRES_INSTANCE_SIZE,
+            tr.TEST_CONFIG:template_config:load_mode::STRING AS LOAD_MODE,
+            tr.TEST_CONFIG:template_config:target_qps::NUMBER AS TARGET_QPS,
+            tr.TEST_CONFIG:template_config:start_concurrency::NUMBER AS START_CONCURRENCY,
+            tr.TEST_CONFIG:template_config:concurrency_increment::NUMBER AS CONCURRENCY_INCREMENT,
+            tr.TEST_CONFIG:template_config:scaling AS SCALING_CONFIG,
+            tr.TEST_CONFIG:template_config:custom_point_lookup_pct::NUMBER AS CUSTOM_POINT_LOOKUP_PCT,
+            tr.TEST_CONFIG:template_config:custom_range_scan_pct::NUMBER AS CUSTOM_RANGE_SCAN_PCT,
+            tr.TEST_CONFIG:template_config:custom_insert_pct::NUMBER AS CUSTOM_INSERT_PCT,
+            tr.TEST_CONFIG:template_config:custom_update_pct::NUMBER AS CUSTOM_UPDATE_PCT,
             rs.STATUS AS RUN_STATUS,
             rs.PHASE AS RUN_PHASE
         FROM {_prefix()}.TEST_RESULTS tr
@@ -1670,9 +1756,29 @@ async def list_tests(
                 failure_reason,
                 enrichment_status,
                 postgres_instance_size,
+                load_mode,
+                target_qps,
+                start_concurrency,
+                concurrency_increment,
+                scaling_config_raw,
+                custom_point_lookup_pct,
+                custom_range_scan_pct,
+                custom_insert_pct,
+                custom_update_pct,
                 run_status_db,
                 run_phase_db,
             ) = row
+
+            # Parse scaling config JSON if present
+            scaling_config = None
+            if scaling_config_raw:
+                try:
+                    if isinstance(scaling_config_raw, str):
+                        scaling_config = json.loads(scaling_config_raw)
+                    else:
+                        scaling_config = scaling_config_raw
+                except Exception:
+                    pass
 
             is_parent_run = bool(run_id) and str(run_id) == str(test_id)
             status_db_u = str(status_db or "").upper()
@@ -1736,6 +1842,18 @@ async def list_tests(
                     "concurrent_connections": int(concurrency or 0),
                     "duration": float(duration or 0),
                     "failure_reason": failure_reason,
+                    # Load mode fields
+                    "load_mode": load_mode or "CONCURRENCY",
+                    "target_qps": int(target_qps or 0) if target_qps else None,
+                    "start_concurrency": int(start_concurrency or 0) if start_concurrency else None,
+                    "concurrency_increment": int(concurrency_increment or 0) if concurrency_increment else None,
+                    # Scaling config
+                    "scaling": scaling_config,
+                    # Workload mix
+                    "custom_point_lookup_pct": int(custom_point_lookup_pct or 0) if custom_point_lookup_pct is not None else None,
+                    "custom_range_scan_pct": int(custom_range_scan_pct or 0) if custom_range_scan_pct is not None else None,
+                    "custom_insert_pct": int(custom_insert_pct or 0) if custom_insert_pct is not None else None,
+                    "custom_update_pct": int(custom_update_pct or 0) if custom_update_pct is not None else None,
                     **_build_cost_fields(
                         float(duration or 0),
                         wh_size,
@@ -2307,6 +2425,14 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     "error_rate": 0.0,
                     "latency_aggregation_method": None,
                     "load_mode": load_mode,
+                    "start_concurrency": (
+                        _coerce_optional_int(getattr(running.scenario, "start_concurrency", None))
+                        or _coerce_optional_int(cfg.get("start_concurrency"))
+                    ) if load_mode == "FIND_MAX_CONCURRENCY" else None,
+                    "concurrency_increment": (
+                        _coerce_optional_int(getattr(running.scenario, "concurrency_increment", None))
+                        or _coerce_optional_int(cfg.get("concurrency_increment"))
+                    ) if load_mode == "FIND_MAX_CONCURRENCY" else None,
                     "scaling": scaling_payload,
                     "target_qps": (
                         float(getattr(running.scenario, "target_qps", 0.0) or 0.0)
@@ -2577,17 +2703,33 @@ async def get_test(test_id: str) -> dict[str, Any]:
         template_name = cfg.get("template_name") if isinstance(cfg, dict) else None
         template_id = cfg.get("template_id") if isinstance(cfg, dict) else None
         template_cfg = cfg.get("template_config") if isinstance(cfg, dict) else None
+        scenario_cfg = cfg.get("scenario") if isinstance(cfg, dict) else None
         workload_type = None
         if isinstance(template_cfg, dict):
             workload_type = template_cfg.get("workload_type")
+        
+        # Extract load_mode - check template_config first, then scenario as fallback
         load_mode = "CONCURRENCY"
-        if isinstance(template_cfg, dict):
-            load_mode = (
-                str(template_cfg.get("load_mode") or "CONCURRENCY").strip().upper()
-                or "CONCURRENCY"
-            )
+        if isinstance(template_cfg, dict) and template_cfg.get("load_mode"):
+            load_mode = str(template_cfg.get("load_mode")).strip().upper()
+        elif isinstance(scenario_cfg, dict) and scenario_cfg.get("load_mode"):
+            load_mode = str(scenario_cfg.get("load_mode")).strip().upper()
+        
         if load_mode not in {"CONCURRENCY", "QPS", "FIND_MAX_CONCURRENCY"}:
             load_mode = "CONCURRENCY"
+        
+        # Extract FIND_MAX_CONCURRENCY specific fields from template_config or scenario
+        start_concurrency = None
+        concurrency_increment = None
+        if load_mode == "FIND_MAX_CONCURRENCY":
+            if isinstance(template_cfg, dict):
+                start_concurrency = _coerce_optional_int(template_cfg.get("start_concurrency"))
+                concurrency_increment = _coerce_optional_int(template_cfg.get("concurrency_increment"))
+            if start_concurrency is None and isinstance(scenario_cfg, dict):
+                start_concurrency = _coerce_optional_int(scenario_cfg.get("start_concurrency"))
+            if concurrency_increment is None and isinstance(scenario_cfg, dict):
+                concurrency_increment = _coerce_optional_int(scenario_cfg.get("concurrency_increment"))
+        
         target_qps = None
         if load_mode == "QPS" and isinstance(template_cfg, dict):
             try:
@@ -2685,6 +2827,8 @@ async def get_test(test_id: str) -> dict[str, Any]:
             ),
             "concurrent_connections": int(concurrency or 0),
             "load_mode": load_mode,
+            "start_concurrency": start_concurrency,
+            "concurrency_increment": concurrency_increment,
             "target_qps": target_qps if load_mode == "QPS" else None,
             "min_connections": min_connections if load_mode == "QPS" else None,
             "scaling": scaling_payload,
@@ -6106,6 +6250,29 @@ def _build_concurrency_prompt(
     context: str | None,
     execution_logs: str,
     latency_variance_text: str,
+    # New parameters for scaling and workload config
+    scaling_mode: str = "AUTO",
+    min_workers: int = 1,
+    max_workers: int | None = None,
+    min_threads_per_worker: int | None = None,
+    max_threads_per_worker: int | None = None,
+    cpu_limit_pct: float | None = None,
+    mem_limit_pct: float | None = None,
+    point_lookup_pct: int = 0,
+    range_scan_pct: int = 0,
+    insert_pct: int = 0,
+    update_pct: int = 0,
+    slo_p95_target: float | None = None,
+    slo_p99_target: float | None = None,
+    slo_max_error_pct: float | None = None,
+    think_time_ms: int = 0,
+    warmup_seconds: int = 0,
+    use_cached_result: bool = True,
+    # Multi-cluster and cost parameters
+    min_clusters: int = 1,
+    max_clusters: int = 1,
+    scaling_policy: str = "STANDARD",
+    warehouse_credits_used: float | None = None,
 ) -> str:
     """Build prompt for CONCURRENCY mode (fixed worker count)."""
     error_pct = (failed_ops / total_ops * 100) if total_ops > 0 else 0
@@ -6120,6 +6287,88 @@ def _build_concurrency_prompt(
 EXECUTION LOGS (filtered for relevance):
 {execution_logs}
 """
+
+    # Build scaling mode description
+    scaling_mode_desc = {
+        "FIXED": "FIXED (static worker count, no auto-scaling)",
+        "AUTO": "AUTO (workers scale automatically, unbounded)",
+        "BOUNDED": "BOUNDED (workers scale within min/max limits)",
+    }.get(scaling_mode, scaling_mode)
+
+    # Build scaling configuration text
+    scaling_config_lines = [f"- Scaling Mode: {scaling_mode_desc}"]
+    if scaling_mode == "BOUNDED":
+        scaling_config_lines.append(f"- Worker Bounds: {min_workers}-{max_workers or 'unlimited'} workers")
+        if min_threads_per_worker is not None or max_threads_per_worker is not None:
+            scaling_config_lines.append(
+                f"- Threads per Worker: {min_threads_per_worker or 1}-{max_threads_per_worker or 'unlimited'}"
+            )
+    elif scaling_mode == "AUTO":
+        scaling_config_lines.append(f"- Min Workers: {min_workers}")
+        if max_workers:
+            scaling_config_lines.append(f"- Max Workers: {max_workers}")
+    
+    # Add multi-cluster config for Snowflake
+    if not is_postgres and max_clusters > 1:
+        scaling_config_lines.append(f"- Multi-Cluster: {min_clusters}-{max_clusters} clusters ({scaling_policy})")
+    
+    # Add guardrails if configured
+    if cpu_limit_pct is not None or mem_limit_pct is not None:
+        guardrail_parts = []
+        if cpu_limit_pct is not None:
+            guardrail_parts.append(f"CPU<{cpu_limit_pct}%")
+        if mem_limit_pct is not None:
+            guardrail_parts.append(f"Memory<{mem_limit_pct}%")
+        scaling_config_lines.append(f"- Resource Guardrails: {', '.join(guardrail_parts)}")
+    
+    scaling_config_text = "\n".join(scaling_config_lines)
+
+    # Build cost analysis text (Snowflake only)
+    cost_text = ""
+    if not is_postgres and warehouse_credits_used is not None and warehouse_credits_used > 0:
+        cost_per_op = (warehouse_credits_used / total_ops * 1000) if total_ops > 0 else 0
+        cost_text = f"""
+COST ANALYSIS:
+- Warehouse Credits Used: {warehouse_credits_used:.4f}
+- Cost per 1000 Operations: {cost_per_op:.6f} credits
+- Total Operations: {total_ops:,}"""
+
+    # Build workload mix text
+    mix_parts = []
+    if point_lookup_pct > 0:
+        mix_parts.append(f"Point Lookup: {point_lookup_pct}%")
+    if range_scan_pct > 0:
+        mix_parts.append(f"Range Scan: {range_scan_pct}%")
+    if insert_pct > 0:
+        mix_parts.append(f"Insert: {insert_pct}%")
+    if update_pct > 0:
+        mix_parts.append(f"Update: {update_pct}%")
+    workload_mix_text = ", ".join(mix_parts) if mix_parts else "Not specified"
+
+    # Build SLO targets text
+    slo_lines = []
+    if slo_p95_target is not None and slo_p95_target > 0:
+        slo_lines.append(f"P95 ≤ {slo_p95_target}ms")
+    if slo_p99_target is not None and slo_p99_target > 0:
+        slo_lines.append(f"P99 ≤ {slo_p99_target}ms")
+    if slo_max_error_pct is not None and slo_max_error_pct >= 0:
+        slo_lines.append(f"Error Rate ≤ {slo_max_error_pct}%")
+    slo_text = ", ".join(slo_lines) if slo_lines else "None configured"
+
+    # SLO evaluation
+    slo_evaluation = ""
+    if slo_lines:
+        p95_pass = slo_p95_target is None or slo_p95_target <= 0 or p95 <= slo_p95_target
+        p99_pass = slo_p99_target is None or slo_p99_target <= 0 or p99 <= slo_p99_target
+        error_pass = slo_max_error_pct is None or error_pct <= slo_max_error_pct
+        all_pass = p95_pass and p99_pass and error_pass
+        slo_evaluation = f"\n- SLO Status: {'✅ PASSED' if all_pass else '❌ FAILED'}"
+        if not p95_pass:
+            slo_evaluation += f" (P95: {p95:.1f}ms > {slo_p95_target}ms target)"
+        if not p99_pass:
+            slo_evaluation += f" (P99: {p99:.1f}ms > {slo_p99_target}ms target)"
+        if not error_pass:
+            slo_evaluation += f" (Error: {error_pct:.2f}% > {slo_max_error_pct}% target)"
     
     # Build platform-specific guidance
     if is_postgres:
@@ -6172,7 +6421,18 @@ TEST SUMMARY:
 - Table Type: {table_type}
 - {"Instance" if is_postgres else "Warehouse"}: {warehouse} ({warehouse_size})
 - Fixed Workers: {concurrency} workers
-- Duration: {duration}s
+- Duration: {duration}s (Warmup: {warmup_seconds}s)
+- Think Time: {think_time_ms}ms between operations
+- Result Cache: {"Enabled" if use_cached_result else "Disabled"}
+
+SCALING CONFIGURATION:
+{scaling_config_text}
+
+WORKLOAD MIX: {workload_mix_text}
+
+SLO TARGETS: {slo_text}{slo_evaluation}
+
+RESULTS:
 - Total Operations: {total_ops} (Reads: {read_ops}, Writes: {write_ops})
 - Failed Operations: {failed_ops} ({error_pct:.2f}%)
 - Throughput: {ops_per_sec:.1f} ops/sec
@@ -6184,7 +6444,7 @@ TEST SUMMARY:
 
 {qps_info}
 {wh_text}
-
+{cost_text}
 {f"Additional Context: {context}" if context else ""}
 {logs_section}
 Provide analysis structured as:
@@ -6193,6 +6453,7 @@ Provide analysis structured as:
    - Is throughput ({ops_per_sec:.1f} ops/sec) reasonable for this configuration?
    - Are latencies acceptable? (p95={p95:.1f}ms, p99={p99:.1f}ms)
    - Is error rate ({error_pct:.2f}%) acceptable?
+   - Did the test meet SLO targets (if configured)?
 
 2. **Key Findings**: What stands out in the metrics?
    - Any concerning latency outliers (compare p50 vs p95 vs p99)?
@@ -6205,7 +6466,12 @@ Provide analysis structured as:
 
 {recommendations_guidance}
 
-{"7" if is_postgres else "6"}. **Overall Grade**: A/B/C/D/F with brief justification.
+{"7" if is_postgres else "6"}. **Overall Grade**: A/B/C/D/F based on:
+   - **A**: Excellent - met all SLOs, low error rate (<0.1%), stable latencies (p99/p50 < 3x), good throughput
+   - **B**: Good - met most SLOs, acceptable error rate (<1%), moderate latency variance
+   - **C**: Fair - missed some SLOs, noticeable issues but functional
+   - **D**: Poor - significant SLO misses, high errors (>5%), or severe latency spikes
+   - **F**: Failed - test failed, extremely high errors, or unusable performance
 
 Keep analysis concise and actionable. Use bullet points with specific numbers."""
 
@@ -6235,6 +6501,31 @@ def _build_qps_prompt(
     context: str | None,
     execution_logs: str,
     latency_variance_text: str,
+    # New parameters for scaling and workload config
+    scaling_mode: str = "AUTO",
+    min_workers: int = 1,
+    max_workers: int | None = None,
+    min_threads_per_worker: int | None = None,
+    max_threads_per_worker: int | None = None,
+    cpu_limit_pct: float | None = None,
+    mem_limit_pct: float | None = None,
+    point_lookup_pct: int = 0,
+    range_scan_pct: int = 0,
+    insert_pct: int = 0,
+    update_pct: int = 0,
+    slo_p95_target: float | None = None,
+    slo_p99_target: float | None = None,
+    slo_max_error_pct: float | None = None,
+    think_time_ms: int = 0,
+    warmup_seconds: int = 0,
+    use_cached_result: bool = True,
+    start_threads: int | None = None,
+    max_threads_per_interval: int | None = None,
+    # Multi-cluster and cost parameters
+    min_clusters: int = 1,
+    max_clusters: int = 1,
+    scaling_policy: str = "STANDARD",
+    warehouse_credits_used: float | None = None,
 ) -> str:
     """Build prompt for QPS mode (auto-scaling to target)."""
     error_pct = (failed_ops / total_ops * 100) if total_ops > 0 else 0
@@ -6250,6 +6541,93 @@ def _build_qps_prompt(
 AUTO-SCALER LOGS (showing controller decisions):
 {execution_logs}
 """
+
+    # Build scaling mode description
+    scaling_mode_desc = {
+        "FIXED": "FIXED (static thread count, no auto-scaling)",
+        "AUTO": "AUTO (threads scale automatically, unbounded)",
+        "BOUNDED": "BOUNDED (threads scale within min/max limits)",
+    }.get(scaling_mode, scaling_mode)
+
+    # Build scaling configuration text
+    scaling_config_lines = [f"- Scaling Mode: {scaling_mode_desc}"]
+    if scaling_mode == "BOUNDED":
+        scaling_config_lines.append(f"- Worker Bounds: {min_workers}-{max_workers or 'unlimited'} workers")
+        if min_threads_per_worker is not None or max_threads_per_worker is not None:
+            scaling_config_lines.append(
+                f"- Threads per Worker: {min_threads_per_worker or 1}-{max_threads_per_worker or 'unlimited'}"
+            )
+    elif scaling_mode == "AUTO":
+        scaling_config_lines.append(f"- Min Workers: {min_workers}")
+        if max_workers:
+            scaling_config_lines.append(f"- Max Workers: {max_workers}")
+    
+    if start_threads is not None:
+        scaling_config_lines.append(f"- Starting Threads: {start_threads}")
+    if max_threads_per_interval is not None:
+        scaling_config_lines.append(f"- Max Threads/Interval: {max_threads_per_interval}")
+    
+    # Add multi-cluster config for Snowflake
+    if not is_postgres and max_clusters > 1:
+        scaling_config_lines.append(f"- Multi-Cluster: {min_clusters}-{max_clusters} clusters ({scaling_policy})")
+    
+    # Add guardrails if configured
+    if cpu_limit_pct is not None or mem_limit_pct is not None:
+        guardrail_parts = []
+        if cpu_limit_pct is not None:
+            guardrail_parts.append(f"CPU<{cpu_limit_pct}%")
+        if mem_limit_pct is not None:
+            guardrail_parts.append(f"Memory<{mem_limit_pct}%")
+        scaling_config_lines.append(f"- Resource Guardrails: {', '.join(guardrail_parts)}")
+    
+    scaling_config_text = "\n".join(scaling_config_lines)
+
+    # Build cost analysis text (Snowflake only)
+    cost_text = ""
+    if not is_postgres and warehouse_credits_used is not None and warehouse_credits_used > 0:
+        cost_per_op = (warehouse_credits_used / total_ops * 1000) if total_ops > 0 else 0
+        cost_text = f"""
+COST ANALYSIS:
+- Warehouse Credits Used: {warehouse_credits_used:.4f}
+- Cost per 1000 Operations: {cost_per_op:.6f} credits
+- Total Operations: {total_ops:,}"""
+
+    # Build workload mix text
+    mix_parts = []
+    if point_lookup_pct > 0:
+        mix_parts.append(f"Point Lookup: {point_lookup_pct}%")
+    if range_scan_pct > 0:
+        mix_parts.append(f"Range Scan: {range_scan_pct}%")
+    if insert_pct > 0:
+        mix_parts.append(f"Insert: {insert_pct}%")
+    if update_pct > 0:
+        mix_parts.append(f"Update: {update_pct}%")
+    workload_mix_text = ", ".join(mix_parts) if mix_parts else "Not specified"
+
+    # Build SLO targets text
+    slo_lines = []
+    if slo_p95_target is not None and slo_p95_target > 0:
+        slo_lines.append(f"P95 ≤ {slo_p95_target}ms")
+    if slo_p99_target is not None and slo_p99_target > 0:
+        slo_lines.append(f"P99 ≤ {slo_p99_target}ms")
+    if slo_max_error_pct is not None and slo_max_error_pct >= 0:
+        slo_lines.append(f"Error Rate ≤ {slo_max_error_pct}%")
+    slo_text = ", ".join(slo_lines) if slo_lines else "None configured"
+
+    # SLO evaluation
+    slo_evaluation = ""
+    if slo_lines:
+        p95_pass = slo_p95_target is None or slo_p95_target <= 0 or p95 <= slo_p95_target
+        p99_pass = slo_p99_target is None or slo_p99_target <= 0 or p99 <= slo_p99_target
+        error_pass = slo_max_error_pct is None or error_pct <= slo_max_error_pct
+        all_pass = p95_pass and p99_pass and error_pass
+        slo_evaluation = f"\n- SLO Status: {'✅ PASSED' if all_pass else '❌ FAILED'}"
+        if not p95_pass:
+            slo_evaluation += f" (P95: {p95:.1f}ms > {slo_p95_target}ms target)"
+        if not p99_pass:
+            slo_evaluation += f" (P99: {p99:.1f}ms > {slo_p99_target}ms target)"
+        if not error_pass:
+            slo_evaluation += f" (Error: {error_pct:.2f}% > {slo_max_error_pct}% target)"
     
     # Platform-specific intro and guidance
     if is_postgres:
@@ -6264,13 +6642,15 @@ AUTO-SCALER LOGS (showing controller decisions):
    - Network latency limiting throughput?
    - PostgreSQL server capacity (check server execution time)?
    - Connection pool exhaustion?
+   - Resource guardrails triggered (CPU/Memory limits)?
    - High error rate?"""
         recommendations_guidance = """5. **Recommendations**:
    - Adjust target QPS (higher or lower)?
-   - Increase max_concurrency?
+   - Increase max_concurrency or max_workers?
    - Larger Postgres instance needed?
    - Improve network latency (geographic proximity)?
-   - Query optimizations or better indexing?"""
+   - Query optimizations or better indexing?
+   - Adjust resource guardrails if they're limiting scaling?"""
     else:
         platform_intro = "You are analyzing a Snowflake QPS mode benchmark test."
         latency_guidance = """3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
@@ -6280,17 +6660,19 @@ AUTO-SCALER LOGS (showing controller decisions):
         bottleneck_guidance = """4. **Bottleneck Analysis**: What limited target achievement?
    - Max workers reached?
    - Warehouse saturation (queue times)?
+   - Resource guardrails triggered (CPU/Memory limits)?
    - High error rate?"""
         recommendations_guidance = """5. **Recommendations**:
    - Adjust target QPS (higher or lower)?
-   - Increase max_concurrency?
+   - Increase max_concurrency or max_workers?
    - Larger warehouse needed?
-   - Query optimizations?"""
+   - Query optimizations?
+   - Adjust resource guardrails if they're limiting scaling?"""
 
     return f"""{platform_intro}
 
 **Mode: QPS (Auto-Scale to Target Throughput)**
-This test dynamically scaled connections between {min_connections}-{max_concurrency} to achieve a target throughput of {target_qps} ops/sec. The controller adjusts concurrency based on achieved vs target QPS.
+This test dynamically scaled threads to achieve a target throughput of {target_qps} ops/sec. The controller adjusts concurrency based on achieved vs target QPS, evaluating every ~10 seconds.
 
 TEST SUMMARY:
 - Test Name: {test_name}
@@ -6299,8 +6681,19 @@ TEST SUMMARY:
 - {"Instance" if is_postgres else "Warehouse"}: {warehouse} ({warehouse_size})
 - Target QPS: {target_qps} ops/sec
 - Achieved QPS: {ops_per_sec:.1f} ops/sec ({target_achieved_pct:.1f}% of target)
-- Connection Range: {min_connections}-{max_concurrency}
-- Duration: {duration}s
+- Duration: {duration}s (Warmup: {warmup_seconds}s)
+- Think Time: {think_time_ms}ms between operations
+- Result Cache: {"Enabled" if use_cached_result else "Disabled"}
+
+SCALING CONFIGURATION:
+{scaling_config_text}
+- Connection Range: {min_connections}-{max_concurrency} (total threads)
+
+WORKLOAD MIX: {workload_mix_text}
+
+SLO TARGETS: {slo_text}{slo_evaluation}
+
+RESULTS:
 - Total Operations: {total_ops} (Reads: {read_ops}, Writes: {write_ops})
 - Failed Operations: {failed_ops} ({error_pct:.2f}%)
 - Latency: p50={p50:.1f}ms, p95={p95:.1f}ms, p99={p99:.1f}ms
@@ -6311,19 +6704,21 @@ TEST SUMMARY:
 
 {qps_info}
 {wh_text}
-
+{cost_text}
 {f"Additional Context: {context}" if context else ""}
 {logs_section}
 Provide analysis structured as:
 
 1. **Target Achievement**: Did the test hit the target?
-   - Target: {target_qps} ops/sec, Achieved: {ops_per_sec:.1f} ops/sec
-   - If target not achieved, why? (hit max workers? high latency? errors?)
+   - Target: {target_qps} ops/sec, Achieved: {ops_per_sec:.1f} ops/sec ({target_achieved_pct:.1f}%)
+   - If target not achieved, why? (hit max workers? high latency? errors? guardrails?)
    - Was the target realistic for this configuration?
+   - Did the test meet SLO targets (if configured)?
 
 2. **Auto-Scaler Performance**: How well did the controller perform?
    - Did it effectively scale to meet demand?
    - Were there oscillations or instability? (Check the logs for scaling decisions)
+   - Did scaling mode ({scaling_mode}) allow sufficient flexibility?
    {"- Connection pool utilization and PostgreSQL connection limits?" if is_postgres else "- Queue times indicating the controller couldn't keep up?"}
 
 {latency_guidance}
@@ -6332,7 +6727,12 @@ Provide analysis structured as:
 
 {recommendations_guidance}
 
-6. **Overall Grade**: A/B/C/D/F with brief justification.
+6. **Overall Grade**: A/B/C/D/F based on:
+   - **A**: Excellent - achieved >95% of target QPS, met all SLOs, stable scaling
+   - **B**: Good - achieved >80% of target QPS, met most SLOs, minor oscillations
+   - **C**: Fair - achieved >60% of target QPS, some SLO misses, scaling issues
+   - **D**: Poor - achieved <60% of target QPS, significant SLO misses
+   - **F**: Failed - test failed, unable to scale, or unusable performance
 
 Keep analysis concise and actionable. Use bullet points with specific numbers."""
 
@@ -6366,6 +6766,31 @@ def _build_find_max_prompt(
     qps_stability_pct: float,
     execution_logs: str,
     latency_variance_text: str,
+    # New parameters for scaling and workload config
+    scaling_mode: str = "AUTO",
+    min_workers: int = 1,
+    max_workers: int | None = None,
+    min_threads_per_worker: int | None = None,
+    max_threads_per_worker: int | None = None,
+    cpu_limit_pct: float | None = None,
+    mem_limit_pct: float | None = None,
+    point_lookup_pct: int = 0,
+    range_scan_pct: int = 0,
+    insert_pct: int = 0,
+    update_pct: int = 0,
+    slo_p95_target: float | None = None,
+    slo_p99_target: float | None = None,
+    slo_max_error_pct: float | None = None,
+    think_time_ms: int = 0,
+    warmup_seconds: int = 0,
+    use_cached_result: bool = True,
+    # Multi-cluster and cost parameters
+    min_clusters: int = 1,
+    max_clusters: int = 1,
+    scaling_policy: str = "STANDARD",
+    warehouse_credits_used: float | None = None,
+    # Step history for FIND_MAX
+    step_history_text: str = "",
 ) -> str:
     """Build prompt for FIND_MAX_CONCURRENCY mode (step-load test)."""
     error_pct = (failed_ops / total_ops * 100) if total_ops > 0 else 0
@@ -6381,8 +6806,76 @@ EXECUTION LOGS (step transitions, degradation detection, backoff decisions):
 {execution_logs}
 """
 
-    # Extract step history and results
-    step_history_text = ""
+    # Build scaling mode description
+    scaling_mode_desc = {
+        "FIXED": "FIXED (static worker count per step)",
+        "AUTO": "AUTO (workers scale automatically within step)",
+        "BOUNDED": "BOUNDED (workers scale within min/max limits per step)",
+    }.get(scaling_mode, scaling_mode)
+
+    # Build scaling configuration text
+    scaling_config_lines = [f"- Scaling Mode: {scaling_mode_desc}"]
+    if scaling_mode == "BOUNDED":
+        scaling_config_lines.append(f"- Worker Bounds: {min_workers}-{max_workers or 'unlimited'} workers")
+        if min_threads_per_worker is not None or max_threads_per_worker is not None:
+            scaling_config_lines.append(
+                f"- Threads per Worker: {min_threads_per_worker or 1}-{max_threads_per_worker or 'unlimited'}"
+            )
+    elif scaling_mode == "AUTO":
+        scaling_config_lines.append(f"- Min Workers: {min_workers}")
+        if max_workers:
+            scaling_config_lines.append(f"- Max Workers: {max_workers}")
+    
+    # Add multi-cluster config for Snowflake
+    if not is_postgres and max_clusters > 1:
+        scaling_config_lines.append(f"- Multi-Cluster: {min_clusters}-{max_clusters} clusters ({scaling_policy})")
+    
+    # Add guardrails if configured
+    if cpu_limit_pct is not None or mem_limit_pct is not None:
+        guardrail_parts = []
+        if cpu_limit_pct is not None:
+            guardrail_parts.append(f"CPU<{cpu_limit_pct}%")
+        if mem_limit_pct is not None:
+            guardrail_parts.append(f"Memory<{mem_limit_pct}%")
+        scaling_config_lines.append(f"- Resource Guardrails: {', '.join(guardrail_parts)}")
+    
+    scaling_config_text = "\n".join(scaling_config_lines)
+
+    # Build cost analysis text (Snowflake only)
+    cost_text = ""
+    if not is_postgres and warehouse_credits_used is not None and warehouse_credits_used > 0:
+        cost_per_op = (warehouse_credits_used / total_ops * 1000) if total_ops > 0 else 0
+        cost_text = f"""
+COST ANALYSIS:
+- Warehouse Credits Used: {warehouse_credits_used:.4f}
+- Cost per 1000 Operations: {cost_per_op:.6f} credits
+- Total Operations: {total_ops:,}"""
+
+    # Build workload mix text
+    mix_parts = []
+    if point_lookup_pct > 0:
+        mix_parts.append(f"Point Lookup: {point_lookup_pct}%")
+    if range_scan_pct > 0:
+        mix_parts.append(f"Range Scan: {range_scan_pct}%")
+    if insert_pct > 0:
+        mix_parts.append(f"Insert: {insert_pct}%")
+    if update_pct > 0:
+        mix_parts.append(f"Update: {update_pct}%")
+    workload_mix_text = ", ".join(mix_parts) if mix_parts else "Not specified"
+
+    # Build SLO targets text
+    slo_lines = []
+    if slo_p95_target is not None and slo_p95_target > 0:
+        slo_lines.append(f"P95 ≤ {slo_p95_target}ms")
+    if slo_p99_target is not None and slo_p99_target > 0:
+        slo_lines.append(f"P99 ≤ {slo_p99_target}ms")
+    if slo_max_error_pct is not None and slo_max_error_pct >= 0:
+        slo_lines.append(f"Error Rate ≤ {slo_max_error_pct}%")
+    slo_text = ", ".join(slo_lines) if slo_lines else "None configured"
+
+    # Extract step history and results from find_max_result (if available)
+    # Note: step_history_text parameter may already have data from CONTROLLER_STEP_HISTORY
+    db_step_history_text = ""
     best_concurrency = "Unknown"
     best_qps = "Unknown"
     baseline_p95 = "Unknown"
@@ -6396,11 +6889,11 @@ EXECUTION LOGS (step transitions, degradation detection, backoff decisions):
 
         step_history = find_max_result.get("step_history", [])
         if step_history:
-            step_history_text = "\nSTEP-BY-STEP PROGRESSION:\n"
-            step_history_text += (
+            db_step_history_text = "\nSTEP-BY-STEP PROGRESSION:\n"
+            db_step_history_text += (
                 "| Step | Workers | QPS | p95 (ms) | Error % | Stable | Reason |\n"
             )
-            step_history_text += (
+            db_step_history_text += (
                 "|------|---------|-----|----------|---------|--------|--------|\n"
             )
             for step in step_history:
@@ -6411,10 +6904,13 @@ EXECUTION LOGS (step transitions, degradation detection, backoff decisions):
                 err_pct = step.get("error_rate_pct", 0)
                 stable = "Yes" if step.get("stable", False) else "No"
                 reason = step.get("stop_reason", "-") or "-"
-                step_history_text += (
+                db_step_history_text += (
                     f"| {step_num} | {workers} | {qps:.1f} | {step_p95:.1f} "
                     f"| {err_pct:.2f}% | {stable} | {reason} |\n"
                 )
+    
+    # Use passed step_history_text if db doesn't have it
+    final_step_history_text = db_step_history_text if db_step_history_text else step_history_text
     
     # Platform-specific intro and guidance
     if is_postgres:
@@ -6429,17 +6925,20 @@ EXECUTION LOGS (step transitions, degradation detection, backoff decisions):
    - PostgreSQL server capacity (check server execution time)?
    - Connection pool exhaustion?
    - Shared buffer contention (cache hit ratio dropping)?
-   - Lock contention at high concurrency?"""
+   - Lock contention at high concurrency?
+   - Resource guardrails triggered (CPU/Memory limits)?"""
         recommendations_guidance = """6. **Recommendations**:
    - Optimal operating point (usually 70-80% of max)?
    - Would a larger Postgres instance increase max concurrency?
    - Would improved network latency allow higher throughput?
-   - Any connection pooling or batching optimizations?"""
+   - Any connection pooling or batching optimizations?
+   - Adjust resource guardrails if they're limiting discovery?"""
         grade_criteria = f"""7. **Overall Grade**: A/B/C/D/F based on:
-   - How well did max concurrency match expectations for {warehouse_size} Postgres instance?
-   - Was degradation graceful or sudden?
-   - Is the recommended operating point practical?
-   - How much of the latency is server vs network at the optimal point?"""
+   - **A**: Excellent - found high max concurrency for {warehouse_size}, graceful degradation, clear optimal point
+   - **B**: Good - reasonable max concurrency, mostly graceful degradation, useful results
+   - **C**: Fair - lower than expected max, some abrupt degradation, but usable data
+   - **D**: Poor - very low max concurrency, sudden failures, limited insights
+   - **F**: Failed - test failed early, no useful max concurrency found"""
     else:
         platform_intro = "You are analyzing a Snowflake FIND_MAX_CONCURRENCY benchmark test."
         latency_guidance = """3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
@@ -6447,17 +6946,29 @@ EXECUTION LOGS (step transitions, degradation detection, backoff decisions):
    - If high SF spread: warehouse contention, cold cache, multi-cluster scaling?
    - If high E2E but low SF: network latency, client processing, connection pooling?"""
         bottleneck_guidance = """5. **Bottleneck Identification**: What resource was exhausted?
-   - Warehouse compute capacity?
-   - Connection/query queue limits?
-   - Data access contention?"""
+   - Warehouse compute capacity (queue saturation)?
+   - Multi-cluster scaling limits reached?
+   - Data access contention?
+   - Resource guardrails triggered (CPU/Memory limits)?
+   
+   **IMPORTANT - Understanding Snowflake Scaling:**
+   - "Workers/threads" in this test are CLIENT-SIDE concurrency (app threads sending queries)
+   - Snowflake warehouses scale INDEPENDENTLY via compute clusters, not client threads
+   - Reducing client threads does NOT free Snowflake resources - it just sends fewer queries
+   - To handle more load: scale UP the warehouse (MEDIUM→LARGE) or enable multi-cluster warehouses
+   - If cache hit rate is 0% and Result Cache is "Disabled", that's intentional test configuration"""
         recommendations_guidance = """6. **Recommendations**:
-   - Optimal operating point (usually 70-80% of max)?
-   - Would larger warehouse increase max concurrency?
-   - Any configuration changes to improve scalability?"""
+   - What is the sustainable operating point found by this test?
+   - Would a LARGER warehouse (not fewer threads) increase capacity?
+   - Would multi-cluster warehousing help with queue saturation?
+   - If cache is disabled, that's intentional - don't suggest enabling it
+   - Consider warehouse auto-suspend/resume settings for cost optimization"""
         grade_criteria = f"""7. **Overall Grade**: A/B/C/D/F based on:
-   - How well did max concurrency match expectations for {warehouse_size} warehouse?
-   - Was degradation graceful or sudden?
-   - Is the recommended operating point practical?"""
+   - **A**: Excellent - found high max concurrency for {warehouse_size}, graceful degradation, clear optimal point
+   - **B**: Good - reasonable max concurrency, mostly graceful degradation, useful results
+   - **C**: Fair - lower than expected max, some abrupt degradation, but usable data
+   - **D**: Poor - very low max concurrency, sudden failures, limited insights
+   - **F**: Failed - test failed early, no useful max concurrency found"""
 
     return f"""{platform_intro}
 
@@ -6476,6 +6987,18 @@ TEST SUMMARY:
 - Table Type: {table_type}
 - {"Instance" if is_postgres else "Warehouse"}: {warehouse} ({warehouse_size})
 - Step Configuration: Start={start_concurrency}, +{increment}/step, {step_duration}s/step, Max={max_concurrency}
+- Warmup: {warmup_seconds}s
+- Think Time: {think_time_ms}ms between operations
+- Result Cache: {"Enabled" if use_cached_result else "Disabled"}
+
+SCALING CONFIGURATION:
+{scaling_config_text}
+
+WORKLOAD MIX: {workload_mix_text}
+
+SLO TARGETS: {slo_text}
+
+FIND MAX RESULTS:
 - **Best Sustainable Concurrency: {best_concurrency} workers**
 - **Best Stable QPS: {best_qps}**
 - Baseline p95 Latency: {baseline_p95}ms
@@ -6487,13 +7010,13 @@ TEST SUMMARY:
 
 {latency_variance_text}
 
-{step_history_text}
+{final_step_history_text}
 
 {breakdown_text}
 
 {qps_info}
 {wh_text}
-
+{cost_text}
 {f"Additional Context: {context}" if context else ""}
 {logs_section}
 Provide analysis structured as:
@@ -6508,6 +7031,7 @@ Provide analysis structured as:
    - Was scaling linear (2x workers = 2x QPS)?
    - Where did diminishing returns begin?
    - At what point did latency start degrading?
+   - Did scaling mode ({scaling_mode}) affect the discovery process?
 
 {latency_guidance}
 
@@ -6515,6 +7039,7 @@ Provide analysis structured as:
    - Latency spike (compare baseline vs final p95)?
    - Error rate increase?
    {"- Cache hit ratio dropping or server time increasing?" if is_postgres else "- Queue saturation?"}
+   - Resource guardrails triggered?
    - Check logs for specific degradation messages
 
 {bottleneck_guidance}
@@ -6544,7 +7069,7 @@ async def ai_analysis(
                 QPS, TOTAL_OPERATIONS, FAILED_OPERATIONS,
                 P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS,
                 READ_OPERATIONS, WRITE_OPERATIONS,
-                TEST_CONFIG, FIND_MAX_RESULT
+                TEST_CONFIG, FIND_MAX_RESULT, WAREHOUSE_CREDITS_USED
             FROM {prefix}.TEST_RESULTS
             WHERE TEST_ID = ?
             """,
@@ -6571,6 +7096,7 @@ async def ai_analysis(
         write_ops = int(row[14] or 0)
         test_config = row[15]
         find_max_result_raw = row[16]
+        warehouse_credits_used = float(row[17] or 0) if row[17] is not None else None
 
         if isinstance(test_config, str):
             test_config = json.loads(test_config)
@@ -6601,13 +7127,140 @@ async def ai_analysis(
         max_error_rate_pct = 1.0
         qps_stability_pct = 5.0
 
+        # Scaling configuration defaults
+        scaling_mode = "AUTO"
+        min_workers = 1
+        max_workers: int | None = None
+        min_threads_per_worker: int | None = None
+        max_threads_per_worker: int | None = None
+        cpu_limit_pct: float | None = None
+        mem_limit_pct: float | None = None
+
+        # Multi-cluster config defaults (Snowflake only)
+        min_clusters = 1
+        max_clusters = 1
+        scaling_policy = "STANDARD"
+
+        # Postgres-specific config defaults
+        use_pgbouncer = False
+        postgres_instance_size = ""
+
+        # Workload mix defaults
+        point_lookup_pct = 0
+        range_scan_pct = 0
+        insert_pct = 0
+        update_pct = 0
+
+        # SLO targets defaults
+        slo_p95_target: float | None = None
+        slo_p99_target: float | None = None
+        slo_max_error_pct: float | None = None
+
+        # Other config defaults
+        think_time_ms = 0
+        warmup_seconds = 0
+        use_cached_result = True
+
+        # Extract scenario config (test_config contains both scenario and template_config)
+        scenario_cfg = (
+            test_config.get("scenario")
+            if isinstance(test_config, dict)
+            else None
+        )
+        if not isinstance(scenario_cfg, dict):
+            scenario_cfg = {}
+
         if isinstance(test_config, dict):
-            load_mode = str(test_config.get("load_mode", "CONCURRENCY")).upper()
-            target_qps = test_config.get("target_qps")
+            # Load mode is in scenario or template_config, not at top level
+            load_mode = (
+                str(scenario_cfg.get("load_mode", "")).upper()
+                or str(template_cfg.get("load_mode", "") if template_cfg else "").upper()
+                or "CONCURRENCY"
+            )
+            target_qps = scenario_cfg.get("target_qps") or test_config.get("target_qps")
+            
+            # Extract scaling config - try test_config first, then template_config
             scaling_cfg = test_config.get("scaling")
+            if not isinstance(scaling_cfg, dict) and isinstance(template_cfg, dict):
+                scaling_cfg = template_cfg.get("scaling")
             if not isinstance(scaling_cfg, dict):
                 scaling_cfg = {}
+
+            # Extract scaling mode and bounds
+            scaling_mode = str(scaling_cfg.get("mode", "AUTO")).strip().upper() or "AUTO"
             min_connections = int(scaling_cfg.get("min_connections", 1) or 1)
+            min_workers = int(scaling_cfg.get("min_workers", 1) or 1)
+            max_workers = scaling_cfg.get("max_workers")
+            if max_workers is not None:
+                max_workers = int(max_workers)
+            min_threads_per_worker = scaling_cfg.get("min_threads_per_worker")
+            if min_threads_per_worker is not None:
+                min_threads_per_worker = int(min_threads_per_worker)
+            max_threads_per_worker = scaling_cfg.get("max_threads_per_worker")
+            if max_threads_per_worker is not None:
+                max_threads_per_worker = int(max_threads_per_worker)
+
+            # Extract resource guardrails - try test_config first, then template_config
+            guardrails = test_config.get("guardrails")
+            if not isinstance(guardrails, dict) and isinstance(template_cfg, dict):
+                guardrails = template_cfg.get("guardrails")
+            if isinstance(guardrails, dict):
+                # Support both naming conventions
+                cpu_limit_pct = guardrails.get("max_cpu_percent") or guardrails.get("cpu_limit_pct")
+                mem_limit_pct = guardrails.get("max_memory_percent") or guardrails.get("mem_limit_pct")
+
+            # Extract workload mix from template_config
+            if isinstance(template_cfg, dict):
+                # Try new format first (mix object), then fall back to custom_*_pct fields
+                mix = template_cfg.get("mix")
+                if isinstance(mix, dict):
+                    point_lookup_pct = int(mix.get("point_lookup", 0) or 0)
+                    range_scan_pct = int(mix.get("range_scan", 0) or 0)
+                    insert_pct = int(mix.get("insert", 0) or 0)
+                    update_pct = int(mix.get("update", 0) or 0)
+                else:
+                    # Fall back to custom_*_pct fields (legacy format)
+                    point_lookup_pct = int(template_cfg.get("custom_point_lookup_pct", 0) or 0)
+                    range_scan_pct = int(template_cfg.get("custom_range_scan_pct", 0) or 0)
+                    insert_pct = int(template_cfg.get("custom_insert_pct", 0) or 0)
+                    update_pct = int(template_cfg.get("custom_update_pct", 0) or 0)
+
+                # Extract SLO targets - try new format first, then per-query-type targets
+                targets = template_cfg.get("targets")
+                if isinstance(targets, dict):
+                    slo_p95_target = targets.get("p95_latency_ms")
+                    slo_p99_target = targets.get("p99_latency_ms")
+                    slo_max_error_pct = targets.get("max_error_pct")
+                else:
+                    # Fall back to per-query-type targets (use point lookup as primary)
+                    p95_pl = template_cfg.get("target_point_lookup_p95_latency_ms")
+                    p99_pl = template_cfg.get("target_point_lookup_p99_latency_ms")
+                    err_pl = template_cfg.get("target_point_lookup_error_rate_pct")
+                    # Only use if they're positive (configured)
+                    if p95_pl is not None and float(p95_pl) > 0:
+                        slo_p95_target = float(p95_pl)
+                    if p99_pl is not None and float(p99_pl) > 0:
+                        slo_p99_target = float(p99_pl)
+                    if err_pl is not None and float(err_pl) >= 0:
+                        slo_max_error_pct = float(err_pl)
+
+                # Other settings
+                use_cached_result = bool(template_cfg.get("use_cached_result", True))
+
+                # Extract multi-cluster config (Snowflake only)
+                min_clusters = int(template_cfg.get("min_clusters", 1) or 1)
+                max_clusters = int(template_cfg.get("max_clusters", 1) or 1)
+                scaling_policy = str(template_cfg.get("scaling_policy", "STANDARD") or "STANDARD").upper()
+
+                # Extract Postgres-specific config
+                use_pgbouncer = bool(template_cfg.get("use_pgbouncer", False))
+                postgres_instance_size = str(template_cfg.get("postgres_instance_size", "") or "")
+
+            # Extract timing config - try scenario first, then test_config
+            think_time_ms = int(test_config.get("think_time_ms", 0) or 0)
+            warmup_seconds = int(test_config.get("warmup_seconds", 0) or 0)
+
+            # FIND_MAX specific config
             start_concurrency = int(test_config.get("start_concurrency", 5) or 5)
             concurrency_increment = int(
                 test_config.get("concurrency_increment", 10) or 10
@@ -6716,15 +7369,20 @@ async def ai_analysis(
                 pool_stats = ps.get("pool", {}) or {}
                 if not isinstance(pool_stats, dict):
                     pool_stats = {}
-                pg_text = (
-                    "POSTGRES CONNECTION POOL:\n"
-                    f"- Pool size: {pool_stats.get('size', 'N/A')}\n"
-                    f"- Pool in-use: {pool_stats.get('in_use', 'N/A')}\n"
-                    f"- Pool free: {pool_stats.get('free', 'N/A')}\n"
-                    f"- Pool max: {pool_stats.get('max_size', 'N/A')}\n"
-                    f"- Active connections: {ps.get('active_connections', 'N/A')}\n"
-                    f"- Max connections: {ps.get('max_connections', 'N/A')}"
-                )
+                
+                # Build Postgres configuration text
+                pg_config_lines = ["POSTGRES CONFIGURATION:"]
+                if postgres_instance_size:
+                    pg_config_lines.append(f"- Instance Size: {postgres_instance_size}")
+                pg_config_lines.append(f"- Connection Pooling: {'PgBouncer (external)' if use_pgbouncer else 'Direct connections'}")
+                pg_config_lines.append(f"- Max Concurrent Threads: {concurrency}")
+                
+                # Note: The orchestrator pool is small (1-2) for management queries only
+                # Worker threads connect separately via PgBouncer or direct connections
+                pg_config_lines.append(f"- Active Connections (current): {ps.get('active_connections', 'N/A')}")
+                pg_config_lines.append(f"- Max Connections (server limit): {ps.get('max_connections', 'N/A')}")
+                
+                pg_text = "\n".join(pg_config_lines)
             
             # Fetch pg_stat_statements enrichment data (server-side metrics)
             pg_enrichment = await _fetch_pg_enrichment(pool=pool, test_id=test_id)
@@ -6832,6 +7490,35 @@ async def ai_analysis(
             limit=50,
         )
 
+        # Fetch FIND_MAX step history if applicable
+        find_max_history = None
+        find_max_history_text = ""
+        if load_mode == "FIND_MAX_CONCURRENCY":
+            find_max_history = await _fetch_find_max_step_history(pool=pool, test_id=test_id)
+            if find_max_history.get("find_max_history_available"):
+                # Build step history text for prompt
+                steps = find_max_history.get("steps", [])
+                best_concurrency = find_max_history.get("best_stable_concurrency")
+                best_qps = find_max_history.get("best_stable_qps", 0)
+                degradation_points = find_max_history.get("degradation_points", [])
+                
+                find_max_history_text = "STEP-BY-STEP CONCURRENCY PROGRESSION:\n"
+                for step in steps:
+                    outcome_marker = "✓" if step["outcome"] == "STABLE" else "✗"
+                    find_max_history_text += (
+                        f"- Step {step['step']}: {step['concurrency']} threads → "
+                        f"{step['qps']:.1f} QPS, P95={step['p95_ms']:.1f}ms "
+                        f"[{outcome_marker} {step['outcome']}]"
+                    )
+                    if step["stop_reason"]:
+                        find_max_history_text += f" ({step['stop_reason']})"
+                    find_max_history_text += "\n"
+                
+                find_max_history_text += f"\nBEST STABLE CONCURRENCY: {best_concurrency} threads @ {best_qps:.1f} QPS"
+                
+                if degradation_points:
+                    find_max_history_text += f"\nDEGRADATION DETECTED AT: {', '.join(str(d['concurrency']) for d in degradation_points)} threads"
+
         # Build mode-specific prompt
         if load_mode == "FIND_MAX_CONCURRENCY":
             prompt = _build_find_max_prompt(
@@ -6862,6 +7549,31 @@ async def ai_analysis(
                 qps_stability_pct=qps_stability_pct,
                 execution_logs=execution_logs,
                 latency_variance_text=latency_variance_text,
+                # Scaling and workload configuration
+                scaling_mode=scaling_mode,
+                min_workers=min_workers,
+                max_workers=max_workers,
+                min_threads_per_worker=min_threads_per_worker,
+                max_threads_per_worker=max_threads_per_worker,
+                cpu_limit_pct=cpu_limit_pct,
+                mem_limit_pct=mem_limit_pct,
+                point_lookup_pct=point_lookup_pct,
+                range_scan_pct=range_scan_pct,
+                insert_pct=insert_pct,
+                update_pct=update_pct,
+                slo_p95_target=slo_p95_target,
+                slo_p99_target=slo_p99_target,
+                slo_max_error_pct=slo_max_error_pct,
+                think_time_ms=think_time_ms,
+                warmup_seconds=warmup_seconds,
+                use_cached_result=use_cached_result,
+                # Multi-cluster and cost parameters
+                min_clusters=min_clusters,
+                max_clusters=max_clusters,
+                scaling_policy=scaling_policy,
+                warehouse_credits_used=warehouse_credits_used,
+                # Step history for FIND_MAX
+                step_history_text=find_max_history_text,
             )
         elif load_mode == "QPS":
             prompt = _build_qps_prompt(
@@ -6888,6 +7600,29 @@ async def ai_analysis(
                 context=context,
                 execution_logs=execution_logs,
                 latency_variance_text=latency_variance_text,
+                # Scaling and workload configuration
+                scaling_mode=scaling_mode,
+                min_workers=min_workers,
+                max_workers=max_workers,
+                min_threads_per_worker=min_threads_per_worker,
+                max_threads_per_worker=max_threads_per_worker,
+                cpu_limit_pct=cpu_limit_pct,
+                mem_limit_pct=mem_limit_pct,
+                point_lookup_pct=point_lookup_pct,
+                range_scan_pct=range_scan_pct,
+                insert_pct=insert_pct,
+                update_pct=update_pct,
+                slo_p95_target=slo_p95_target,
+                slo_p99_target=slo_p99_target,
+                slo_max_error_pct=slo_max_error_pct,
+                think_time_ms=think_time_ms,
+                warmup_seconds=warmup_seconds,
+                use_cached_result=use_cached_result,
+                # Multi-cluster and cost parameters
+                min_clusters=min_clusters,
+                max_clusters=max_clusters,
+                scaling_policy=scaling_policy,
+                warehouse_credits_used=warehouse_credits_used,
             )
         else:
             # Default to CONCURRENCY mode
@@ -6913,6 +7648,24 @@ async def ai_analysis(
                 context=context,
                 execution_logs=execution_logs,
                 latency_variance_text=latency_variance_text,
+                # Scaling and workload configuration
+                scaling_mode=scaling_mode,
+                min_workers=min_workers,
+                max_workers=max_workers,
+                min_threads_per_worker=min_threads_per_worker,
+                max_threads_per_worker=max_threads_per_worker,
+                cpu_limit_pct=cpu_limit_pct,
+                mem_limit_pct=mem_limit_pct,
+                point_lookup_pct=point_lookup_pct,
+                range_scan_pct=range_scan_pct,
+                insert_pct=insert_pct,
+                update_pct=update_pct,
+                slo_p95_target=slo_p95_target,
+                slo_p99_target=slo_p99_target,
+                slo_max_error_pct=slo_max_error_pct,
+                think_time_ms=think_time_ms,
+                warmup_seconds=warmup_seconds,
+                use_cached_result=use_cached_result,
             )
 
         try:

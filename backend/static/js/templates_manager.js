@@ -1,4 +1,7 @@
 function templatesManager() {
+  // Use shared DisplayUtils (loaded from display-utils.js)
+  const DU = window.DisplayUtils || {};
+
   return {
     templates: [],
     filteredTemplates: [],
@@ -28,48 +31,25 @@ function templatesManager() {
       await this.loadTemplates();
     },
 
+    // Delegate to shared DisplayUtils
     tableTypeKey(template) {
-      return String(template?.config?.table_type || "").trim().toUpperCase();
+      return DU.tableTypeKey ? DU.tableTypeKey(template) : "";
     },
 
     isPostgresType(template) {
-      const t = this.tableTypeKey(template);
-      return t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES";
+      return DU.isPostgresType ? DU.isPostgresType(template) : false;
     },
 
     tableTypeLabel(template) {
-      const t = this.tableTypeKey(template);
-      // Consolidate SNOWFLAKE_POSTGRES to POSTGRES for display
-      if (t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES") return "POSTGRES";
-      if (t === "HYBRID") return "HYBRID";
-      if (t === "STANDARD") return "STANDARD";
-      if (t === "INTERACTIVE") return "INTERACTIVE";
-      return t || "";
+      return DU.tableTypeLabel ? DU.tableTypeLabel(template) : "";
     },
 
     tableTypeIconSrc(template) {
-      const t = this.tableTypeKey(template);
-      if (t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES") {
-        return "/static/img/postgres_elephant.svg";
-      }
-      if (t === "HYBRID") {
-        return "/static/img/table_hybrid.svg";
-      }
-      if (t === "STANDARD") {
-        return "/static/img/table_standard.svg";
-      }
-      if (t === "INTERACTIVE") {
-        return "/static/img/table_interactive.svg";
-      }
-      return "";
+      return DU.tableTypeIconSrc ? DU.tableTypeIconSrc(template) : "";
     },
 
     tableFqn(template) {
-      const db = String(template?.config?.database || "").trim();
-      const sch = String(template?.config?.schema || "").trim();
-      const tbl = String(template?.config?.table_name || "").trim();
-      const parts = [db, sch, tbl].filter(Boolean);
-      return parts.join(".");
+      return DU.tableFqn ? DU.tableFqn(template) : "";
     },
 
     async loadTemplates() {
@@ -124,126 +104,29 @@ function templatesManager() {
       this.filteredTemplates = filtered;
     },
 
+    // Delegate to shared DisplayUtils
     deriveWorkloadLabel(config) {
-      // Templates are persisted as CUSTOM with explicit weights; derive a friendly label.
-      const pl = Number(config?.custom_point_lookup_pct || 0);
-      const rs = Number(config?.custom_range_scan_pct || 0);
-      const ins = Number(config?.custom_insert_pct || 0);
-      const upd = Number(config?.custom_update_pct || 0);
-
-      const readPct = pl + rs;
-      const writePct = ins + upd;
-
-      if (readPct === 0 && writePct > 0) return "WRITE_ONLY";
-      if (writePct === 0 && readPct > 0) return "READ_ONLY";
-      if (readPct >= 75) return "READ_HEAVY";
-      if (writePct >= 75) return "WRITE_HEAVY";
-      return "MIXED";
+      return DU.deriveWorkloadLabel ? DU.deriveWorkloadLabel(config) : "MIXED";
     },
 
-    // Show actual workload mix with line breaks: "PL 90%<br>RS 10%"
     workloadMixDisplay(config) {
-      const pl = Number(config?.custom_point_lookup_pct || 0);
-      const rs = Number(config?.custom_range_scan_pct || 0);
-      const ins = Number(config?.custom_insert_pct || 0);
-      const upd = Number(config?.custom_update_pct || 0);
-      const total = pl + rs + ins + upd;
-      if (total === 0) return "—";
-
-      const parts = [];
-      if (pl > 0) parts.push(`PL ${pl}%`);
-      if (rs > 0) parts.push(`RS ${rs}%`);
-      if (ins > 0) parts.push(`INS ${ins}%`);
-      if (upd > 0) parts.push(`UPD ${upd}%`);
-      return parts.join("<br>");
+      return DU.workloadMixDisplay ? DU.workloadMixDisplay(config) : "—";
     },
 
-    // Show duration with warmup breakdown on separate lines
     durationDisplay(config) {
-      const loadMode = String(config?.load_mode || "CONCURRENCY").toUpperCase();
-      if (loadMode === "FIND_MAX_CONCURRENCY") return "—";
-
-      const duration = Number(config?.duration || 0);
-      const warmup = Number(config?.warmup || 0);
-      if (duration <= 0) return "—";
-
-      const total = warmup + duration;
-      if (warmup > 0) {
-        return `${total}s<br><span style="color: #6b7280; font-size: 0.85em;">${warmup}s + ${duration}s</span>`;
-      }
-      return `${duration}s`;
+      return DU.durationDisplay ? DU.durationDisplay(config) : "—";
     },
 
-    // Show load mode with key details
     loadModeDisplay(config) {
-      const loadMode = String(config?.load_mode || "CONCURRENCY").toUpperCase();
-      
-      if (loadMode === "QPS") {
-        const targetQps = config?.target_qps || "—";
-        return `QPS: ${targetQps}`;
-      }
-      if (loadMode === "FIND_MAX_CONCURRENCY") {
-        const start = config?.start_concurrency || 5;
-        const inc = config?.concurrency_increment || 10;
-        return `Find Max: ${start}+${inc}`;
-      }
-      // CONCURRENCY mode
-      const threads = config?.concurrent_connections || "—";
-      return `Fixed: ${threads} threads`;
+      return DU.loadModeDisplay ? DU.loadModeDisplay(config) : "—";
     },
 
-    // Show scaling configuration with mode on top, config below
     scalingDisplay(config) {
-      const scaling = config?.scaling;
-      if (!scaling) return "—";
-
-      const mode = String(scaling.mode || "AUTO").toUpperCase();
-      const minW = Number(scaling.min_workers ?? 1);
-      const maxW = scaling.max_workers != null ? Number(scaling.max_workers) : null;
-      const minC = Number(scaling.min_connections ?? 1);
-      const maxC = scaling.max_connections != null ? Number(scaling.max_connections) : null;
-
-      if (mode === "FIXED") {
-        // FIXED mode uses min_workers and min_connections as the fixed values
-        return `FIXED<br><span style="color: #6b7280; font-size: 0.85em;">${minW}w × ${minC}c</span>`;
-      }
-
-      if (mode === "AUTO") {
-        // AUTO with no meaningful bounds - just show AUTO
-        if (maxW === null || minW === maxW) {
-          return "AUTO";
-        }
-        // AUTO with bounds specified
-        return `AUTO<br><span style="color: #6b7280; font-size: 0.85em;">${minW}-${maxW}w</span>`;
-      }
-
-      // BOUNDED mode - show range with possible unbounded
-      const workerPart = maxW === null ? `${minW}+w` : (minW === maxW ? `${minW}w` : `${minW}-${maxW}w`);
-      const connPart = maxC === null ? `${minC}+c` : (minC === maxC ? `${minC}c` : `${minC}-${maxC}c`);
-      return `BOUNDED<br><span style="color: #6b7280; font-size: 0.85em;">${workerPart} × ${connPart}</span>`;
+      return DU.scalingDisplay ? DU.scalingDisplay(config) : "—";
     },
 
-    // Show warehouse size for Snowflake or instance size for Postgres
     warehouseDisplay(template) {
-      const config = template?.config;
-      if (!config) return "—";
-      
-      const tableType = String(config.table_type || "").toUpperCase();
-      if (tableType === "POSTGRES" || tableType === "SNOWFLAKE_POSTGRES") {
-        // Show Postgres instance size (e.g., STANDARD_M)
-        const instanceSize = config.postgres_instance_size || "—";
-        return instanceSize;
-      }
-
-      // For Snowflake, show warehouse size (and name if there's room)
-      const name = config.warehouse_name || config.warehouse || "";
-      const size = config.warehouse_size || "";
-      if (size && name) {
-        return `${size}<br><span style="color: #6b7280; font-size: 0.85em;">${name}</span>`;
-      }
-      if (size) return size;
-      if (name) return name;
-      return "—";
+      return DU.warehouseDisplay ? DU.warehouseDisplay(template) : "—";
     },
 
     createNewTemplate() {
@@ -253,8 +136,7 @@ function templatesManager() {
     async prepareTest(template) {
       if (this.preparingTemplateId) return; // Already preparing
       
-      const tableType = String(template?.config?.table_type || "").toUpperCase();
-      const isPostgres = tableType === "POSTGRES" || tableType === "SNOWFLAKE_POSTGRES";
+      const isPostgres = this.isPostgresType(template);
 
       this.preparingTemplateId = template.template_id;
       try {

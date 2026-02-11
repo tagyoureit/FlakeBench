@@ -116,6 +116,7 @@
                     <option value="HYBRID">Hybrid</option>
                     <option value="INTERACTIVE">Interactive</option>
                     <option value="POSTGRES">Postgres</option>
+                    <option value="VIEW">View</option>
                 </select>
             </div>
 
@@ -128,6 +129,26 @@
                     <option value="MEDIUM">Medium</option>
                     <option value="LARGE">Large</option>
                     <option value="XLARGE">X-Large</option>
+                </select>
+            </div>
+
+            <div>
+                <label class="form-label">Load Mode</label>
+                <select class="form-select" x-model="filters.load_mode" @change="applyFilters">
+                    <option value="">All Modes</option>
+                    <option value="CONCURRENCY">Concurrency</option>
+                    <option value="QPS">QPS</option>
+                    <option value="FIND_MAX_CONCURRENCY">Find Max</option>
+                </select>
+            </div>
+
+            <div>
+                <label class="form-label">Scaling Mode</label>
+                <select class="form-select" x-model="filters.scaling_mode" @change="applyFilters">
+                    <option value="">All Scaling</option>
+                    <option value="FIXED">Fixed</option>
+                    <option value="AUTO">Auto</option>
+                    <option value="BOUNDED">Bounded</option>
                 </select>
             </div>
 
@@ -497,26 +518,18 @@
                             Test Name 
                             <span x-show="sortField === 'test_name'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
                         </th>
-                        <th>Type</th>
-                        <th @click="sortBy('table_type')" class="cursor-pointer">
-                            Table Type
-                            <span x-show="sortField === 'table_type'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
+                        <th @click="sortBy('warehouse_size')" class="cursor-pointer">
+                            Config
+                            <span x-show="sortField === 'warehouse_size'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
                         </th>
+                        <th>Workload</th>
                         <th @click="sortBy('created_at')" class="cursor-pointer">
                             Date
                             <span x-show="sortField === 'created_at'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
                         </th>
                         <th @click="sortBy('ops_per_sec')" class="cursor-pointer">
-                            QPS
+                            Results
                             <span x-show="sortField === 'ops_per_sec'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
-                        </th>
-                        <th @click="sortBy('p95_latency')" class="cursor-pointer">
-                            P95 Latency
-                            <span x-show="sortField === 'p95_latency'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
-                        </th>
-                        <th @click="sortBy('estimated_cost_usd')" class="cursor-pointer">
-                            Est. Cost
-                            <span x-show="sortField === 'estimated_cost_usd'" x-text="sortDirection === 'asc' ? '↑' : '↓'"></span>
                         </th>
                         <th>Status</th>
                         <th>Actions</th>
@@ -526,59 +539,68 @@
                     <template x-for="row in displayRows" :key="row.type + ':' + row.test.test_id">
                         <tr :class="row.type === 'child' ? 'bg-gray-50' : ''">
                             <td>
-                                <div class="flex items-center gap-2">
-                                    <button
-                                        type="button"
-                                        class="btn btn-secondary btn-sm px-2"
-                                        style="min-width: 1.5rem;"
-                                        x-show="row.type === 'parent' && row.child_count > 0"
-                                        @click="toggleMultiNode(row.run_id)"
-                                        x-text="multiNodeExpanded[row.run_id] ? 'v' : '>'"
-                                    ></button>
-                                    <span x-show="row.type === 'child'" class="text-gray-500">-</span>
-                                    <a
-                                        :href="dashboardUrl(row.test)"
-                                        class="text-blue-600 hover:underline"
-                                        x-text="row.test.test_name"
-                                    ></a>
-                                    <span
-                                        x-show="row.type === 'parent'"
-                                        class="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700"
-                                    >PARENT</span>
-                                    <span
-                                        x-show="row.type === 'child'"
-                                        class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800"
-                                    >CHILD</span>
+                                <div class="flex flex-col gap-1">
+                                    <div class="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            class="btn btn-secondary btn-sm px-2"
+                                            style="min-width: 1.5rem;"
+                                            x-show="row.type === 'parent' && row.child_count > 0"
+                                            @click="toggleMultiNode(row.run_id)"
+                                            x-text="multiNodeExpanded[row.run_id] ? 'v' : '>'"
+                                        ></button>
+                                        <span x-show="row.type === 'child'" class="text-gray-500">—</span>
+                                        <!-- Type icon with Table Type as tooltip -->
+                                        <img
+                                            x-show="tableTypeIconSrc(row.test)"
+                                            class="template-type-icon"
+                                            style="width: 20px; height: 20px;"
+                                            :src="tableTypeIconSrc(row.test)"
+                                            :alt="tableTypeLabel(row.test)"
+                                            :title="tableTypeLabel(row.test)"
+                                        >
+                                        <a
+                                            :href="dashboardUrl(row.test)"
+                                            class="text-blue-600 hover:underline"
+                                            x-text="row.test.test_name"
+                                        ></a>
+                                    </div>
+                                    <div class="flex items-center gap-2 ml-8">
+                                        <span
+                                            x-show="row.type === 'parent'"
+                                            class="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700"
+                                        >PARENT</span>
+                                        <span
+                                            x-show="row.type === 'child'"
+                                            class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800"
+                                        >CHILD</span>
+                                    </div>
                                 </div>
                             </td>
+                            <!-- Config: Size • Load Mode • Scaling -->
                             <td>
-                                <img
-                                    x-show="tableTypeIconSrc(row.test)"
-                                    class="template-type-icon"
-                                    :src="tableTypeIconSrc(row.test)"
-                                    :alt="tableTypeLabel(row.test)"
-                                    :title="tableTypeLabel(row.test)"
-                                >
+                                <div class="flex flex-col text-sm">
+                                    <span x-text="sizeDisplay(row.test)"></span>
+                                    <span class="text-gray-600" x-html="loadModeDisplay(row.test)"></span>
+                                    <span class="text-gray-500 text-xs" x-html="scalingDisplay(row.test)"></span>
+                                </div>
                             </td>
-                            <td x-text="tableTypeLabel(row.test) || row.test.table_type"></td>
-                            <td x-text="new Date(row.test.created_at).toLocaleString()"></td>
-                            <td x-text="row.test.ops_per_sec.toFixed(0)"></td>
-                            <td x-text="row.test.p95_latency.toFixed(2) + ' ms'"></td>
+                            <!-- Workload: Reads on top, Writes on bottom -->
                             <td>
-                                <span 
-                                    class="text-sm cursor-help"
-                                    x-text="window.CostUtils ? window.CostUtils.formatCostForTableType(row.test.estimated_cost_usd, row.test.table_type, row.test.cost_calculation_method) : '$' + (row.test.estimated_cost_usd || 0).toFixed(4)"
-                                    :title="window.CostUtils ? window.CostUtils.generateCostTooltip({
-                                        warehouseSize: row.test.postgres_instance_size || row.test.warehouse_size,
-                                        tableType: row.test.table_type,
-                                        durationSeconds: row.test.duration,
-                                        creditsUsed: row.test.credits_used,
-                                        creditsPerHour: row.test.credits_per_hour,
-                                        estimatedCostUsd: row.test.estimated_cost_usd,
-                                        dollarsPerCredit: costSettings.dollarsPerCredit,
-                                        nodeCount: row.test.node_count
-                                    }) : 'Credits: ' + (row.test.credits_used || 0).toFixed(4)"
-                                ></span>
+                                <div class="flex flex-col text-sm">
+                                    <span x-html="workloadReadsDisplay(row.test)"></span>
+                                    <span class="text-gray-600" x-html="workloadWritesDisplay(row.test)"></span>
+                                </div>
+                            </td>
+                            <!-- Date -->
+                            <td class="text-sm" x-text="new Date(row.test.created_at).toLocaleDateString()"></td>
+                            <!-- Results: QPS / Duration / P95 -->
+                            <td>
+                                <div class="flex flex-col text-sm">
+                                    <span><strong x-text="row.test.ops_per_sec.toFixed(0)"></strong> <span class="text-gray-500">QPS</span></span>
+                                    <span class="text-gray-600" x-text="durationDisplay(row.test)"></span>
+                                    <span class="text-gray-500 text-xs" x-text="'P95: ' + row.test.p95_latency.toFixed(0) + 'ms'"></span>
+                                </div>
                             </td>
                             <td>
                                 <div class="flex flex-col gap-1">
@@ -615,39 +637,44 @@
                                 </div>
                             </td>
                             <td>
-                                <div class="flex gap-2">
+                                <div class="flex gap-1">
                                     <button 
                                         type="button" 
-                                        class="btn btn-primary btn-sm"
+                                        class="btn btn-primary btn-sm px-2"
+                                        title="View Details"
                                         :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="viewTest(row.test)">
                                         <span class="loading-spinner" x-show="viewingTestId === row.test.test_id"></span>
-                                        <span x-text="viewingTestId === row.test.test_id ? 'Loading…' : 'View'"></span>
+                                        <span x-show="viewingTestId !== row.test.test_id">👁</span>
                                     </button>
                                     <button
                                         type="button"
-                                        class="btn btn-secondary btn-sm"
+                                        class="btn btn-sm px-2"
+                                        :class="isCompared(row.test.test_id) ? 'btn-success' : 'btn-secondary'"
+                                        :title="isCompared(row.test.test_id) ? 'Remove from Compare' : 'Add to Compare'"
                                         @click="toggleCompare(row.test.test_id)"
                                         :disabled="isTogglingCompare(row.test.test_id) || isTestActionInProgress(row.test.test_id) || (!isCompared(row.test.test_id) && compareTests.length >= 2)"
                                     >
                                         <span class="loading-spinner" x-show="isTogglingCompare(row.test.test_id)"></span>
-                                        <span x-text="isTogglingCompare(row.test.test_id) ? 'Loading…' : (isCompared(row.test.test_id) ? 'Remove' : 'Compare')"></span>
+                                        <span x-show="!isTogglingCompare(row.test.test_id)" x-text="isCompared(row.test.test_id) ? '✓' : '⇆'"></span>
                                     </button>
                                     <button 
                                         type="button" 
-                                        class="btn btn-secondary btn-sm"
+                                        class="btn btn-secondary btn-sm px-2"
+                                        title="Run Again"
                                         :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="rerunTest(row.test.test_id)">
                                         <span class="loading-spinner" x-show="rerunningTestId === row.test.test_id"></span>
-                                        <span x-text="rerunningTestId === row.test.test_id ? 'Loading…' : 'Run Again'"></span>
+                                        <span x-show="rerunningTestId !== row.test.test_id">↻</span>
                                     </button>
                                     <button 
                                         type="button" 
-                                        class="btn btn-error btn-sm"
+                                        class="btn btn-error btn-sm px-2"
+                                        title="Delete Test"
                                         :disabled="isTestActionInProgress(row.test.test_id)"
                                         @click="deleteTest(row.test.test_id)">
                                         <span class="loading-spinner" x-show="isDeleting(row.test.test_id)"></span>
-                                        <span x-text="isDeleting(row.test.test_id) ? 'Deleting…' : 'Delete'"></span>
+                                        <span x-show="!isDeleting(row.test.test_id)">✕</span>
                                     </button>
                                 </div>
                             </td>
