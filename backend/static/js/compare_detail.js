@@ -233,6 +233,11 @@ function compareDetail() {
     warmupEndB: null,
     showWarmup: false,
 
+    // AI Comparison Analysis state
+    aiCompareAnalysis: null,
+    aiCompareLoading: false,
+    aiCompareError: null,
+
     init() {
       this.load();
     },
@@ -279,6 +284,7 @@ function compareDetail() {
         this.loadStatistics();
         this.loadErrorTimeline();
         this.loadLatencyBreakdown();
+        this.loadSuggestedComparisons();
       } catch (e) {
         console.error("Deep compare load failed:", e);
         this.error = e && e.message ? e.message : String(e);
@@ -766,6 +772,193 @@ function compareDetail() {
       if (!queryType) return false;
       const upper = queryType.toUpperCase().replace(/_/g, " ");
       return upper === "POINT LOOKUP" || upper === "RANGE SCAN" || upper === "SELECT" || upper === "READ";
+    },
+
+    // -------------------------------------------------------------------------
+    // Suggested Comparisons (Phase 4)
+    // -------------------------------------------------------------------------
+
+    suggestedComparisons: [],
+    suggestedComparisonsLoading: false,
+    suggestedComparisonsError: null,
+    suggestedComparisonsLoaded: false,
+
+    async loadSuggestedComparisons() {
+      if (!this.ids || this.ids.length < 1) return;
+      if (this.suggestedComparisonsLoaded) return;
+
+      this.suggestedComparisonsLoading = true;
+      this.suggestedComparisonsError = null;
+
+      try {
+        // Load suggestions for the primary test
+        const primaryId = this.ids[0];
+        const ctx = await fetchJson(
+          `/api/tests/${encodeURIComponent(primaryId)}/compare-context?baseline_count=5&comparable_limit=5&min_similarity=0.55`
+        );
+
+        if (ctx && !ctx.error && ctx.comparable_candidates) {
+          // Filter out the secondary test if it's already in the comparison
+          const secondaryId = this.ids.length > 1 ? this.ids[1] : null;
+          this.suggestedComparisons = (ctx.comparable_candidates || []).filter(
+            (c) => c.test_id !== secondaryId
+          );
+        }
+        this.suggestedComparisonsLoaded = true;
+      } catch (e) {
+        console.error("Suggested comparisons load failed:", e);
+        this.suggestedComparisonsError = e && e.message ? e.message : String(e);
+      } finally {
+        this.suggestedComparisonsLoading = false;
+      }
+    },
+
+    /**
+     * Auto-select the best baseline for the primary test.
+     * Redirects to a new comparison with the top suggestion.
+     */
+    async autoSelectBaseline() {
+      if (!this.ids || this.ids.length < 1) return;
+
+      const primaryId = this.ids[0];
+      
+      try {
+        const ctx = await fetchJson(
+          `/api/tests/${encodeURIComponent(primaryId)}/compare-context?baseline_count=5&comparable_limit=1&min_similarity=0.55`
+        );
+
+        if (ctx && !ctx.error && ctx.vs_previous?.test_id) {
+          // Use the previous test (most recent matching baseline)
+          window.location.href = `/history/compare?ids=${encodeURIComponent(primaryId)},${encodeURIComponent(ctx.vs_previous.test_id)}`;
+        } else if (ctx && ctx.comparable_candidates && ctx.comparable_candidates.length > 0) {
+          // Fall back to top comparable candidate
+          const bestMatch = ctx.comparable_candidates[0];
+          window.location.href = `/history/compare?ids=${encodeURIComponent(primaryId)},${encodeURIComponent(bestMatch.test_id)}`;
+        } else {
+          if (window.toast && typeof window.toast.error === "function") {
+            window.toast.error("No suitable baseline found for this test.");
+          }
+        }
+      } catch (e) {
+        console.error("Auto-select baseline failed:", e);
+        if (window.toast && typeof window.toast.error === "function") {
+          window.toast.error(`Failed to find baseline: ${e.message || e}`);
+        }
+      }
+    },
+
+    /**
+     * Switch secondary test to a suggested comparison.
+     */
+    switchToSuggested(testId) {
+      if (!this.ids || this.ids.length < 1 || !testId) return;
+      const primaryId = this.ids[0];
+      window.location.href = `/history/compare?ids=${encodeURIComponent(primaryId)},${encodeURIComponent(testId)}`;
+    },
+
+    /**
+     * Format similarity score as percentage.
+     */
+    formatSimilarity(score) {
+      if (score == null || !Number.isFinite(score)) return "N/A";
+      return `${(score * 100).toFixed(0)}%`;
+    },
+
+    // -------------------------------------------------------------------------
+    // AI Comparison Analysis
+    // -------------------------------------------------------------------------
+
+    /**
+     * Load AI-powered comparison analysis for the two tests.
+     */
+    async loadAIComparison() {
+      if (!this.ids || this.ids.length !== 2) return;
+      if (this.aiCompareLoading) return;
+
+      this.aiCompareLoading = true;
+      this.aiCompareError = null;
+
+      try {
+        const [primaryId, secondaryId] = this.ids;
+        const resp = await fetch("/api/tests/compare/ai-analysis", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            primary_id: primaryId,
+            secondary_id: secondaryId,
+            force_regenerate: false,
+          }),
+        });
+
+        if (!resp.ok) {
+          const payload = await resp.json().catch(() => ({}));
+          const detail = payload?.detail?.message || payload?.detail || `HTTP ${resp.status}`;
+          throw new Error(detail);
+        }
+
+        const data = await resp.json();
+        this.aiCompareAnalysis = data;
+      } catch (e) {
+        console.error("AI comparison analysis failed:", e);
+        this.aiCompareError = e?.message || String(e);
+      } finally {
+        this.aiCompareLoading = false;
+      }
+    },
+
+    /**
+     * Get CSS class for verdict badge.
+     */
+    getVerdictBadgeClass(verdict) {
+      const v = String(verdict || "").toUpperCase();
+      switch (v) {
+        case "IMPROVED":
+          return "badge-success";
+        case "REGRESSED":
+          return "badge-error";
+        case "MIXED":
+          return "badge-warning";
+        case "SIMILAR":
+        default:
+          return "badge-secondary";
+      }
+    },
+
+    /**
+     * Format a delta value for display.
+     */
+    formatAIDelta(delta, lowerIsBetter = false) {
+      if (delta == null || !Number.isFinite(delta)) return "—";
+      const sign = delta >= 0 ? "+" : "";
+      const isGood = lowerIsBetter ? delta < 0 : delta > 0;
+      return {
+        text: `${sign}${delta.toFixed(1)}%`,
+        class: isGood ? "text-green-600" : delta === 0 ? "text-gray-500" : "text-red-600",
+      };
+    },
+
+    /**
+     * Get formatted QPS delta.
+     */
+    getQpsDelta() {
+      const delta = this.aiCompareAnalysis?.deltas?.qps_delta_pct;
+      return this.formatAIDelta(delta, false);
+    },
+
+    /**
+     * Get formatted P95 latency delta.
+     */
+    getP95Delta() {
+      const delta = this.aiCompareAnalysis?.deltas?.p95_delta_pct;
+      return this.formatAIDelta(delta, true);
+    },
+
+    /**
+     * Get formatted error rate delta.
+     */
+    getErrorDelta() {
+      const delta = this.aiCompareAnalysis?.deltas?.error_rate_delta_pct;
+      return this.formatAIDelta(delta, true);
     },
   };
 }

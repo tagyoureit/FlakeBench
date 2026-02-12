@@ -463,6 +463,163 @@
         </div>
     </div>
 
+    <!-- Performance Trend Panel (history mode only) -->
+    <div class="card" x-show="mode === 'history' && hasCompareContext()">
+        <div class="flex items-center justify-between gap-2 mb-3">
+            <div class="card-title mb-0">Performance Trend</div>
+            <template x-if="getPerformanceTrend()">
+                <span
+                    class="badge text-xs"
+                    :class="getConfidenceBadgeClass(getPerformanceTrend().confidence)"
+                    x-text="getPerformanceTrend().confidence + ' confidence'"
+                ></span>
+            </template>
+        </div>
+
+        <template x-if="getPerformanceTrend()">
+            <div>
+                <!-- QPS Sparkline -->
+                <div class="mb-4" x-show="getPerformanceTrend().qpsHistory.length >= 2">
+                    <div class="text-sm text-gray-600 mb-1">QPS History (last <span x-text="getPerformanceTrend().qpsHistory.length"></span> runs)</div>
+                    <div class="flex items-center gap-4">
+                        <svg width="120" height="28" class="text-blue-500">
+                            <path
+                                :d="generateSparklinePath(getPerformanceTrend().qpsHistory, 120, 28)"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                            />
+                        </svg>
+                        <div class="text-sm">
+                            <span class="font-semibold">Current:</span>
+                            <span x-text="getPerformanceTrend().currentQps ? formatCompact(getPerformanceTrend().currentQps) + ' QPS' : 'N/A'"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Delta vs Previous and Median -->
+                <div class="grid grid-cols-2 gap-4 mb-4">
+                    <div class="p-3 bg-gray-50 rounded-lg">
+                        <div class="text-xs text-gray-500 mb-1">vs Previous Run</div>
+                        <div class="flex items-center gap-2">
+                            <span
+                                class="text-lg font-semibold"
+                                :class="getDeltaColorClass(getPerformanceTrend().vsPreviousQpsDelta, true)"
+                                x-text="formatDeltaWithSign(getPerformanceTrend().vsPreviousQpsDelta, true)"
+                            ></span>
+                            <span
+                                class="text-lg"
+                                x-text="getDeltaArrow(getPerformanceTrend().vsPreviousQpsDelta)"
+                            ></span>
+                        </div>
+                        <div class="text-xs text-gray-500" x-show="getPerformanceTrend().vsPreviousP95Delta != null">
+                            P95: <span :class="getDeltaColorClass(getPerformanceTrend().vsPreviousP95Delta, false)" x-text="formatDeltaWithSign(getPerformanceTrend().vsPreviousP95Delta, false)"></span>
+                        </div>
+                    </div>
+                    <div class="p-3 bg-gray-50 rounded-lg">
+                        <div class="text-xs text-gray-500 mb-1">vs Median (<span x-text="getPerformanceTrend().baselineCount"></span> runs)</div>
+                        <div class="flex items-center gap-2">
+                            <span
+                                class="text-lg font-semibold"
+                                :class="getDeltaColorClass(getPerformanceTrend().qpsDeltaPct, true)"
+                                x-text="formatDeltaWithSign(getPerformanceTrend().qpsDeltaPct, true)"
+                            ></span>
+                            <span
+                                class="text-lg"
+                                x-text="getDeltaArrow(getPerformanceTrend().qpsDeltaPct)"
+                            ></span>
+                        </div>
+                        <div class="text-xs text-gray-500" x-show="getPerformanceTrend().p95DeltaPct != null">
+                            P95: <span :class="getDeltaColorClass(getPerformanceTrend().p95DeltaPct, false)" x-text="formatDeltaWithSign(getPerformanceTrend().p95DeltaPct, false)"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Trend Direction and Verdict -->
+                <div class="flex items-center gap-4 flex-wrap">
+                    <template x-if="getPerformanceTrend().trend">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-gray-600">Trend:</span>
+                            <span
+                                class="badge text-xs"
+                                :class="getTrendInfo(getPerformanceTrend().trend).class"
+                            >
+                                <span x-text="getTrendInfo(getPerformanceTrend().trend).icon"></span>
+                                <span x-text="getTrendInfo(getPerformanceTrend().trend).text"></span>
+                            </span>
+                            <span
+                                class="text-xs text-gray-500"
+                                x-show="getPerformanceTrend().trend.slope_per_run"
+                                x-text="'(' + (getPerformanceTrend().trend.slope_per_run > 0 ? '+' : '') + getPerformanceTrend().trend.slope_per_run.toFixed(1) + ' QPS/run)'"
+                            ></span>
+                        </div>
+                    </template>
+                    <template x-if="getPerformanceTrend().verdict">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm text-gray-600">Verdict:</span>
+                            <span
+                                class="badge text-xs"
+                                :class="getVerdictBadgeClass(getPerformanceTrend().verdict)"
+                                x-text="getPerformanceTrend().verdict"
+                            ></span>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Verdict Reasons -->
+                <template x-if="getPerformanceTrend().verdictReasons && getPerformanceTrend().verdictReasons.length > 0">
+                    <div class="mt-2 text-xs text-gray-500">
+                        <span x-text="getPerformanceTrend().verdictReasons.join(' • ')"></span>
+                    </div>
+                </template>
+            </div>
+        </template>
+
+        <!-- Loading state -->
+        <div x-show="compareContextLoading" class="text-sm text-gray-500">
+            Loading comparison data...
+        </div>
+    </div>
+
+    <!-- Comparable Runs Panel (history mode only) -->
+    <div class="card" x-show="mode === 'history' && getComparableRuns().length > 0">
+        <div class="card-title">Comparable Runs</div>
+        <div class="text-sm text-gray-600 -mt-1 mb-3">
+            Similar tests from the last 30 days. Click to compare.
+        </div>
+
+        <div class="space-y-2">
+            <template x-for="run in getComparableRuns()" :key="run.test_id">
+                <div class="flex items-center justify-between p-3 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors">
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span
+                                class="badge badge-sm"
+                                :class="run.similarity >= 0.85 ? 'badge-success' : run.similarity >= 0.7 ? 'badge-warning' : 'badge-secondary'"
+                                x-text="formatSimilarity(run.similarity) + ' match'"
+                            ></span>
+                            <span class="text-sm font-medium truncate" x-text="run.test_name || run.test_id.slice(0, 8)"></span>
+                        </div>
+                        <div class="text-xs text-gray-500 mt-1 flex items-center gap-3">
+                            <span x-text="run.qps_avg ? formatCompact(run.qps_avg) + ' QPS' : ''"></span>
+                            <span x-text="run.p95_avg ? 'P95: ' + run.p95_avg.toFixed(0) + 'ms' : ''"></span>
+                            <span x-text="run.created_at ? new Date(run.created_at).toLocaleDateString() : ''"></span>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        class="btn btn-sm btn-secondary ml-2"
+                        @click="openDeepCompareWith(run.test_id)"
+                    >
+                        Compare
+                    </button>
+                </div>
+            </template>
+        </div>
+    </div>
+
     <div class="card">
         <div class="card-title">Run Logs</div>
 

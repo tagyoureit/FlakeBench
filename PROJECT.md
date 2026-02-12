@@ -47,3 +47,65 @@ EXCEPTION: If subagents are not available (ie in Cursor), notify user they are n
 - `/explore [task]` - Use built-in Explore subagent
 - `/investigate [task]` - Use custom investigation subagent
 - Mention "use subagent" or "delegate to subagent" in requests
+
+## Code Organization: File Size Limits & Modularization
+
+**CRITICAL: Large monolithic files cause problems for AI agents and humans alike.**
+
+### File Size Guidelines
+
+| File Size | Classification | Action Required |
+|-----------|---------------|-----------------|
+| < 500 lines | Healthy | No action needed |
+| 500-1000 lines | Growing | Consider splitting if adding significant code |
+| 1000-2000 lines | Large | Split before adding new features |
+| > 2000 lines | Monolith | **MUST refactor before adding code** |
+
+### When Implementing New Features
+
+**Before adding code to any file:**
+1. Check file size: `wc -l <file>`
+2. If file > 1000 lines AND new feature > 100 lines:
+   - Create a new module instead of adding to the monolith
+   - Use existing module patterns in the codebase
+   - Import from the new module in the original file
+
+### Modularization Patterns
+
+**For API routes (e.g., `backend/api/routes/`):**
+```
+routes/
+├── feature.py              # Main routes file (keep slim)
+├── feature_modules/
+│   ├── __init__.py         # Export public interfaces
+│   ├── queries.py          # Database queries
+│   ├── utils.py            # Helper functions
+│   ├── business_logic.py   # Core logic
+│   └── prompts.py          # AI/LLM prompts
+```
+
+**For core modules (e.g., `backend/core/`):**
+```
+core/
+├── feature/
+│   ├── __init__.py
+│   ├── types.py            # Pydantic models, dataclasses
+│   ├── service.py          # Main service class
+│   └── helpers.py          # Pure functions
+```
+
+### Known Large Files (Refactor Candidates)
+
+| File | Lines | Status |
+|------|-------|--------|
+| `backend/api/routes/test_results.py` | ~8,300 | Uses `test_results_modules/` - follow this pattern |
+| `backend/core/orchestrator.py` | ~4,000 | Consider splitting by responsibility |
+| `backend/core/test_executor.py` | ~2,600 | Consider splitting by load mode |
+
+### Benefits of Modularization
+
+1. **AI agents work more effectively** - Smaller files fit in context windows
+2. **Faster code navigation** - Find relevant code quickly
+3. **Parallel development** - Multiple agents/developers can work simultaneously
+4. **Better testing** - Test modules in isolation
+5. **Clearer ownership** - Each module has single responsibility

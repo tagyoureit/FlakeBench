@@ -200,8 +200,8 @@
                 <input
                     type="text"
                     class="form-input"
-                    x-model="searchQuery"
-                    @input.debounce.300ms="searchTests"
+                    x-model="filters.search_query"
+                    @keydown.enter="applyFilters"
                     placeholder="Search by test name..."
                 >
             </div>
@@ -212,66 +212,6 @@
                     <span class="loading-spinner" x-show="applyingFilters"></span>
                     <span x-text="applyingFilters ? 'Applying…' : 'Apply'"></span>
                 </button>
-            </div>
-
-            <div x-show="searchError" class="alert alert-error mb-4">
-                <strong>Search failed.</strong>
-                <span x-text="searchError"></span>
-            </div>
-
-            <div x-show="searchLoading" class="text-center py-4">
-                {% include "components/loading_spinner.html" %}
-            </div>
-
-            <div class="mb-4" x-show="!searchLoading && searchResults.length > 0">
-                <div class="font-semibold mb-2">Search Results</div>
-                <div class="table">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Test Name</th>
-                                <th>Type</th>
-                                <th>Table Type</th>
-                                <th>Date</th>
-                                <th>QPS</th>
-                                <th>P95 Latency</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <template x-for="test in searchResults" :key="test.test_id">
-                                <tr>
-                                    <td x-text="test.test_name"></td>
-                                    <td>
-                                        <img
-                                            x-show="tableTypeIconSrc(test)"
-                                            class="template-type-icon"
-                                            :src="tableTypeIconSrc(test)"
-                                            :alt="tableTypeLabel(test)"
-                                            :title="tableTypeLabel(test)"
-                                        >
-                                    </td>
-                                    <td x-text="tableTypeLabel(test) || test.table_type"></td>
-                                    <td x-text="new Date(test.created_at).toLocaleDateString()"></td>
-                                    <td x-text="Number(test.ops_per_sec || 0).toFixed(0)"></td>
-                                    <td x-text="Number(test.p95_latency || 0).toFixed(2) + ' ms'"></td>
-                                    <td>
-                                        <button
-                                            type="button"
-                                            class="btn btn-sm"
-                                            :class="isCompared(test.test_id) ? 'btn-secondary' : 'btn-primary'"
-                                            @click="toggleCompare(test.test_id)"
-                                            :disabled="isTogglingCompare(test.test_id) || (!isCompared(test.test_id) && compareTests.length >= 2)"
-                                        >
-                                            <span class="loading-spinner" x-show="isTogglingCompare(test.test_id)"></span>
-                                            <span x-text="isTogglingCompare(test.test_id) ? 'Loading…' : (isCompared(test.test_id) ? 'Remove' : 'Add to compare')"></span>
-                                        </button>
-                                    </td>
-                                </tr>
-                            </template>
-                        </tbody>
-                    </table>
-                </div>
             </div>
         </div>
     </details>
@@ -536,70 +476,48 @@
                     </tr>
                 </thead>
                 <tbody>
-                    <template x-for="row in displayRows" :key="row.type + ':' + row.test.test_id">
-                        <tr :class="row.type === 'child' ? 'bg-gray-50' : ''">
+                    <template x-for="test in sortedTests" :key="test.test_id">
+                        <tr>
                             <td>
-                                <div class="flex flex-col gap-1">
-                                    <div class="flex items-center gap-2">
-                                        <button
-                                            type="button"
-                                            class="btn btn-secondary btn-sm px-2"
-                                            style="min-width: 1.5rem;"
-                                            x-show="row.type === 'parent' && row.child_count > 0"
-                                            @click="toggleMultiNode(row.run_id)"
-                                            x-text="multiNodeExpanded[row.run_id] ? 'v' : '>'"
-                                        ></button>
-                                        <span x-show="row.type === 'child'" class="text-gray-500">—</span>
-                                        <!-- Type icon with Table Type as tooltip -->
-                                        <img
-                                            x-show="tableTypeIconSrc(row.test)"
-                                            class="template-type-icon"
-                                            style="width: 20px; height: 20px;"
-                                            :src="tableTypeIconSrc(row.test)"
-                                            :alt="tableTypeLabel(row.test)"
-                                            :title="tableTypeLabel(row.test)"
-                                        >
-                                        <a
-                                            :href="dashboardUrl(row.test)"
-                                            class="text-blue-600 hover:underline"
-                                            x-text="row.test.test_name"
-                                        ></a>
-                                    </div>
-                                    <div class="flex items-center gap-2 ml-8">
-                                        <span
-                                            x-show="row.type === 'parent'"
-                                            class="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700"
-                                        >PARENT</span>
-                                        <span
-                                            x-show="row.type === 'child'"
-                                            class="text-xs px-1.5 py-0.5 rounded bg-amber-100 text-amber-800"
-                                        >CHILD</span>
-                                    </div>
+                                <div class="flex items-center gap-2">
+                                    <img
+                                        x-show="tableTypeIconSrc(test)"
+                                        class="template-type-icon"
+                                        style="width: 20px; height: 20px;"
+                                        :src="tableTypeIconSrc(test)"
+                                        :alt="tableTypeLabel(test)"
+                                        :title="tableTypeLabel(test)"
+                                    >
+                                    <a
+                                        :href="dashboardUrl(test)"
+                                        class="text-blue-600 hover:underline"
+                                        x-text="test.test_name"
+                                    ></a>
                                 </div>
                             </td>
                             <!-- Config: Size • Load Mode • Scaling -->
                             <td>
                                 <div class="flex flex-col text-sm">
-                                    <span x-text="sizeDisplay(row.test)"></span>
-                                    <span class="text-gray-600" x-html="loadModeDisplay(row.test)"></span>
-                                    <span class="text-gray-500 text-xs" x-html="scalingDisplay(row.test)"></span>
+                                    <span x-text="sizeDisplay(test)"></span>
+                                    <span class="text-gray-600" x-html="loadModeDisplay(test)"></span>
+                                    <span class="text-gray-500 text-xs" x-html="scalingDisplay(test)"></span>
                                 </div>
                             </td>
                             <!-- Workload: Reads on top, Writes on bottom -->
                             <td>
                                 <div class="flex flex-col text-sm">
-                                    <span x-html="workloadReadsDisplay(row.test)"></span>
-                                    <span class="text-gray-600" x-html="workloadWritesDisplay(row.test)"></span>
+                                    <span x-html="workloadReadsDisplay(test)"></span>
+                                    <span class="text-gray-600" x-html="workloadWritesDisplay(test)"></span>
                                 </div>
                             </td>
                             <!-- Date -->
-                            <td class="text-sm" x-text="new Date(row.test.created_at).toLocaleDateString()"></td>
+                            <td class="text-sm" x-text="new Date(test.created_at).toLocaleDateString()"></td>
                             <!-- Results: QPS / Duration / P95 -->
                             <td>
                                 <div class="flex flex-col text-sm">
-                                    <span><strong x-text="row.test.ops_per_sec.toFixed(0)"></strong> <span class="text-gray-500">QPS</span></span>
-                                    <span class="text-gray-600" x-text="durationDisplay(row.test)"></span>
-                                    <span class="text-gray-500 text-xs" x-text="'P95: ' + row.test.p95_latency.toFixed(0) + 'ms'"></span>
+                                    <span><strong x-text="test.ops_per_sec.toFixed(0)"></strong> <span class="text-gray-500">QPS</span></span>
+                                    <span class="text-gray-600" x-text="durationDisplay(test)"></span>
+                                    <span class="text-gray-500 text-xs" x-text="'P95: ' + test.p95_latency.toFixed(0) + 'ms'"></span>
                                 </div>
                             </td>
                             <td>
@@ -607,8 +525,8 @@
                                     <span 
                                         class="status-badge"
                                         :class="(() => {
-                                            const phase = row.test.phase ? row.test.phase.toUpperCase() : null;
-                                            const status = row.test.status ? row.test.status.toUpperCase() : '';
+                                            const phase = test.phase ? test.phase.toUpperCase() : null;
+                                            const status = test.status ? test.status.toUpperCase() : '';
                                             if (phase && (status === 'RUNNING' || phase === 'PROCESSING')) {
                                                 return {
                                                     'status-preparing': phase === 'PREPARING',
@@ -625,13 +543,13 @@
                                                 'status-cancelled': status === 'CANCELLED'
                                             };
                                         })()"
-                                        x-text="row.test.phase && (row.test.status === 'RUNNING' || row.test.phase === 'PROCESSING') ? row.test.phase : row.test.status">
+                                        x-text="test.phase && (test.status === 'RUNNING' || test.phase === 'PROCESSING') ? test.phase : test.status">
                                     </span>
-                                    <template x-if="row.test.status && row.test.status.toUpperCase() === 'FAILED' && row.test.failure_reason">
+                                    <template x-if="test.status && test.status.toUpperCase() === 'FAILED' && test.failure_reason">
                                         <span 
                                             class="text-xs text-red-600 max-w-[200px] truncate cursor-help"
-                                            :title="row.test.failure_reason"
-                                            x-text="row.test.failure_reason.length > 50 ? row.test.failure_reason.substring(0, 50) + '...' : row.test.failure_reason">
+                                            :title="test.failure_reason"
+                                            x-text="test.failure_reason.length > 50 ? test.failure_reason.substring(0, 50) + '...' : test.failure_reason">
                                         </span>
                                     </template>
                                 </div>
@@ -640,41 +558,41 @@
                                 <div class="flex gap-1">
                                     <button 
                                         type="button" 
-                                        class="btn btn-primary btn-sm px-2"
+                                        class="btn btn-primary btn-sm"
                                         title="View Details"
-                                        :disabled="isTestActionInProgress(row.test.test_id)"
-                                        @click="viewTest(row.test)">
-                                        <span class="loading-spinner" x-show="viewingTestId === row.test.test_id"></span>
-                                        <span x-show="viewingTestId !== row.test.test_id">👁</span>
+                                        :disabled="isTestActionInProgress(test.test_id)"
+                                        @click="viewTest(test)">
+                                        <span class="loading-spinner" x-show="viewingTestId === test.test_id"></span>
+                                        <span x-show="viewingTestId !== test.test_id">View</span>
                                     </button>
                                     <button
                                         type="button"
-                                        class="btn btn-sm px-2"
-                                        :class="isCompared(row.test.test_id) ? 'btn-success' : 'btn-secondary'"
-                                        :title="isCompared(row.test.test_id) ? 'Remove from Compare' : 'Add to Compare'"
-                                        @click="toggleCompare(row.test.test_id)"
-                                        :disabled="isTogglingCompare(row.test.test_id) || isTestActionInProgress(row.test.test_id) || (!isCompared(row.test.test_id) && compareTests.length >= 2)"
+                                        class="btn btn-sm"
+                                        :class="isCompared(test.test_id) ? 'btn-success' : 'btn-secondary'"
+                                        :title="isCompared(test.test_id) ? 'Remove from Compare' : 'Add to Compare'"
+                                        @click="toggleCompare(test.test_id)"
+                                        :disabled="isTogglingCompare(test.test_id) || isTestActionInProgress(test.test_id) || (!isCompared(test.test_id) && compareTests.length >= 2)"
                                     >
-                                        <span class="loading-spinner" x-show="isTogglingCompare(row.test.test_id)"></span>
-                                        <span x-show="!isTogglingCompare(row.test.test_id)" x-text="isCompared(row.test.test_id) ? '✓' : '⇆'"></span>
+                                        <span class="loading-spinner" x-show="isTogglingCompare(test.test_id)"></span>
+                                        <span x-show="!isTogglingCompare(test.test_id)" x-text="isCompared(test.test_id) ? 'Remove' : 'Compare'"></span>
                                     </button>
                                     <button 
                                         type="button" 
-                                        class="btn btn-secondary btn-sm px-2"
+                                        class="btn btn-secondary btn-sm"
                                         title="Run Again"
-                                        :disabled="isTestActionInProgress(row.test.test_id)"
-                                        @click="rerunTest(row.test.test_id)">
-                                        <span class="loading-spinner" x-show="rerunningTestId === row.test.test_id"></span>
-                                        <span x-show="rerunningTestId !== row.test.test_id">↻</span>
+                                        :disabled="isTestActionInProgress(test.test_id)"
+                                        @click="rerunTest(test.test_id)">
+                                        <span class="loading-spinner" x-show="rerunningTestId === test.test_id"></span>
+                                        <span x-show="rerunningTestId !== test.test_id">Rerun</span>
                                     </button>
                                     <button 
                                         type="button" 
-                                        class="btn btn-error btn-sm px-2"
+                                        class="btn btn-error btn-sm"
                                         title="Delete Test"
-                                        :disabled="isTestActionInProgress(row.test.test_id)"
-                                        @click="deleteTest(row.test.test_id)">
-                                        <span class="loading-spinner" x-show="isDeleting(row.test.test_id)"></span>
-                                        <span x-show="!isDeleting(row.test.test_id)">✕</span>
+                                        :disabled="isTestActionInProgress(test.test_id)"
+                                        @click="deleteTest(test.test_id)">
+                                        <span class="loading-spinner" x-show="isDeleting(test.test_id)"></span>
+                                        <span x-show="!isDeleting(test.test_id)">Delete</span>
                                     </button>
                                 </div>
                             </td>

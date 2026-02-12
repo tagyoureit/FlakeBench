@@ -57,6 +57,7 @@ function dashboard(opts) {
     ...(M.ui || {}),
     ...(M.dataLoading || {}),
     ...(M.historicalMetrics || {}),
+    ...(M.comparison || {}),
 
     // === CORE METHODS (kept in main file) ===
 
@@ -93,6 +94,10 @@ function dashboard(opts) {
           this.updateLiveTransport();
         } else if (this.mode === "history") {
           this.loadLogs();
+          // Load comparison context for historical tests
+          if (typeof this.loadCompareContext === "function") {
+            this.loadCompareContext();
+          }
         }
       }
 

@@ -265,6 +265,30 @@
             <div class="ai-analysis-card-text">
                 <div class="ai-analysis-card-title">AI Analysis</div>
                 <div class="ai-analysis-card-desc">Get AI-powered insights and recommendations for this benchmark</div>
+                <!-- Comparison Context Indicator -->
+                <div class="ai-analysis-card-comparison" x-show="hasCompareContext()" style="margin-top: 0.5rem;">
+                    <template x-if="getPerformanceTrend()">
+                        <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                            <!-- Show different message based on confidence -->
+                            <template x-if="getPerformanceTrend().confidence !== 'EXCLUDED'">
+                                <span style="font-size: 0.8rem; color: #374151;">
+                                    📊 Compared against <span x-text="getPerformanceTrend().baselineCount"></span> baseline runs
+                                </span>
+                            </template>
+                            <template x-if="getPerformanceTrend().confidence === 'EXCLUDED'">
+                                <span style="font-size: 0.8rem; color: #9ca3af;">
+                                    📊 <span x-text="getPerformanceTrend().baselineCount"></span> baseline runs found (not directly comparable)
+                                </span>
+                            </template>
+                            <span
+                                class="badge text-xs"
+                                :class="getConfidenceBadgeClass(getPerformanceTrend().confidence)"
+                                x-text="getPerformanceTrend().confidence === 'EXCLUDED' ? 'Low similarity' : getPerformanceTrend().confidence + ' confidence'"
+                                style="font-size: 0.7rem; padding: 0.15rem 0.4rem;"
+                            ></span>
+                        </div>
+                    </template>
+                </div>
             </div>
             <button
                 type="button"
@@ -306,6 +330,29 @@
             </div>
 
             <div x-show="!aiAnalysisLoading && aiAnalysis">
+                <!-- Comparison Summary Badge (when analysis includes comparison) -->
+                <div
+                    x-show="aiAnalysis?.comparison_summary?.baseline_available"
+                    style="margin-bottom: 1rem; padding: 0.75rem; background: #f0fdf4; border-radius: 0.5rem; border-left: 4px solid #22c55e;"
+                >
+                    <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.875rem;">
+                        <span style="font-weight: 600; color: #166534;">📊 Comparison Context Included</span>
+                        <span style="color: #6b7280;">•</span>
+                        <span x-text="(aiAnalysis?.comparison_summary?.baseline_count || 0) + ' baseline runs'"></span>
+                        <span style="color: #6b7280;">•</span>
+                        <span
+                            class="badge text-xs"
+                            :class="getVerdictBadgeClass(aiAnalysis?.comparison_summary?.verdict)"
+                            x-text="aiAnalysis?.comparison_summary?.verdict || 'N/A'"
+                        ></span>
+                        <template x-if="aiAnalysis?.comparison_summary?.qps_delta_pct != null">
+                            <span style="color: #6b7280;">
+                                (<span :class="getDeltaColorClass(aiAnalysis?.comparison_summary?.qps_delta_pct, true)" x-text="formatDeltaWithSign(aiAnalysis?.comparison_summary?.qps_delta_pct, true)"></span> QPS)
+                            </span>
+                        </template>
+                    </div>
+                </div>
+
                 <div
                     class="analysis-content"
                     x-html="formatMarkdown(aiAnalysis?.analysis)"

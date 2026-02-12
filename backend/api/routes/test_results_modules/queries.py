@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from backend.api.routes.test_results.utils import get_prefix, to_float_or_none
+from .utils import get_prefix, to_float_or_none
 from backend.connectors import postgres_pool
 
 logger = logging.getLogger(__name__)

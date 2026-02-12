@@ -5,6 +5,7 @@ UI endpoints:
 - History: GET /api/tests
 - Comparison search: GET /api/tests/search?q=...
 - Query executions (drilldown): GET /api/tests/{test_id}/query-executions
+- Compare context: GET /api/tests/{test_id}/compare-context
 - Re-run: POST /api/tests/{test_id}/rerun
 - Delete: DELETE /api/tests/{test_id}
 - Run template: POST /api/tests/from-template/{template_id}
@@ -29,6 +30,15 @@ from backend.core.results_store import update_parent_run_aggregate
 from backend.core.test_registry import registry
 from backend.core.cost_calculator import calculate_estimated_cost, calculate_cost_efficiency
 from backend.api.error_handling import http_exception
+from backend.api.routes.test_results_modules.comparison import build_compare_context
+from backend.api.routes.test_results_modules.comparison_prompts import (
+    generate_comparison_prompt,
+    generate_deep_compare_prompt,
+)
+from backend.api.routes.test_results_modules.comparison_scoring import (
+    calculate_similarity_score,
+    classify_change,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1650,6 +1660,7 @@ async def list_tests(
     end_date: str = "",
     load_mode: str = "",
     scaling_mode: str = "",
+    search_query: str = "",
 ) -> dict[str, Any]:
     try:
         pool = snowflake_pool.get_default_pool()
@@ -1672,6 +1683,17 @@ async def list_tests(
         if scaling_mode:
             where_clauses.append("COALESCE(tr.TEST_CONFIG:template_config:scaling:mode::STRING, 'FIXED') = ?")
             params.append(scaling_mode.upper())
+        if search_query and search_query.strip():
+            like = f"%{search_query.strip().lower()}%"
+            where_clauses.append("""(
+                LOWER(tr.TEST_NAME) LIKE ?
+                OR LOWER(tr.SCENARIO_NAME) LIKE ?
+                OR LOWER(tr.TABLE_NAME) LIKE ?
+                OR LOWER(tr.WAREHOUSE) LIKE ?
+                OR LOWER(tr.WAREHOUSE_SIZE) LIKE ?
+                OR LOWER(tr.TABLE_TYPE) LIKE ?
+            )""")
+            params.extend([like] * 6)
 
         if date_range in {"today", "week", "month"}:
             days = {"today": 1, "week": 7, "month": 30}[date_range]
@@ -1688,6 +1710,10 @@ async def list_tests(
             if _is_date(end_date):
                 where_clauses.append("tr.START_TIME < DATEADD(day, 1, TO_DATE(?))")
                 params.append(end_date)
+
+        where_clauses.append(
+            "(tr.RUN_ID IS NULL OR tr.RUN_ID = tr.TEST_ID)"
+        )
 
         where_sql = ""
         if where_clauses:
@@ -5950,6 +5976,13 @@ class AiChatRequest(BaseModel):
     history: list[dict[str, str]] = []
 
 
+class DeepCompareAiRequest(BaseModel):
+    """Request model for deep compare AI analysis."""
+    primary_id: str
+    secondary_id: str
+    force_regenerate: bool = False
+
+
 async def _fetch_relevant_logs(
     pool: Any,
     test_id: str,
@@ -7051,6 +7084,58 @@ Provide analysis structured as:
 Keep analysis concise and actionable. Use bullet points with specific numbers."""
 
 
+# =============================================================================
+# COMPARE CONTEXT ENDPOINT (Section 11.1 of ai-comparison-plan.md)
+# =============================================================================
+
+
+@router.get("/{test_id}/compare-context")
+async def get_compare_context(
+    test_id: str,
+    baseline_count: int = Query(5, ge=1, le=20, description="Number of baseline runs to consider"),
+    comparable_limit: int = Query(5, ge=1, le=10, description="Max comparable candidates to return"),
+    min_similarity: float = Query(0.55, ge=0.0, le=1.0, description="Minimum similarity score"),
+    include_excluded: bool = Query(False, description="Include excluded candidates with reasons"),
+) -> dict[str, Any]:
+    """
+    Get comparison context for a test, including baseline statistics and similar runs.
+
+    Returns data needed for AI analysis comparisons:
+    - Rolling median from recent baselines
+    - Comparison vs previous run
+    - Comparison vs median
+    - Trend analysis
+    - List of comparable runs with similarity scores
+
+    Only works for parent/rollup tests (not child workers).
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+
+        result = await build_compare_context(
+            pool=pool,
+            test_id=test_id,
+            baseline_count=baseline_count,
+            comparable_limit=comparable_limit,
+            min_similarity=min_similarity,
+            include_excluded=include_excluded,
+        )
+
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Error building compare context for test {test_id}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to build comparison context: {str(e)}",
+        )
+
+
 @router.post("/{test_id}/ai-analysis")
 async def ai_analysis(
     test_id: str, req: AiAnalysisRequest | None = None
@@ -7668,6 +7753,49 @@ async def ai_analysis(
                 use_cached_result=use_cached_result,
             )
 
+        # =================================================================
+        # PHASE 3: Fetch comparison context and append to prompt
+        # =================================================================
+        compare_context = None
+        comparison_summary = None
+        try:
+            compare_context = await build_compare_context(
+                pool=pool,
+                test_id=test_id,
+                baseline_count=5,
+                comparable_limit=3,
+                min_similarity=0.55,
+                include_excluded=False,
+            )
+            
+            # Only append comparison section if we have baseline data
+            if compare_context and not compare_context.get("error"):
+                comparison_prompt = generate_comparison_prompt(compare_context, load_mode)
+                if comparison_prompt:
+                    prompt = prompt + "\n\n" + comparison_prompt
+                
+                # Build comparison summary for response
+                baseline = compare_context.get("baseline", {})
+                vs_median = compare_context.get("vs_median", {})
+                vs_previous = compare_context.get("vs_previous", {})
+                trend = compare_context.get("trend", {})
+                
+                comparison_summary = {
+                    "baseline_available": baseline.get("available", False),
+                    "baseline_count": baseline.get("candidate_count", 0),
+                    "verdict": vs_median.get("verdict") if vs_median else None,
+                    "verdict_reasons": vs_median.get("verdict_reasons", []) if vs_median else [],
+                    "qps_delta_pct": vs_median.get("qps_delta_pct") if vs_median else None,
+                    "p95_delta_pct": vs_median.get("p95_delta_pct") if vs_median else None,
+                    "trend_direction": trend.get("direction") if trend else None,
+                    "vs_previous_test_id": vs_previous.get("test_id") if vs_previous else None,
+                    "vs_previous_similarity": vs_previous.get("similarity_score") if vs_previous else None,
+                }
+        except Exception as compare_err:
+            # Don't fail the whole analysis if comparison fails
+            logger.warning("Comparison context failed for test %s: %s", test_id, compare_err)
+            comparison_summary = {"error": str(compare_err)}
+
         try:
             ai_resp = await pool.execute_query(
                 "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?)) AS RESP",
@@ -7702,6 +7830,7 @@ async def ai_analysis(
                     else None
                 ),
             },
+            "comparison_summary": comparison_summary,
         }
     except HTTPException:
         raise
@@ -7793,6 +7922,265 @@ If asked about data you don't have access to, say so and suggest what data would
         raise
     except Exception as e:
         raise http_exception("ai chat", e)
+
+
+@router.post("/compare/ai-analysis")
+async def deep_compare_ai_analysis(req: DeepCompareAiRequest) -> dict[str, Any]:
+    """
+    Generate AI-powered comparison analysis for two benchmark tests.
+
+    This endpoint compares two specific tests side-by-side, highlighting
+    configuration differences and performance deltas, then generates
+    AI analysis explaining which test performed better and why.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        primary_id = req.primary_id
+        secondary_id = req.secondary_id
+
+        # Fetch both tests' data
+        test_query = f"""
+        SELECT
+            TEST_ID, TEST_NAME, TEMPLATE_NAME, TABLE_TYPE,
+            WAREHOUSE, WAREHOUSE_SIZE, CONCURRENT_CONNECTIONS,
+            DURATION_SECONDS, STATUS, QPS, TOTAL_OPERATIONS,
+            FAILED_OPERATIONS, P50_LATENCY_MS, P95_LATENCY_MS,
+            P99_LATENCY_MS, READ_OPERATIONS, WRITE_OPERATIONS,
+            TEST_CONFIG
+        FROM {prefix}.TEST_RESULTS
+        WHERE TEST_ID = ?
+        """
+
+        test_a_row = await pool.execute_query(test_query, params=[primary_id])
+        test_b_row = await pool.execute_query(test_query, params=[secondary_id])
+
+        if not test_a_row:
+            raise HTTPException(status_code=404, detail=f"Primary test {primary_id} not found")
+        if not test_b_row:
+            raise HTTPException(status_code=404, detail=f"Secondary test {secondary_id} not found")
+
+        def _parse_test_row(row: tuple) -> dict[str, Any]:
+            """Parse a test row into a dict."""
+            test_config = row[17]
+            if isinstance(test_config, str):
+                test_config = json.loads(test_config)
+
+            template_cfg = (
+                test_config.get("template_config")
+                if isinstance(test_config, dict)
+                else {}
+            ) or {}
+
+            load_mode = str(template_cfg.get("load_mode", "CONCURRENCY")).upper()
+
+            return {
+                "test_id": row[0],
+                "test_name": row[1],
+                "template_name": row[2],
+                "table_type": row[3],
+                "warehouse": row[4],
+                "warehouse_size": row[5],
+                "concurrency": row[6],
+                "duration_seconds": float(row[7] or 0),
+                "status": row[8],
+                "qps": float(row[9] or 0),
+                "total_operations": int(row[10] or 0),
+                "failed_operations": int(row[11] or 0),
+                "p50_latency_ms": float(row[12] or 0),
+                "p95_latency_ms": float(row[13] or 0),
+                "p99_latency_ms": float(row[14] or 0),
+                "read_operations": int(row[15] or 0),
+                "write_operations": int(row[16] or 0),
+                "load_mode": load_mode,
+                "workload_mix": template_cfg.get("workload_mix"),
+                "scaling_mode": (
+                    template_cfg.get("scaling", {}).get("mode")
+                    if isinstance(template_cfg.get("scaling"), dict)
+                    else None
+                ),
+            }
+
+        test_a = _parse_test_row(test_a_row[0])
+        test_b = _parse_test_row(test_b_row[0])
+
+        # Fetch statistics for both tests (for more accurate metrics)
+        async def _fetch_test_statistics(test_id: str) -> dict[str, Any] | None:
+            """Fetch comprehensive statistics for a test including SF execution data."""
+            try:
+                stats_query = f"""
+                SELECT
+                    COUNT(*) AS TOTAL_QUERIES,
+                    SUM(CASE WHEN SUCCESS = FALSE THEN 1 ELSE 0 END) AS ERROR_COUNT,
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P50_MS,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P95_MS,
+                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P99_MS,
+                    -- SF Execution timing
+                    AVG(SF_ELAPSED_MS) AS AVG_SF_ELAPSED_MS,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY SF_ELAPSED_MS) AS P95_SF_ELAPSED_MS,
+                    -- Queue time statistics
+                    AVG(COALESCE(SF_QUEUED_OVERLOAD_MS, 0)) AS AVG_QUEUED_OVERLOAD_MS,
+                    AVG(COALESCE(SF_QUEUED_PROVISIONING_MS, 0)) AS AVG_QUEUED_PROVISIONING_MS,
+                    SUM(CASE WHEN COALESCE(SF_QUEUED_OVERLOAD_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_OVERLOAD_QUEUE,
+                    SUM(CASE WHEN COALESCE(SF_QUEUED_PROVISIONING_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_PROVISIONING_QUEUE,
+                    -- Cache statistics
+                    AVG(SF_PCT_SCANNED_FROM_CACHE) AS AVG_CACHE_HIT_PCT,
+                    SUM(CASE WHEN COALESCE(SF_PCT_SCANNED_FROM_CACHE, 0) >= 100 THEN 1 ELSE 0 END) AS FULL_CACHE_HIT_QUERIES,
+                    -- Warmup queries count (tells us if cache warming was used)
+                    (SELECT COUNT(*) FROM {prefix}.QUERY_EXECUTIONS WHERE TEST_ID = qe.TEST_ID AND WARMUP = TRUE) AS WARMUP_QUERY_COUNT
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                WHERE TEST_ID = ?
+                  AND COALESCE(WARMUP, FALSE) = FALSE
+                GROUP BY TEST_ID
+                """
+                rows = await pool.execute_query(stats_query, params=[test_id])
+                if not rows or rows[0][0] is None:
+                    return None
+
+                r = rows[0]
+                total = int(r[0] or 0)
+                errors = int(r[1] or 0)
+                queries_with_overload = int(r[9] or 0)
+                queries_with_provisioning = int(r[10] or 0)
+                full_cache_hits = int(r[12] or 0)
+                warmup_count = int(r[13] or 0)
+
+                # Calculate test duration for QPS
+                duration_query = f"""
+                SELECT TIMESTAMPDIFF(SECOND, MIN(START_TIME), MAX(START_TIME))
+                FROM {prefix}.QUERY_EXECUTIONS
+                WHERE TEST_ID = ?
+                  AND COALESCE(WARMUP, FALSE) = FALSE
+                """
+                dur_rows = await pool.execute_query(duration_query, params=[test_id])
+                duration = float(dur_rows[0][0] or 0) if dur_rows and dur_rows[0] else 0
+
+                return {
+                    "total_queries": total,
+                    "duration_seconds": duration,
+                    "errors": {
+                        "error_count": errors,
+                        "error_rate_pct": (errors / total * 100) if total > 0 else 0,
+                    },
+                    "latency": {
+                        "p50_ms": _to_float_or_none(r[2]),
+                        "p95_ms": _to_float_or_none(r[3]),
+                        "p99_ms": _to_float_or_none(r[4]),
+                    },
+                    "sf_execution": {
+                        "avg_sf_elapsed_ms": _to_float_or_none(r[5]),
+                        "p95_sf_elapsed_ms": _to_float_or_none(r[6]),
+                        "available": r[5] is not None,
+                    },
+                    "queue_times": {
+                        "avg_overload_ms": _to_float_or_none(r[7]),
+                        "avg_provisioning_ms": _to_float_or_none(r[8]),
+                        "queries_with_overload_queue": queries_with_overload,
+                        "queries_with_provisioning_queue": queries_with_provisioning,
+                        "pct_with_overload": (queries_with_overload / total * 100) if total > 0 else 0,
+                        "pct_with_provisioning": (queries_with_provisioning / total * 100) if total > 0 else 0,
+                    },
+                    "cache": {
+                        "avg_cache_hit_pct": _to_float_or_none(r[11]),
+                        "full_cache_hit_queries": full_cache_hits,
+                        "full_cache_hit_pct": (full_cache_hits / total * 100) if total > 0 else 0,
+                    },
+                    "warmup": {
+                        "warmup_queries_used": warmup_count > 0,
+                        "warmup_query_count": warmup_count,
+                    },
+                    "throughput": {
+                        "avg_qps": (total / duration) if duration > 0 else None,
+                    },
+                }
+            except Exception as e:
+                logger.warning("Failed to fetch deep compare statistics for %s: %s", test_id, e)
+                return None
+
+        stats_a, stats_b = await asyncio.gather(
+            _fetch_test_statistics(primary_id),
+            _fetch_test_statistics(secondary_id),
+        )
+
+        # Generate the comparison prompt
+        prompt, deltas = generate_deep_compare_prompt(test_a, test_b, stats_a, stats_b)
+
+        # Calculate similarity score between tests
+        similarity = calculate_similarity_score(test_a, test_b)
+
+        # Identify configuration differences
+        differences = []
+        config_fields = [
+            ("warehouse_size", "Warehouse size"),
+            ("warehouse", "Warehouse"),
+            ("concurrency", "Concurrency"),
+            ("duration_seconds", "Duration"),
+            ("load_mode", "Load mode"),
+            ("table_type", "Table type"),
+            ("scaling_mode", "Scaling mode"),
+        ]
+        for field, label in config_fields:
+            val_a = test_a.get(field)
+            val_b = test_b.get(field)
+            if val_a != val_b and (val_a is not None or val_b is not None):
+                differences.append(f"{label}: {val_a} vs {val_b}")
+
+        # Determine verdict based on deltas
+        qps_delta = deltas.get("qps_delta_pct")
+        p95_delta = deltas.get("p95_delta_pct")
+        error_delta = deltas.get("error_rate_delta_pct")
+
+        verdict = "SIMILAR"
+        if qps_delta is not None and p95_delta is not None:
+            qps_class = classify_change("qps", qps_delta)
+            p95_class = classify_change("p95_latency", p95_delta)
+
+            # Determine overall verdict
+            if qps_class == "IMPROVEMENT" and p95_class in ("IMPROVEMENT", "NEUTRAL"):
+                verdict = "IMPROVED"
+            elif qps_class == "REGRESSION" or p95_class == "REGRESSION":
+                verdict = "REGRESSED"
+            elif qps_class == "IMPROVEMENT" and p95_class == "REGRESSION":
+                verdict = "MIXED"
+            elif qps_class == "REGRESSION" and p95_class == "IMPROVEMENT":
+                verdict = "MIXED"
+            else:
+                verdict = "SIMILAR"
+
+        # Call AI for analysis
+        try:
+            ai_resp = await pool.execute_query(
+                "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?)) AS RESP",
+                params=[
+                    "claude-4-sonnet",
+                    prompt,
+                    json.dumps({"temperature": 0.3, "max_tokens": 2000}),
+                ],
+            )
+            analysis = (
+                ai_resp[0][0] if ai_resp and ai_resp[0] else "Analysis unavailable"
+            )
+        except Exception as ai_err:
+            logger.warning("Deep compare AI analysis failed: %s", ai_err)
+            analysis = f"AI analysis unavailable: {ai_err}"
+
+        return {
+            "primary_id": primary_id,
+            "secondary_id": secondary_id,
+            "analysis": analysis,
+            "deltas": deltas,
+            "verdict": verdict,
+            "similarity_score": similarity,
+            "differences": differences,
+            "load_mode": test_a.get("load_mode", "CONCURRENCY"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in deep compare AI analysis")
+        raise http_exception("deep compare ai analysis", e)
 
 
 @router.get("/{test_id}/statistics")

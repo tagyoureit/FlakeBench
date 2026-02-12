@@ -22,6 +22,14 @@
             >
                 Back to History
             </a>
+            <button
+                type="button"
+                class="btn btn-primary"
+                @click="autoSelectBaseline()"
+                title="Automatically find and compare with the best matching baseline run"
+            >
+                🎯 Auto-Select Baseline
+            </button>
         </div>
     </div>
 
@@ -181,6 +189,38 @@
             </div>
         </template>
 
+        <!-- Suggested Comparisons Panel -->
+        <div class="card" x-show="suggestedComparisons.length > 0">
+            <div class="card-title">Suggested Comparisons</div>
+            <div class="text-sm text-gray-600 -mt-1 mb-3">
+                Other similar tests you can compare with the primary run. Click to switch.
+            </div>
+
+            <div x-show="suggestedComparisonsLoading" class="text-sm text-gray-500">
+                Loading suggestions...
+            </div>
+
+            <div class="flex flex-wrap gap-2" x-show="!suggestedComparisonsLoading">
+                <template x-for="suggestion in suggestedComparisons" :key="suggestion.test_id">
+                    <button
+                        type="button"
+                        class="inline-flex items-center gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 rounded-lg border border-gray-200 transition-colors text-left"
+                        @click="switchToSuggested(suggestion.test_id)"
+                    >
+                        <span
+                            class="badge badge-sm"
+                            :class="suggestion.similarity >= 0.85 ? 'badge-success' : suggestion.similarity >= 0.7 ? 'badge-warning' : 'badge-secondary'"
+                            x-text="formatSimilarity(suggestion.similarity)"
+                        ></span>
+                        <div class="flex flex-col">
+                            <span class="text-sm font-medium truncate max-w-[200px]" x-text="suggestion.test_name || suggestion.test_id.slice(0, 8)"></span>
+                            <span class="text-xs text-gray-500" x-text="suggestion.qps_avg ? formatCompact(suggestion.qps_avg) + ' QPS' : ''"></span>
+                        </div>
+                    </button>
+                </template>
+            </div>
+        </div>
+
         <!-- Statistics Comparison Panel -->
         <div class="card" x-show="statisticsA || statisticsB">
             <div class="card-title">Statistics Comparison</div>
@@ -312,6 +352,118 @@
                         Primary: $<span x-text="(testA?.cost_per_hour || 0).toFixed(2)"></span>/hr |
                         Secondary: $<span x-text="(testB?.cost_per_hour || 0).toFixed(2)"></span>/hr
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- AI Comparison Analysis Card -->
+        <div class="card" x-show="testA && testB">
+            <div class="card-title" style="display: flex; align-items: center; gap: 0.5rem;">
+                <span style="font-size: 1.1rem;">&#10022;</span>
+                AI Comparison Analysis
+            </div>
+            
+            <!-- Initial state: Show button to generate analysis -->
+            <div x-show="!aiCompareAnalysis && !aiCompareLoading && !aiCompareError">
+                <p class="text-sm text-gray-600 mb-4">
+                    Get AI-powered insights comparing these two benchmark runs, including performance analysis and recommendations.
+                </p>
+                <button
+                    type="button"
+                    class="btn btn-primary"
+                    @click="loadAIComparison()"
+                >
+                    <span style="margin-right: 0.5rem;">&#10022;</span>
+                    Generate AI Comparison
+                </button>
+            </div>
+
+            <!-- Loading state -->
+            <div x-show="aiCompareLoading" class="text-center py-6">
+                {% include "components/loading_spinner.html" %}
+                <p class="mt-2 text-sm text-gray-600">Analyzing comparison...</p>
+            </div>
+
+            <!-- Error state -->
+            <div x-show="aiCompareError && !aiCompareLoading" class="alert alert-error">
+                <strong>Analysis failed:</strong>
+                <span x-text="aiCompareError"></span>
+                <button
+                    type="button"
+                    class="btn btn-sm btn-secondary mt-2"
+                    @click="loadAIComparison()"
+                >
+                    Retry
+                </button>
+            </div>
+
+            <!-- Analysis results -->
+            <div x-show="aiCompareAnalysis && !aiCompareLoading">
+                <!-- Verdict and Delta Summary -->
+                <div style="display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1rem;">
+                    <span 
+                        class="badge"
+                        :class="getVerdictBadgeClass(aiCompareAnalysis?.verdict)"
+                        style="font-size: 0.875rem; padding: 0.375rem 0.75rem;"
+                        x-text="aiCompareAnalysis?.verdict || 'UNKNOWN'"
+                    ></span>
+                    
+                    <!-- Delta chips -->
+                    <template x-if="aiCompareAnalysis?.deltas">
+                        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                            <span 
+                                class="badge badge-outline"
+                                style="font-size: 0.75rem;"
+                                :class="getQpsDelta()?.class"
+                            >
+                                QPS: <span x-text="getQpsDelta()?.text || '—'"></span>
+                            </span>
+                            <span 
+                                class="badge badge-outline"
+                                style="font-size: 0.75rem;"
+                                :class="getP95Delta()?.class"
+                            >
+                                P95: <span x-text="getP95Delta()?.text || '—'"></span>
+                            </span>
+                            <span 
+                                class="badge badge-outline"
+                                style="font-size: 0.75rem;"
+                                :class="getErrorDelta()?.class"
+                            >
+                                Errors: <span x-text="getErrorDelta()?.text || '—'"></span>
+                            </span>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Configuration Differences -->
+                <template x-if="aiCompareAnalysis?.differences && aiCompareAnalysis.differences.length > 0">
+                    <div style="margin-bottom: 1rem; padding: 0.75rem; background: #f9fafb; border-radius: 0.5rem; border: 1px solid #e5e7eb;">
+                        <div style="font-weight: 600; font-size: 0.75rem; color: #6b7280; margin-bottom: 0.5rem; text-transform: uppercase;">
+                            Configuration Differences
+                        </div>
+                        <div style="display: flex; flex-wrap: wrap; gap: 0.375rem;">
+                            <template x-for="diff in aiCompareAnalysis.differences" :key="diff">
+                                <span 
+                                    class="badge badge-secondary"
+                                    style="font-size: 0.7rem;"
+                                    x-text="diff"
+                                ></span>
+                            </template>
+                        </div>
+                    </div>
+                </template>
+
+                <!-- Analysis content -->
+                <div 
+                    class="prose prose-sm max-w-none"
+                    style="font-size: 0.875rem; line-height: 1.6; color: #374151;"
+                    x-html="(aiCompareAnalysis?.analysis || '').replace(/\n/g, '<br>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\*(.*?)\*/g, '<em>$1</em>')"
+                ></div>
+
+                <!-- Similarity score -->
+                <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid #e5e7eb; font-size: 0.75rem; color: #6b7280;">
+                    Similarity score: <span x-text="formatSimilarity(aiCompareAnalysis?.similarity_score)"></span>
                 </div>
             </div>
         </div>

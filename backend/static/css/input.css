@@ -1101,7 +1101,7 @@
   }
   
   .template-type-icon {
-    @apply w-[22px] h-[22px] inline-block align-middle;
+    @apply w-[44px] h-[44px] inline-block align-middle;
   }
   
   .templates-card-title {
