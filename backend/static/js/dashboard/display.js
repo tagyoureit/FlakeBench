@@ -100,6 +100,11 @@ window.DashboardMixins.display = {
     return ["postgres", "snowflake_postgres"].includes(tableType);
   },
 
+  isPostgresOrInteractiveTable() {
+    const tableType = (this.templateInfo?.table_type || "").toLowerCase();
+    return ["postgres", "snowflake_postgres", "interactive"].includes(tableType);
+  },
+
   postgresPoolDisplay() {
     const stats = this.templateInfo?.postgres_stats;
     if (!stats || !stats.pool) return null;

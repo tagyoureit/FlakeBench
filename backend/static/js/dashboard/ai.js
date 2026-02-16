@@ -138,10 +138,22 @@ window.DashboardMixins.ai = {
   formatMarkdown(text) {
     if (!text) return "";
     let str = text;
+    // Handle JSON-encoded strings from AI_COMPLETE
     if (str.startsWith('"') && str.endsWith('"')) {
       str = str.slice(1, -1);
     }
     str = str.replace(/\\n/g, "\n");
+    
+    // Use marked library if available for proper markdown rendering
+    if (typeof marked !== "undefined" && marked.parse) {
+      try {
+        return marked.parse(str);
+      } catch (e) {
+        console.warn("Markdown parsing failed:", e);
+      }
+    }
+    
+    // Fallback: basic markdown conversion
     str = str.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     str = str.replace(/\*(.+?)\*/g, "<em>$1</em>");
     str = str.replace(/^### (.+)$/gm, "<h4 style='margin: 0.75rem 0 0.25rem; font-size: 1rem;'>$1</h4>");

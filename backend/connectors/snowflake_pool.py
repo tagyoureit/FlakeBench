@@ -140,7 +140,7 @@ class SnowflakeConnectionPool:
 
         logger.info(
             f"[{pool_name}] Initialized Snowflake pool: {user}@{account}, "
-            f"pool_size={pool_size}, max_overflow={max_overflow}"
+            f"pool_size={pool_size}, max_overflow={max_overflow}, warehouse={warehouse}"
         )
 
     def _run_in_executor(self, func, *args):

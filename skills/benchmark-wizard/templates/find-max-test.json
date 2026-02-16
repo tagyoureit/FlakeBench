@@ -1,0 +1,94 @@
+{
+  "$schema": "https://unistore-benchmark.snowflake.com/schemas/test-config.json",
+  "$comment": "FIND_MAX_CONCURRENCY mode template - Find maximum sustainable throughput",
+  
+  "template_name": "find-max-benchmark",
+  "description": "Find maximum throughput benchmark - progressively increases load until saturation",
+  
+  "config": {
+    "table_type": "{{TABLE_TYPE}}",
+    "database": "{{DATABASE}}",
+    "schema": "{{SCHEMA}}",
+    "table_name": "{{TABLE_NAME}}",
+    
+    "load_mode": "FIND_MAX_CONCURRENCY",
+    "start_concurrency": 5,
+    "concurrency_increment": 10,
+    "step_duration_seconds": 30,
+    
+    "qps_stability_pct": 25.0,
+    "latency_stability_pct": 100.0,
+    "max_error_rate_pct": 1.0,
+    
+    "duration_seconds": 600,
+    "warmup_seconds": 10,
+    "think_time_ms": 0,
+    
+    "workload_type": "CUSTOM",
+    "custom_point_lookup_pct": 50,
+    "custom_range_scan_pct": 50,
+    "custom_insert_pct": 0,
+    "custom_update_pct": 0,
+    
+    "custom_point_lookup_sql": "SELECT * FROM {table} WHERE {{KEY_COLUMN}} = ?",
+    "custom_range_scan_sql": "SELECT * FROM {table} WHERE {{TIME_COLUMN}} >= ? ORDER BY {{TIME_COLUMN}} DESC LIMIT 100",
+    "custom_insert_sql": "",
+    "custom_update_sql": "",
+    
+    "warehouse_name": "{{WAREHOUSE_NAME}}",
+    "warehouse_size": "Medium",
+    
+    "metrics_interval_seconds": 1.0,
+    "collect_query_history": false
+  },
+  
+  "tags": {
+    "source": "benchmark-wizard",
+    "load_mode": "FIND_MAX_CONCURRENCY"
+  },
+  
+  "_placeholders": {
+    "TABLE_TYPE": "HYBRID | STANDARD | POSTGRES | INTERACTIVE | DYNAMIC",
+    "DATABASE": "Snowflake database name",
+    "SCHEMA": "Snowflake schema name",
+    "TABLE_NAME": "Target table name",
+    "KEY_COLUMN": "Primary key column for point lookups",
+    "TIME_COLUMN": "Timestamp column for range scans",
+    "WAREHOUSE_NAME": "Snowflake warehouse name"
+  },
+  
+  "_usage": {
+    "description": "Use this template for capacity planning - finds maximum sustainable throughput",
+    "best_for": [
+      "Capacity planning",
+      "Finding system limits",
+      "Determining optimal configuration",
+      "Pre-production stress testing"
+    ],
+    "key_parameters": {
+      "start_concurrency": "Initial worker count (1-100)",
+      "concurrency_increment": "Workers to add each step (1-100)",
+      "step_duration_seconds": "How long to run each step (10-300)",
+      "qps_stability_pct": "QPS variance threshold for stability (1-50)",
+      "latency_stability_pct": "Max P95 latency increase % (5-100)",
+      "max_error_rate_pct": "Error rate threshold to stop (0-100)"
+    },
+    "behavior": {
+      "description": "Progressively increases concurrency until performance degrades",
+      "steps": [
+        "1. Start at start_concurrency workers",
+        "2. Run for step_duration_seconds",
+        "3. Check stability criteria",
+        "4. If stable, add concurrency_increment workers",
+        "5. Repeat until instability or duration exhausted"
+      ],
+      "termination_conditions": [
+        "QPS increase < qps_stability_pct from previous step",
+        "P95 latency increase > latency_stability_pct",
+        "Error rate > max_error_rate_pct",
+        "Total duration exceeded"
+      ],
+      "output": "Maximum sustainable concurrency and QPS"
+    }
+  }
+}

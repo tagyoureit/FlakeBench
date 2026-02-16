@@ -964,6 +964,14 @@ class OrchestratorService:
                 table_type,
             )
 
+        # 5a. Validate CUSTOM query requirements before spawning workers
+        # If queries need KEY values, ensure the template was prepared (has value pools)
+        await self._validate_custom_query_requirements(
+            scenario_config=scenario_config,
+            template_id=str(template_id or ""),
+            table_type=table_type,
+        )
+
         # 5. Pre-validate tables (once, before spawning workers)
         # This avoids N workers each doing identical schema validation queries.
         validation_results = await self._pre_validate_tables(scenario_config)
@@ -1051,6 +1059,109 @@ class OrchestratorService:
         except Exception as e:
             logger.error(
                 "Failed to ensure warehouse %s is running: %s", warehouse_name, e
+            )
+
+    async def _validate_custom_query_requirements(
+        self,
+        scenario_config: dict[str, Any],
+        template_id: str,
+        table_type: str,
+    ) -> None:
+        """
+        Validate that CUSTOM queries have the data they need before spawning workers.
+
+        For Interactive/Hybrid tables, runtime profiling (MIN/MAX queries) won't work
+        because the orchestrator's pool uses a different warehouse. So we must ensure
+        the template was prepared (has KEY/RANGE pools) if the queries need them.
+
+        Raises:
+            ValueError: If validation fails with a user-friendly message
+        """
+        workload_cfg = scenario_config.get("workload", {})
+        custom_queries = workload_cfg.get("custom_queries", [])
+        if not custom_queries:
+            return
+
+        # Determine what the queries need
+        needs_key = False
+        needs_time = False
+
+        for q in custom_queries:
+            if not isinstance(q, dict):
+                continue
+            kind = str(q.get("query_kind") or "").strip().upper()
+            pct = q.get("weight_pct", q.get("percentage", q.get("pct", 0)))
+            try:
+                pct = float(pct or 0)
+            except (ValueError, TypeError):
+                pct = 0
+            if pct <= 0:
+                continue
+
+            if kind in {"POINT_LOOKUP", "UPDATE"}:
+                needs_key = True
+            elif kind == "RANGE_SCAN":
+                sql = str(q.get("sql") or "")
+                placeholder_count = sql.count("?")
+                if placeholder_count >= 2:
+                    needs_key = True
+                else:
+                    needs_time = True
+
+        if not needs_key and not needs_time:
+            return
+
+        # For non-Interactive tables, runtime profiling can work
+        if table_type not in ("HYBRID", "INTERACTIVE"):
+            logger.info(
+                "Custom query validation: needs_key=%s, needs_time=%s - "
+                "runtime profiling available for %s tables",
+                needs_key, needs_time, table_type,
+            )
+            return
+
+        # For Interactive/Hybrid tables, check if template has value pools
+        prefix = f"{settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}"
+        has_key_pool = False
+        has_range_pool = False
+
+        if template_id:
+            try:
+                rows = await self._pool.execute_query(
+                    f"""
+                    SELECT DISTINCT POOL_KIND
+                    FROM {prefix}.TEMPLATE_VALUE_POOLS
+                    WHERE TEMPLATE_ID = ?
+                    """,
+                    params=[template_id],
+                )
+                pool_types = {str(r[0]).upper() for r in (rows or [])}
+                has_key_pool = "KEY" in pool_types
+                has_range_pool = "RANGE" in pool_types
+                logger.info(
+                    "Custom query validation: needs_key=%s, needs_time=%s, "
+                    "has_key_pool=%s, has_range_pool=%s (template=%s)",
+                    needs_key, needs_time, has_key_pool, has_range_pool, template_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to check template value pools: %s", e
+                )
+
+        # Fail if requirements not met
+        if needs_key and not has_key_pool:
+            raise ValueError(
+                f"CUSTOM workload requires key values for POINT_LOOKUP/UPDATE/RANGE_SCAN queries, "
+                f"but table metadata has not been collected. Interactive/Hybrid tables cannot be profiled at runtime "
+                f"because they require their bound warehouse. "
+                f"Please click 'Update Table Metadata' in the template editor before running."
+            )
+
+        if needs_time and not has_range_pool:
+            raise ValueError(
+                f"CUSTOM workload requires time values for RANGE_SCAN queries, "
+                f"but table metadata has not been collected. Interactive/Hybrid tables cannot be profiled at runtime. "
+                f"Please click 'Update Table Metadata' in the template editor before running."
             )
 
     async def _pre_validate_tables(
@@ -1641,6 +1752,8 @@ class OrchestratorService:
                 parent_rollup_task = None
                 try:
                     t.result()
+                except asyncio.CancelledError:
+                    pass
                 except Exception as exc:
                     logger.debug(
                         "Background parent rollup failed for %s: %s",
@@ -1661,6 +1774,10 @@ class OrchestratorService:
                     t.result()
                     logger.info(
                         "FIND_MAX step %d: history insert SUCCESS", step_number
+                    )
+                except asyncio.CancelledError:
+                    logger.debug(
+                        "FIND_MAX step %d: history insert cancelled", step_number
                     )
                 except Exception as exc:
                     logger.error(

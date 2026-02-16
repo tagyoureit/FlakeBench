@@ -232,4 +232,86 @@ window.DashboardMixins.comparison = {
       this.testId
     )},${encodeURIComponent(otherTestId)}`;
   },
+
+  // Auto-select baseline state
+  autoSelectLoading: false,
+  autoSelectSimilarLoading: false,
+
+  /**
+   * Auto-select the best baseline for the current test and navigate to deep compare.
+   */
+  async autoSelectBaseline() {
+    if (!this.testId) return;
+    if (this.autoSelectLoading) return;
+
+    this.autoSelectLoading = true;
+
+    try {
+      const resp = await fetch(
+        `/api/tests/${encodeURIComponent(this.testId)}/compare-context?baseline_count=5&comparable_limit=1&min_similarity=0.55`
+      );
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const ctx = await resp.json();
+
+      if (ctx && !ctx.error && ctx.vs_previous?.test_id) {
+        // Use the previous test (most recent matching baseline)
+        window.location.href = `/history/compare?ids=${encodeURIComponent(this.testId)},${encodeURIComponent(ctx.vs_previous.test_id)}`;
+      } else if (ctx && ctx.comparable_candidates && ctx.comparable_candidates.length > 0) {
+        // Fall back to top comparable candidate
+        const bestMatch = ctx.comparable_candidates[0];
+        window.location.href = `/history/compare?ids=${encodeURIComponent(this.testId)},${encodeURIComponent(bestMatch.test_id)}`;
+      } else {
+        if (window.toast && typeof window.toast.error === "function") {
+          window.toast.error("No suitable baseline found for this test.");
+        }
+        this.autoSelectLoading = false;
+      }
+    } catch (e) {
+      console.error("Auto-select baseline failed:", e);
+      if (window.toast && typeof window.toast.error === "function") {
+        window.toast.error(`Failed to find baseline: ${e.message || e}`);
+      }
+      this.autoSelectLoading = false;
+    }
+  },
+
+  /**
+   * Auto-select a similar test (cross-template) and navigate to deep compare.
+   */
+  async autoSelectSimilar() {
+    if (!this.testId) return;
+    if (this.autoSelectSimilarLoading) return;
+
+    this.autoSelectSimilarLoading = true;
+
+    try {
+      // Lower similarity threshold and request more candidates
+      const resp = await fetch(
+        `/api/tests/${encodeURIComponent(this.testId)}/compare-context?baseline_count=5&comparable_limit=5&min_similarity=0.40`
+      );
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const ctx = await resp.json();
+
+      if (ctx && ctx.similar_candidates && ctx.similar_candidates.length > 0) {
+        // Pick the best match from similar candidates
+        const bestMatch = ctx.similar_candidates[0];
+        window.location.href = `/history/compare?ids=${encodeURIComponent(this.testId)},${encodeURIComponent(bestMatch.test_id)}`;
+      } else {
+        if (window.toast && typeof window.toast.error === "function") {
+          window.toast.error("No similar tests found (different template, compatible config).");
+        }
+        this.autoSelectSimilarLoading = false;
+      }
+    } catch (e) {
+      console.error("Auto-select similar failed:", e);
+      if (window.toast && typeof window.toast.error === "function") {
+        window.toast.error(`Failed to find similar: ${e.message || e}`);
+      }
+      this.autoSelectSimilarLoading = false;
+    }
+  },
 };

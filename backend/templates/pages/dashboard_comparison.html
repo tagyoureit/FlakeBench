@@ -1,0 +1,229 @@
+{% if is_htmx %}
+{% extends "partials/content_only.html" %}
+{% else %}
+{% extends "base.html" %}
+{% endif %}
+
+{% block title %}Table Type Comparison - FlakeBench{% endblock %}
+
+{% block content %}
+<div x-data="tableTypeComparison()" x-init="init()">
+    <!-- Page Header -->
+    <div class="card card-compact">
+        <div class="flex items-center justify-between">
+            <div>
+                <div class="card-title card-title--compact">Table Type Comparison Dashboard</div>
+                <p class="text-gray-600">Compare performance, cost, and reliability across all table types</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-sm text-gray-500" x-show="lastRefresh">
+                    Last updated: <span x-text="lastRefresh"></span>
+                </span>
+                <button class="btn btn-secondary btn-sm" @click="refresh()" :disabled="loading">
+                    <span x-show="!loading">↻ Refresh</span>
+                    <span x-show="loading">Loading...</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading State -->
+    <div x-show="loading && !kpiCards.length" class="card">
+        <div class="flex items-center justify-center py-12">
+            <div class="loading-spinner w-8 h-8 border-4 rounded-full animate-spin"></div>
+            <span class="ml-3 text-gray-600">Loading dashboard data...</span>
+        </div>
+    </div>
+
+    <!-- Error State -->
+    <div x-show="error" class="card bg-red-50 border-red-200">
+        <div class="text-red-700">
+            <strong>Error loading data:</strong> <span x-text="error"></span>
+        </div>
+    </div>
+
+    <!-- Totals Summary -->
+    <div x-show="totals" class="metrics-grid my-4">
+        <div class="metric-card">
+            <div class="metric-label">Total Tests</div>
+            <div class="metric-value" x-text="formatNumber(totals?.total_tests)"></div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Templates</div>
+            <div class="metric-value" x-text="formatNumber(totals?.total_templates)"></div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Operations</div>
+            <div class="metric-value" x-text="formatNumber(totals?.total_operations)"></div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Credits Used</div>
+            <div class="metric-value" x-text="formatNumber(totals?.total_credits, 2)"></div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Total Cost</div>
+            <div class="metric-value">$<span x-text="formatNumber(totals?.total_cost_usd, 2)"></span></div>
+        </div>
+    </div>
+
+    <!-- KPI Cards Grid - Table Type Cards -->
+    <div x-show="kpiCards.length" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 my-4">
+        <template x-for="kpi in kpiCards" :key="kpi.table_type">
+            <div class="card" :class="getCardClass(kpi)">
+                <!-- Header with icon and badges -->
+                <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-3">
+                        <img
+                            x-show="getTableTypeIcon(kpi.table_type)"
+                            class="w-8 h-8"
+                            :src="getTableTypeIcon(kpi.table_type)"
+                            :alt="kpi.table_type"
+                            :title="kpi.table_type"
+                        >
+                        <h3 class="text-lg font-bold" x-text="kpi.table_type"></h3>
+                    </div>
+                    <div class="flex gap-1 flex-wrap justify-end">
+                        <template x-for="badge in kpi.badges" :key="badge">
+                            <span class="inline-flex items-center gap-1 py-1 px-2.5 rounded-full text-xs font-medium whitespace-nowrap" 
+                                  :style="getBadgeStyle(badge)">
+                                <span x-html="getBadgeIcon(badge)"></span>
+                                <span x-text="getBadgeLabel(badge)"></span>
+                            </span>
+                        </template>
+                    </div>
+                </div>
+                
+                <!-- Test Count -->
+                <div class="mb-4">
+                    <div class="text-3xl font-bold text-gray-800" x-text="formatNumber(kpi.test_count)"></div>
+                    <div class="text-sm text-gray-500">tests across <span x-text="kpi.unique_templates"></span> templates</div>
+                </div>
+                
+                <!-- Performance Metrics -->
+                <div class="space-y-2 border-t pt-3">
+                    <div class="flex justify-between">
+                        <span class="text-gray-600">Avg QPS</span>
+                        <span class="font-semibold" x-text="formatNumber(kpi.avg_qps, 1)"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-600">Avg P95</span>
+                        <span class="font-semibold" x-text="formatLatency(kpi.avg_p95_ms)"></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-600">Error Rate</span>
+                        <span class="font-semibold" :class="kpi.avg_error_rate > 0.01 ? 'text-red-600' : 'text-green-600'" 
+                              x-text="formatPercent(kpi.avg_error_rate)"></span>
+                    </div>
+                </div>
+                
+                <!-- Cost Metrics -->
+                <div class="space-y-2 border-t pt-3 mt-3">
+                    <div class="flex justify-between">
+                        <span class="text-gray-600">Total Cost</span>
+                        <span class="font-semibold text-orange-600">$<span x-text="formatNumber(kpi.estimated_cost_usd, 2)"></span></span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-gray-600">Cost/1K Ops</span>
+                        <span class="font-semibold" x-text="kpi.cost_per_1k_ops_usd ? ('$' + formatNumber(kpi.cost_per_1k_ops_usd, 4)) : 'N/A'"></span>
+                    </div>
+                </div>
+            </div>
+        </template>
+    </div>
+
+    <!-- Charts Section -->
+    <div x-show="kpiCards.length" class="grid grid-cols-1 lg:grid-cols-2 gap-4 my-4">
+        <!-- QPS Comparison Chart -->
+        <div class="card">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="card-title card-title--compact">Throughput Comparison (QPS)</h3>
+                <div class="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                    <button 
+                        class="px-3 py-1 text-sm rounded-md transition-colors"
+                        :class="qpsChartType === 'bar' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'"
+                        @click="toggleQpsChartType()"
+                        x-show="qpsChartType !== 'bar'"
+                    >Bar</button>
+                    <button 
+                        class="px-3 py-1 text-sm rounded-md transition-colors"
+                        :class="qpsChartType === 'scatter' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'"
+                        @click="toggleQpsChartType()"
+                        x-show="qpsChartType !== 'scatter'"
+                    >Scatter</button>
+                    <span class="px-3 py-1 text-sm rounded-md bg-white shadow text-gray-900" x-text="qpsChartType === 'bar' ? 'Bar' : 'Scatter'"></span>
+                </div>
+            </div>
+            <div class="relative" style="height: 300px;">
+                <canvas id="qps-chart"></canvas>
+            </div>
+        </div>
+        
+        <!-- Latency Comparison Chart -->
+        <div class="card">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="card-title card-title--compact">Latency Comparison (P95 ms)</h3>
+                <div class="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                    <button 
+                        class="px-3 py-1 text-sm rounded-md transition-colors"
+                        :class="latencyChartType === 'bar' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'"
+                        @click="toggleLatencyChartType()"
+                        x-show="latencyChartType !== 'bar'"
+                    >Bar</button>
+                    <button 
+                        class="px-3 py-1 text-sm rounded-md transition-colors"
+                        :class="latencyChartType === 'scatter' ? 'bg-white shadow text-gray-900' : 'text-gray-600 hover:text-gray-900'"
+                        @click="toggleLatencyChartType()"
+                        x-show="latencyChartType !== 'scatter'"
+                    >Scatter</button>
+                    <span class="px-3 py-1 text-sm rounded-md bg-white shadow text-gray-900" x-text="latencyChartType === 'bar' ? 'Bar' : 'Scatter'"></span>
+                </div>
+            </div>
+            <div class="relative" style="height: 300px;">
+                <canvas id="latency-chart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Comparison Table -->
+    <div x-show="comparisonTable.rows?.length" class="card my-4">
+        <h3 class="card-title card-title--compact mb-4">Detailed Comparison</h3>
+        <div class="overflow-x-auto">
+            <table class="table table-compact w-full">
+                <thead>
+                    <tr>
+                        <template x-for="col in comparisonTable.columns" :key="col">
+                            <th class="text-left" x-text="col"></th>
+                        </template>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-for="row in comparisonTable.rows" :key="row.metric">
+                        <tr>
+                            <td class="font-medium" x-text="row.metric_label"></td>
+                            <template x-for="tableType in comparisonTable.columns.slice(1)" :key="tableType">
+                                <td :class="row.winner === tableType ? 'bg-green-100 font-bold text-green-800' : ''">
+                                    <span x-text="formatCellValue(row.values[tableType], row.format_type)"></span>
+                                    <span x-show="row.winner === tableType" class="ml-1 text-green-600">★</span>
+                                </td>
+                            </template>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Link to Template Analysis -->
+    <div class="card card-compact bg-blue-50 border-blue-200 my-4">
+        <div class="flex items-center justify-between">
+            <div>
+                <div class="font-semibold text-blue-800">Want to drill down into specific templates?</div>
+                <p class="text-blue-600 text-sm">Analyze individual template performance, distributions, and trends</p>
+            </div>
+            <a href="/analysis/templates" class="btn btn-primary" hx-get="/analysis/templates" hx-target="#main-content" hx-push-url="true">
+                Template Analysis →
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

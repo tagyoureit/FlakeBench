@@ -26,6 +26,7 @@ from .comparison_scoring import (
     get_confidence_level,
     check_hard_gates,
 )
+from .fingerprint import compute_sql_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +69,24 @@ def extract_test_features(row: dict[str, Any]) -> dict[str, Any]:
     total_ops = row.get("total_operations", 1) or 1
     read_pct = (read_ops / total_ops * 100) if total_ops > 0 else 0
 
+    # Extract SQL fingerprint (if available)
+    sql_text = template_config.get("sql_template") or template_config.get("query_template")
+    fingerprint = compute_sql_fingerprint(sql_text) if sql_text else None
+
+    # Fallback template name if missing
+    template_name = test_config.get("template_name", "")
+    if not template_name and test_config.get("template_id"):
+        template_name = f"Template {test_config.get('template_id')[:8]}"
+
     return {
         "test_id": row.get("test_id"),
         "run_id": row.get("run_id"),
         "template_id": test_config.get("template_id"),
-        "template_name": test_config.get("template_name", ""),
+        "template_name": template_name,
         "load_mode": load_mode,
         "table_type": (row.get("table_type") or "").upper(),
         "target_type": template_config.get("target_type"),
+        "sql_fingerprint": fingerprint,
         "status": (row.get("status") or "").upper(),
         "warehouse_size": (row.get("warehouse_size") or "").upper(),
         "scale_mode": scaling_config.get("mode"),
@@ -230,6 +241,7 @@ async def fetch_baseline_candidates(
         t.TOTAL_OPERATIONS,
         t.START_TIME,
         t.FIND_MAX_RESULT,
+        t.TEST_NAME,
         ROW_NUMBER() OVER (ORDER BY t.START_TIME DESC) AS recency_rank
     FROM {prefix}.TEST_RESULTS t
     JOIN current_test c ON
@@ -273,8 +285,13 @@ async def fetch_baseline_candidates(
             "total_operations": row[14],
             "start_time": row[15],
             "find_max_result": row[16] if len(row) > 16 else None,
-            "recency_rank": row[17] if len(row) > 17 else None,
+            "test_name": row[17] if len(row) > 17 else None,
+            "recency_rank": row[18] if len(row) > 18 else None,
         }
+
+        # Override test_config name if column name exists
+        if row_dict["test_name"]:
+            row_dict["test_config"]["template_name"] = row_dict["test_name"]
 
         # Parse FIND_MAX result if present
         find_max_result = row_dict.get("find_max_result")
@@ -286,6 +303,136 @@ async def fetch_baseline_candidates(
         results.append(extract_test_features(row_dict))
 
     return results
+
+
+async def fetch_comparable_candidates(
+    pool: Any,
+    current_test: dict[str, Any],
+    limit: int = 10,
+    days_back: int = 90,
+) -> list[dict[str, Any]]:
+    """
+    Fetch comparable candidates across different templates.
+
+    Searches for tests that:
+    - Have the same Table Type
+    - Have the same SQL Template or Query Tag
+    - Are NOT the same template ID (cross-template search)
+    - Are COMPLETED
+    - Within the last N days
+
+    Args:
+        pool: Database connection pool.
+        current_test: Current test dictionary (with extracted features).
+        limit: Max candidates to return.
+        days_back: Lookback window.
+
+    Returns:
+        List of comparable candidate dictionaries.
+    """
+    prefix = get_prefix()
+    test_id = current_test["test_id"]
+    table_type = current_test["table_type"]
+    template_id = current_test.get("template_id")
+    
+    # Extract SQL template from the raw config (we need to re-fetch or pass it down)
+    # For now, we'll assume exact match on SQL string if available
+    # But current_test here is the extracted features dict, which might not have the raw SQL
+    # We added sql_fingerprint but that's a hash. We need the raw SQL string for the query.
+    
+    # To fix this properly, let's fetch the SQL template from the DB for the current test if needed,
+    # or better, just pass the query parameters we want to match on.
+    
+    # Since we can't easily get the raw SQL string here without re-fetching, 
+    # let's assume we can match on query_tag or just fetch candidates by table_type 
+    # and filter in Python using the fingerprint.
+    
+    # Broad search by table_type + status, then filter/rank in Python
+    query = f"""
+    SELECT
+        TEST_ID,
+        RUN_ID,
+        TEST_CONFIG,
+        TABLE_TYPE,
+        WAREHOUSE_SIZE,
+        STATUS,
+        DURATION_SECONDS,
+        CONCURRENT_CONNECTIONS,
+        QPS,
+        P50_LATENCY_MS,
+        P95_LATENCY_MS,
+        P99_LATENCY_MS,
+        ERROR_RATE,
+        READ_OPERATIONS,
+        TOTAL_OPERATIONS,
+        START_TIME,
+        FIND_MAX_RESULT,
+        TEST_NAME
+    FROM {prefix}.TEST_RESULTS
+    WHERE TABLE_TYPE = ?
+      AND TEST_ID != ?
+      AND STATUS = 'COMPLETED'
+      AND (RUN_ID IS NULL OR TEST_ID = RUN_ID)
+      AND START_TIME >= DATEADD(day, -{days_back}, CURRENT_TIMESTAMP())
+      -- Exclude same template to find "other" tests
+      AND (TEST_CONFIG:template_id::STRING IS NULL OR TEST_CONFIG:template_id::STRING != ?)
+    ORDER BY START_TIME DESC
+    LIMIT 100
+    """
+    
+    rows = await pool.execute_query(query, params=[table_type, test_id, template_id])
+    
+    if not rows:
+        return []
+
+    candidates = []
+    current_fingerprint = current_test.get("sql_fingerprint")
+    
+    for row in rows:
+        # Parse row to dict
+        row_dict = {
+            "test_id": row[0],
+            "run_id": row[1],
+            "test_config": row[2] if isinstance(row[2], dict) else {},
+            "table_type": row[3],
+            "warehouse_size": row[4],
+            "status": row[5],
+            "duration_seconds": row[6],
+            "concurrent_connections": row[7],
+            "qps": row[8],
+            "p50_latency_ms": row[9],
+            "p95_latency_ms": row[10],
+            "p99_latency_ms": row[11],
+            "error_rate": row[12],
+            "read_operations": row[13],
+            "total_operations": row[14],
+            "start_time": row[15],
+            "find_max_result": row[16] if len(row) > 16 else None,
+            "test_name": row[17] if len(row) > 17 else None,
+        }
+        
+        # Override test_config name if column name exists
+        if row_dict["test_name"]:
+            row_dict["test_config"]["template_name"] = row_dict["test_name"]
+        
+        # Extract features (includes fingerprint calculation)
+        candidate = extract_test_features(row_dict)
+        
+        # Filter: Must match SQL fingerprint if available
+        if current_fingerprint and candidate.get("sql_fingerprint") != current_fingerprint:
+            continue
+            
+        # Parse FIND_MAX if needed
+        find_max_result = row_dict.get("find_max_result")
+        if find_max_result and isinstance(find_max_result, dict):
+            step_history = find_max_result.get("step_history", [])
+            fm_derived = derive_find_max_best_stable(step_history)
+            candidate.update(fm_derived)
+            
+        candidates.append(candidate)
+        
+    # Return top N (ranked by recency for now, scoring handles the rest)
+    return candidates[:limit]
 
 
 async def fetch_current_test(pool: Any, test_id: str) -> dict[str, Any] | None:
@@ -319,7 +466,8 @@ async def fetch_current_test(pool: Any, test_id: str) -> dict[str, Any] | None:
         READ_OPERATIONS,
         TOTAL_OPERATIONS,
         START_TIME,
-        FIND_MAX_RESULT
+        FIND_MAX_RESULT,
+        TEST_NAME
     FROM {prefix}.TEST_RESULTS
     WHERE TEST_ID = ?
     """
@@ -348,7 +496,12 @@ async def fetch_current_test(pool: Any, test_id: str) -> dict[str, Any] | None:
         "total_operations": row[14],
         "start_time": row[15],
         "find_max_result": row[16] if len(row) > 16 else None,
+        "test_name": row[17] if len(row) > 17 else None,
     }
+
+    # Override test_config name if column name exists
+    if row_dict["test_name"]:
+        row_dict["test_config"]["template_name"] = row_dict["test_name"]
 
     # Parse FIND_MAX result if present
     find_max_result = row_dict.get("find_max_result")
@@ -634,12 +787,17 @@ async def build_compare_context(
 
     load_mode = current.get("load_mode", "")
 
-    # Fetch baseline candidates
+    # Fetch baseline candidates (same template)
     candidates = await fetch_baseline_candidates(
         pool, test_id, limit=baseline_count + 5  # Fetch extra for exclusions
     )
 
-    # Calculate rolling statistics
+    # Fetch comparable candidates (different template, similar SQL)
+    cross_template_candidates = await fetch_comparable_candidates(
+        pool, current, limit=comparable_limit
+    )
+
+    # Calculate rolling statistics (only from strict baselines)
     baseline_stats = calculate_rolling_statistics(candidates, use_count=baseline_count)
 
     # Build vs_previous comparison (most recent baseline)
@@ -695,54 +853,82 @@ async def build_compare_context(
             "sample_size": len(candidates),
         }
 
-    # Score and rank comparable runs
+    # Score and rank comparable runs (strict baselines)
     comparable_runs = []
     exclusions = []
 
-    for candidate in candidates:
-        score_result = calculate_similarity_score(current, candidate, load_mode)
+    def process_candidates(candidate_list, strict_mode=True):
+        processed = []
+        for candidate in candidate_list:
+            # Use current load mode for scoring context
+            score_result = calculate_similarity_score(current, candidate, load_mode)
 
-        if score_result["excluded"]:
-            if include_excluded:
-                exclusions.append({
-                    "test_id": candidate.get("test_id"),
-                    "score": score_result["total_score"],
-                    "reasons": score_result.get("exclusion_reasons", []),
-                })
-            continue
+            if score_result["excluded"]:
+                if include_excluded:
+                    exclusions.append({
+                        "test_id": candidate.get("test_id"),
+                        "score": score_result["total_score"],
+                        "reasons": score_result.get("exclusion_reasons", []),
+                        "source": "strict" if strict_mode else "cross_template"
+                    })
+                continue
 
-        if score_result["total_score"] < min_similarity:
-            if include_excluded:
-                exclusions.append({
-                    "test_id": candidate.get("test_id"),
-                    "score": score_result["total_score"],
-                    "reasons": [f"Score below threshold: {score_result['total_score']:.2f} < {min_similarity}"],
-                })
-            continue
+            # Lower threshold for cross-template discovery? Or keep same?
+            # Keeping same ensures quality.
+            if score_result["total_score"] < min_similarity:
+                if include_excluded:
+                    exclusions.append({
+                        "test_id": candidate.get("test_id"),
+                        "score": score_result["total_score"],
+                        "reasons": [f"Score below threshold: {score_result['total_score']:.2f} < {min_similarity}"],
+                        "source": "strict" if strict_mode else "cross_template"
+                    })
+                continue
 
-        comparable_runs.append({
-            "test_id": candidate.get("test_id"),
-            "test_date": (
-                candidate["start_time"].isoformat()
-                if candidate.get("start_time")
-                else None
-            ),
-            "test_name": candidate.get("template_name", ""),
-            "similarity_score": score_result["total_score"],
-            "confidence": score_result["confidence"],
-            "score_breakdown": score_result["breakdown"],
-            "match_reasons": [],  # TODO: Generate match reasons
-            "differences": [],  # TODO: Generate differences
-            "metrics": {
-                "qps": candidate.get("qps"),
-                "p95_latency_ms": candidate.get("p95_latency_ms"),
-                "error_rate_pct": candidate.get("error_rate"),
-            },
-        })
+            processed.append({
+                "test_id": candidate.get("test_id"),
+                "test_date": (
+                    candidate["start_time"].isoformat()
+                    if candidate.get("start_time")
+                    else None
+                ),
+                "test_name": candidate.get("template_name") or candidate.get("test_id") or "Unknown Test",
+                "match_type": "BASELINE" if strict_mode else "SIMILAR",
+                "similarity_score": score_result["total_score"],
+                "confidence": score_result["confidence"],
+                "score_breakdown": score_result["breakdown"],
+                "match_reasons": (
+                    ["Same template", "Same load mode", "Same table type"]
+                    if strict_mode
+                    else ["Same SQL fingerprint", "Different template", "Same table type"]
+                ),
+                "differences": [],
+                "config": {
+                    "table_type": candidate.get("table_type"),
+                    "load_mode": candidate.get("load_mode"),
+                    "warehouse_size": candidate.get("warehouse_size"),
+                    "scale_mode": candidate.get("scale_mode"),
+                    "duration_seconds": candidate.get("duration_seconds"),
+                },
+                "metrics": {
+                    "qps": candidate.get("qps"),
+                    "p95_latency_ms": candidate.get("p95_latency_ms"),
+                    "error_rate_pct": candidate.get("error_rate"),
+                },
+                "is_same_template": strict_mode
+            })
+        
+        # Sort by similarity score
+        processed.sort(key=lambda x: x["similarity_score"], reverse=True)
+        return processed
 
-    # Sort by similarity score and limit
-    comparable_runs.sort(key=lambda x: x["similarity_score"], reverse=True)
-    comparable_runs = comparable_runs[:comparable_limit]
+    comparable_runs = process_candidates(candidates, strict_mode=True)[:comparable_limit]
+    
+    # Process cross-template candidates separately (and sort them!)
+    similar_runs = process_candidates(cross_template_candidates, strict_mode=False)
+    # Re-sort to be safe, though process_candidates does it
+    similar_runs.sort(key=lambda x: x["similarity_score"], reverse=True)
+    similar_runs = similar_runs[:comparable_limit]
 
     end_time = datetime.now(timezone.utc)
     computation_time_ms = int((end_time - start_time).total_seconds() * 1000)
@@ -755,7 +941,8 @@ async def build_compare_context(
         "vs_previous": vs_previous,
         "vs_median": vs_median,
         "trend": trend,
-        "comparable_runs": comparable_runs,
+        "comparable_candidates": comparable_runs,  # Strict baselines (same template) - RENAMED to match JS
+        "similar_candidates": similar_runs,        # Cross-template candidates
         "exclusions": exclusions if include_excluded else [],
         "metadata": {
             "computed_at": end_time.isoformat(),

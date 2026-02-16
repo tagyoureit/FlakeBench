@@ -17,7 +17,9 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -42,6 +44,43 @@ from backend.api.routes.test_results_modules.comparison_scoring import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# Simple TTL cache for expensive endpoint results (historical metrics don't change)
+class _TTLCache:
+    """Simple TTL cache for async functions."""
+    
+    def __init__(self, ttl_seconds: int = 300, max_size: int = 100):
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._ttl = ttl_seconds
+        self._max_size = max_size
+    
+    def get(self, key: str) -> Any | None:
+        """Get cached value if not expired."""
+        if key in self._cache:
+            timestamp, value = self._cache[key]
+            if time.time() - timestamp < self._ttl:
+                return value
+            del self._cache[key]
+        return None
+    
+    def set(self, key: str, value: Any) -> None:
+        """Set cache value with current timestamp."""
+        # Evict oldest entries if at capacity
+        if len(self._cache) >= self._max_size:
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k][0])
+            del self._cache[oldest_key]
+        self._cache[key] = (time.time(), value)
+    
+    def invalidate(self, key: str) -> None:
+        """Remove a specific key from cache."""
+        self._cache.pop(key, None)
+
+
+# Cache instances for metrics endpoints (5 minute TTL)
+_metrics_cache = _TTLCache(ttl_seconds=300, max_size=100)
+_worker_metrics_cache = _TTLCache(ttl_seconds=300, max_size=100)
+_test_details_cache = _TTLCache(ttl_seconds=300, max_size=100)
 
 
 def _build_cost_fields(
@@ -791,6 +830,11 @@ async def _fetch_cluster_breakdown(*, pool: Any, test_id: str) -> dict[str, Any]
     Fetch per-cluster breakdown for MCW tests.
 
     For parent runs (multi-worker), aggregates from all child runs.
+    
+    NOTE: We query QUERY_EXECUTIONS directly instead of using V_CLUSTER_BREAKDOWN
+    because the view aggregates ALL rows before filtering, which is very slow
+    on large tables (34M+ rows). By filtering first, we only aggregate the
+    relevant test's data.
     """
     prefix = _prefix()
 
@@ -802,46 +846,54 @@ async def _fetch_cluster_breakdown(*, pool: Any, test_id: str) -> dict[str, Any]
     is_parent = bool(run_id) and str(run_id) == str(test_id)
 
     if is_parent:
+        # For parent runs, aggregate across all child test_ids
+        # Query QUERY_EXECUTIONS directly with filter pushed down
         query = f"""
         SELECT
-            cb.CLUSTER_NUMBER,
-            SUM(cb.QUERY_COUNT) AS QUERY_COUNT,
-            AVG(cb.P50_EXEC_MS) AS P50_EXEC_MS,
-            AVG(cb.P95_EXEC_MS) AS P95_EXEC_MS,
-            MAX(cb.MAX_EXEC_MS) AS MAX_EXEC_MS,
-            AVG(cb.AVG_QUEUED_OVERLOAD_MS) AS AVG_QUEUED_OVERLOAD_MS,
-            AVG(cb.AVG_QUEUED_PROVISIONING_MS) AS AVG_QUEUED_PROVISIONING_MS,
-            SUM(cb.POINT_LOOKUPS) AS POINT_LOOKUPS,
-            SUM(cb.RANGE_SCANS) AS RANGE_SCANS,
-            SUM(cb.INSERTS) AS INSERTS,
-            SUM(cb.UPDATES) AS UPDATES
-        FROM {prefix}.V_CLUSTER_BREAKDOWN cb
-        WHERE cb.TEST_ID IN (
+            COALESCE(qe.SF_CLUSTER_NUMBER, 0) AS CLUSTER_NUMBER,
+            COUNT(*) AS QUERY_COUNT,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY qe.SF_EXECUTION_MS) AS P50_EXEC_MS,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY qe.SF_EXECUTION_MS) AS P95_EXEC_MS,
+            MAX(qe.SF_EXECUTION_MS) AS MAX_EXEC_MS,
+            AVG(qe.SF_QUEUED_OVERLOAD_MS) AS AVG_QUEUED_OVERLOAD_MS,
+            AVG(qe.SF_QUEUED_PROVISIONING_MS) AS AVG_QUEUED_PROVISIONING_MS,
+            SUM(IFF(qe.QUERY_KIND = 'POINT_LOOKUP', 1, 0)) AS POINT_LOOKUPS,
+            SUM(IFF(qe.QUERY_KIND = 'RANGE_SCAN', 1, 0)) AS RANGE_SCANS,
+            SUM(IFF(qe.QUERY_KIND = 'INSERT', 1, 0)) AS INSERTS,
+            SUM(IFF(qe.QUERY_KIND = 'UPDATE', 1, 0)) AS UPDATES
+        FROM {prefix}.QUERY_EXECUTIONS qe
+        WHERE qe.TEST_ID IN (
             SELECT TEST_ID
             FROM {prefix}.TEST_RESULTS
             WHERE RUN_ID = ?
               AND TEST_ID <> ?
         )
-        GROUP BY cb.CLUSTER_NUMBER
-        ORDER BY cb.CLUSTER_NUMBER ASC
+          AND COALESCE(qe.WARMUP, FALSE) = FALSE
+          AND qe.SUCCESS = TRUE
+        GROUP BY COALESCE(qe.SF_CLUSTER_NUMBER, 0)
+        ORDER BY CLUSTER_NUMBER ASC
         """
         rows = await pool.execute_query(query, params=[test_id, test_id])
     else:
+        # For single test, query QUERY_EXECUTIONS directly
         query = f"""
         SELECT
-            CLUSTER_NUMBER,
-            QUERY_COUNT,
-            P50_EXEC_MS,
-            P95_EXEC_MS,
-            MAX_EXEC_MS,
-            AVG_QUEUED_OVERLOAD_MS,
-            AVG_QUEUED_PROVISIONING_MS,
-            POINT_LOOKUPS,
-            RANGE_SCANS,
-            INSERTS,
-            UPDATES
-        FROM {prefix}.V_CLUSTER_BREAKDOWN
+            COALESCE(SF_CLUSTER_NUMBER, 0) AS CLUSTER_NUMBER,
+            COUNT(*) AS QUERY_COUNT,
+            PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY SF_EXECUTION_MS) AS P50_EXEC_MS,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY SF_EXECUTION_MS) AS P95_EXEC_MS,
+            MAX(SF_EXECUTION_MS) AS MAX_EXEC_MS,
+            AVG(SF_QUEUED_OVERLOAD_MS) AS AVG_QUEUED_OVERLOAD_MS,
+            AVG(SF_QUEUED_PROVISIONING_MS) AS AVG_QUEUED_PROVISIONING_MS,
+            SUM(IFF(QUERY_KIND = 'POINT_LOOKUP', 1, 0)) AS POINT_LOOKUPS,
+            SUM(IFF(QUERY_KIND = 'RANGE_SCAN', 1, 0)) AS RANGE_SCANS,
+            SUM(IFF(QUERY_KIND = 'INSERT', 1, 0)) AS INSERTS,
+            SUM(IFF(QUERY_KIND = 'UPDATE', 1, 0)) AS UPDATES
+        FROM {prefix}.QUERY_EXECUTIONS
         WHERE TEST_ID = ?
+          AND COALESCE(WARMUP, FALSE) = FALSE
+          AND SUCCESS = TRUE
+        GROUP BY COALESCE(SF_CLUSTER_NUMBER, 0)
         ORDER BY CLUSTER_NUMBER ASC
         """
         rows = await pool.execute_query(query, params=[test_id])
@@ -1621,8 +1673,8 @@ async def start_autoscale_test(test_id: str) -> dict[str, Any]:
             else "RUNNING"
         )
         return {"test_id": test_id, "status": status_val}
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Run not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise http_exception("start run", e)
 
@@ -1884,6 +1936,7 @@ async def list_tests(
                     "test_name": test_name,
                     "table_type": table_type_db,
                     "warehouse_size": wh_size,
+                    "postgres_instance_size": postgres_instance_size,
                     "created_at": (created_at.isoformat() + "Z")
                     if hasattr(created_at, "isoformat")
                     else str(created_at),
@@ -1987,6 +2040,7 @@ async def search_tests(q: str) -> dict[str, Any]:
                     "test_name": test_name,
                     "table_type": table_type_db,
                     "warehouse_size": wh_size,
+                    "postgres_instance_size": postgres_instance_size,
                     "created_at": (created_at.isoformat() + "Z")
                     if hasattr(created_at, "isoformat")
                     else str(created_at),
@@ -2200,6 +2254,12 @@ async def _fetch_error_rates(
 
 @router.get("/{test_id}")
 async def get_test(test_id: str) -> dict[str, Any]:
+    # Check cache first (only for completed historical tests)
+    cache_key = f"test_details:{test_id}"
+    cached = _test_details_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
     try:
         pool = snowflake_pool.get_default_pool()
 
@@ -2847,6 +2907,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
             ),
             "warehouse": warehouse,
             "warehouse_size": warehouse_size,
+            "postgres_instance_size": template_cfg.get("postgres_instance_size") if isinstance(template_cfg, dict) else None,
             "status": status_live,
             "start_time": start_time_live.isoformat()
             if hasattr(start_time_live, "isoformat")
@@ -3420,6 +3481,11 @@ async def get_test(test_id: str) -> dict[str, Any]:
         payload["sf_latency_spread_ratio"] = sf_spread.get("latency_spread_ratio")
         payload["sf_latency_spread_warning"] = sf_spread.get("latency_spread_warning")
 
+        # Cache completed/terminal tests (they won't change)
+        final_status = str(payload.get("status") or "").upper()
+        if final_status in ("COMPLETED", "STOPPED", "FAILED", "CANCELLED"):
+            _test_details_cache.set(cache_key, payload)
+        
         return payload
     except HTTPException:
         raise
@@ -4468,6 +4534,11 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
     Fetch historical time-series metrics snapshots for a completed test.
     This is used to populate charts in the dashboard for historical tests.
     """
+    # Check cache first
+    cached = _metrics_cache.get(test_id)
+    if cached is not None:
+        return cached
+    
     try:
         pool = snowflake_pool.get_default_pool()
         latency_aggregation_method = None
@@ -4505,9 +4576,20 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
         if worker_rows:
             latency_aggregation_method = LATENCY_AGGREGATION_METHOD
 
-            # Use the earliest timestamp from the data as the reference point.
-            # This avoids timezone issues between RUN_STATUS and WORKER_METRICS_SNAPSHOTS.
-            run_start_time: Any = worker_rows[0][0] if worker_rows else None
+            # Anchor elapsed time to the first recognized benchmark phase row
+            # (WARMUP/MEASUREMENT/RUNNING), not PREPARING/other rows.
+            # This avoids counting pre-run setup as "warmup" on the chart axis.
+            run_start_time: Any = None
+            for row in worker_rows:
+                try:
+                    phase_value = str(row[9] or "").strip().upper()
+                    if phase_value in ("WARMUP", "MEASUREMENT", "RUNNING") and row[0]:
+                        run_start_time = row[0]
+                        break
+                except Exception:
+                    continue
+            if run_start_time is None:
+                run_start_time = worker_rows[0][0] if worker_rows else None
 
             @dataclass
             class _Bucket:
@@ -4528,6 +4610,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
             buckets: dict[float, _Bucket] = {}
             first_warmup_timestamp: Any = None
             first_measurement_timestamp: Any = None
+            first_measurement_elapsed_from_start: float | None = None
             for (
                 timestamp,
                 elapsed,
@@ -4545,7 +4628,9 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 phase_value = str(phase or "").strip().upper()
                 is_warmup = phase_value == "WARMUP"
                 is_measurement = phase_value in ("MEASUREMENT", "RUNNING")
-                if phase_value and phase_value not in ("WARMUP", "MEASUREMENT", "RUNNING"):
+                # Always exclude non-benchmark phases (PREPARING/PROCESSING/etc).
+                # Rows with empty/unknown phase are excluded for chart integrity.
+                if phase_value not in ("WARMUP", "MEASUREMENT", "RUNNING"):
                     continue
                 if is_warmup and first_warmup_timestamp is None and timestamp:
                     first_warmup_timestamp = timestamp
@@ -4566,6 +4651,8 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 except Exception:
                     bucket = 0.0
                     elapsed_from_start = float(elapsed or 0)
+                if is_measurement and first_measurement_elapsed_from_start is None:
+                    first_measurement_elapsed_from_start = float(elapsed_from_start)
                 agg = buckets.get(bucket)
                 worker_id_str = str(worker_id or "unknown")
                 expected_count = int(worker_group_count or 1)
@@ -4643,7 +4730,12 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 return raw if isinstance(raw, dict) else {}
 
             global_warmup_end_elapsed = None
-            if first_warmup_timestamp and first_measurement_timestamp:
+            if first_measurement_elapsed_from_start is not None:
+                # Warmup end should align to the elapsed axis used by the chart.
+                # Using first warmup sample can undercount warmup when early
+                # warmup snapshots are missing, so prefer first measurement elapsed.
+                global_warmup_end_elapsed = float(first_measurement_elapsed_from_start)
+            elif first_warmup_timestamp and first_measurement_timestamp:
                 try:
                     delta = first_measurement_timestamp - first_warmup_timestamp
                     global_warmup_end_elapsed = delta.total_seconds()
@@ -4938,7 +5030,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 }
             )
 
-        return {
+        result = {
             "test_id": test_id,
             "snapshots": snapshots,
             "count": len(snapshots),
@@ -4946,6 +5038,8 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
             "warmup_end_elapsed_seconds": warmup_end_elapsed_seconds,
             "smoothing_applied": smoothing_applied,
         }
+        _metrics_cache.set(test_id, result)
+        return result
     except Exception as e:
         raise http_exception("get test metrics", e)
 
@@ -4955,6 +5049,11 @@ async def get_worker_metrics(test_id: str) -> dict[str, Any]:
     """
     Fetch per-worker time-series metrics snapshots for multi-worker runs.
     """
+    # Check cache first
+    cached = _worker_metrics_cache.get(test_id)
+    if cached is not None:
+        return cached
+    
     try:
         pool = snowflake_pool.get_default_pool()
         prefix = _prefix()
@@ -4987,12 +5086,14 @@ async def get_worker_metrics(test_id: str) -> dict[str, Any]:
         """
         rows = await pool.execute_query(query, params=[parent_run_id])
         if not rows:
-            return {
+            result = {
                 "test_id": test_id,
                 "parent_run_id": parent_run_id,
                 "available": False,
                 "workers": [],
             }
+            _worker_metrics_cache.set(test_id, result)
+            return result
 
         def _to_int(v: Any) -> int:
             try:
@@ -5103,13 +5204,15 @@ async def get_worker_metrics(test_id: str) -> dict[str, Any]:
             ts = rows[0][3]
             first_data_timestamp = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
 
-        return {
+        result = {
             "test_id": test_id,
             "parent_run_id": parent_run_id,
             "available": True,
             "run_start_at": first_data_timestamp,
             "workers": list(workers.values()),
         }
+        _worker_metrics_cache.set(test_id, result)
+        return result
     except Exception as e:
         raise http_exception("get worker metrics", e)
 
@@ -6435,23 +6538,27 @@ COST ANALYSIS:
     # Build platform-specific guidance
     if is_postgres:
         platform_intro = "You are analyzing a **PostgreSQL** CONCURRENCY mode benchmark test."
-        latency_analysis_guidance = """3. **Latency Breakdown Analysis**: Interpret the server vs network latency split.
+        latency_analysis_guidance = """## 3. Latency Breakdown Analysis
+Interpret the server vs network latency split:
    - What percentage of latency is network overhead vs PostgreSQL server execution?
    - Is the database the bottleneck, or is network round-trip dominating?
    - For high network overhead: consider connection pooling, geographic proximity, batching
    - For high server time: look at cache hit ratio, query optimization, indexing
 
-4. **PostgreSQL Server Metrics Analysis**: Interpret the pg_stat_statements data.
+## 4. PostgreSQL Server Metrics Analysis
+Interpret the pg_stat_statements data:
    - Cache hit ratio: Is the working set fitting in shared_buffers? (>99% is excellent)
    - Mean server time: Is PostgreSQL processing efficiently? (<1ms excellent for OLTP)
    - WAL generated: Is write activity reasonable for the workload mix?
    - Block read time: Is there excessive disk I/O?"""
-        bottleneck_guidance = """5. **Bottleneck Analysis**: What's limiting performance?
+        bottleneck_guidance = """## 5. Bottleneck Analysis
+What's limiting performance?
    - Network bound (high network overhead, low server time)?
    - Database bound (high server time, cache misses)?
    - Connection pool bound (waiting for connections)?
    - Instance size bound (consider larger Postgres instance)?"""
-        recommendations_guidance = """6. **Recommendations**: Specific suggestions:
+        recommendations_guidance = """## 6. Recommendations
+Specific suggestions:
    - Should concurrency be increased or decreased?
    - Would a larger Postgres instance help?
    - Are there query optimization or indexing opportunities?
@@ -6459,15 +6566,18 @@ COST ANALYSIS:
    - Is the test client too far from the database (network latency)?"""
     else:
         platform_intro = "You are analyzing a Snowflake CONCURRENCY mode benchmark test."
-        latency_analysis_guidance = """3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
+        latency_analysis_guidance = """## 3. Latency Variance Analysis
+Interpret the spread ratios (P95/P50):
    - Is variance coming from Snowflake execution or app/network layer?
    - If high SF spread: warehouse contention, cold cache, multi-cluster scaling?
    - If high E2E but low SF: network latency, client processing, connection pooling?"""
-        bottleneck_guidance = """4. **Bottleneck Analysis**: What's limiting performance?
+        bottleneck_guidance = """## 4. Bottleneck Analysis
+What's limiting performance?
    - Compute bound (high CPU, low queue times)?
    - Queue bound (high queue_overload_ms)?
    - Data bound (high bytes_scanned)?"""
-        recommendations_guidance = """5. **Recommendations**: Specific suggestions:
+        recommendations_guidance = """## 5. Recommendations
+Specific suggestions:
    - Should concurrency be increased or decreased?
    - Would a larger warehouse help?
    - Any query optimization opportunities?"""
@@ -6509,15 +6619,18 @@ RESULTS:
 {cost_text}
 {f"Additional Context: {context}" if context else ""}
 {logs_section}
-Provide analysis structured as:
+Provide your analysis using the following structure with markdown formatting.
+Use **bold** for emphasis and bullet points (-) for all sub-items with proper indentation.
 
-1. **Performance Summary**: How did the system perform under {concurrency} concurrent workers?
+## 1. Performance Summary
+How did the system perform under {concurrency} concurrent workers?
    - Is throughput ({ops_per_sec:.1f} ops/sec) reasonable for this configuration?
    - Are latencies acceptable? (p95={p95:.1f}ms, p99={p99:.1f}ms)
    - Is error rate ({error_pct:.2f}%) acceptable?
    - Did the test meet SLO targets (if configured)?
 
-2. **Key Findings**: What stands out in the metrics?
+## 2. Key Findings
+What stands out in the metrics?
    - Any concerning latency outliers (compare p50 vs p95 vs p99)?
    - Read vs write performance differences?
    {"- Cache hit ratio and server execution time?" if is_postgres else "- Queue wait times indicating saturation?"}
@@ -6528,14 +6641,15 @@ Provide analysis structured as:
 
 {recommendations_guidance}
 
-{"7" if is_postgres else "6"}. **Overall Grade**: A/B/C/D/F based on:
+## {"7" if is_postgres else "6"}. Overall Grade
+Rate A/B/C/D/F based on:
    - **A**: Excellent - met all SLOs, low error rate (<0.1%), stable latencies (p99/p50 < 3x), good throughput
    - **B**: Good - met most SLOs, acceptable error rate (<1%), moderate latency variance
    - **C**: Fair - missed some SLOs, noticeable issues but functional
    - **D**: Poor - significant SLO misses, high errors (>5%), or severe latency spikes
    - **F**: Failed - test failed, extremely high errors, or unusable performance
 
-Keep analysis concise and actionable. Use bullet points with specific numbers."""
+Keep analysis concise and actionable. Use bullet points with specific numbers from the data."""
 
 
 def _build_qps_prompt(
@@ -6694,19 +6808,22 @@ COST ANALYSIS:
     # Platform-specific intro and guidance
     if is_postgres:
         platform_intro = "You are analyzing a **PostgreSQL** QPS mode benchmark test."
-        latency_guidance = """3. **Latency Breakdown Analysis**: Interpret the server vs network latency split.
+        latency_guidance = """## 3. Latency Breakdown Analysis
+Interpret the server vs network latency split:
    - What percentage of latency is network overhead vs PostgreSQL server execution?
    - Is the database the bottleneck, or is network round-trip dominating?
    - Cache hit ratio: Is the working set fitting in shared_buffers?
    - Mean server time: Is PostgreSQL processing efficiently?"""
-        bottleneck_guidance = """4. **Bottleneck Analysis**: What limited target achievement?
+        bottleneck_guidance = """## 4. Bottleneck Analysis
+What limited target achievement?
    - Max workers reached?
    - Network latency limiting throughput?
    - PostgreSQL server capacity (check server execution time)?
    - Connection pool exhaustion?
    - Resource guardrails triggered (CPU/Memory limits)?
    - High error rate?"""
-        recommendations_guidance = """5. **Recommendations**:
+        recommendations_guidance = """## 5. Recommendations
+Specific suggestions:
    - Adjust target QPS (higher or lower)?
    - Increase max_concurrency or max_workers?
    - Larger Postgres instance needed?
@@ -6715,16 +6832,19 @@ COST ANALYSIS:
    - Adjust resource guardrails if they're limiting scaling?"""
     else:
         platform_intro = "You are analyzing a Snowflake QPS mode benchmark test."
-        latency_guidance = """3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
+        latency_guidance = """## 3. Latency Variance Analysis
+Interpret the spread ratios (P95/P50):
    - Is variance coming from Snowflake execution or app/network layer?
    - If high SF spread: warehouse contention, cold cache, multi-cluster scaling?
    - If high E2E but low SF: network latency, client processing, connection pooling?"""
-        bottleneck_guidance = """4. **Bottleneck Analysis**: What limited target achievement?
+        bottleneck_guidance = """## 4. Bottleneck Analysis
+What limited target achievement?
    - Max workers reached?
    - Warehouse saturation (queue times)?
    - Resource guardrails triggered (CPU/Memory limits)?
    - High error rate?"""
-        recommendations_guidance = """5. **Recommendations**:
+        recommendations_guidance = """## 5. Recommendations
+Specific suggestions:
    - Adjust target QPS (higher or lower)?
    - Increase max_concurrency or max_workers?
    - Larger warehouse needed?
@@ -6769,15 +6889,18 @@ RESULTS:
 {cost_text}
 {f"Additional Context: {context}" if context else ""}
 {logs_section}
-Provide analysis structured as:
+Provide your analysis using the following structure with markdown formatting.
+Use **bold** for emphasis and bullet points (-) for all sub-items with proper indentation.
 
-1. **Target Achievement**: Did the test hit the target?
+## 1. Target Achievement
+Did the test hit the target?
    - Target: {target_qps} ops/sec, Achieved: {ops_per_sec:.1f} ops/sec ({target_achieved_pct:.1f}%)
    - If target not achieved, why? (hit max workers? high latency? errors? guardrails?)
    - Was the target realistic for this configuration?
    - Did the test meet SLO targets (if configured)?
 
-2. **Auto-Scaler Performance**: How well did the controller perform?
+## 2. Auto-Scaler Performance
+How well did the controller perform?
    - Did it effectively scale to meet demand?
    - Were there oscillations or instability? (Check the logs for scaling decisions)
    - Did scaling mode ({scaling_mode}) allow sufficient flexibility?
@@ -6789,14 +6912,15 @@ Provide analysis structured as:
 
 {recommendations_guidance}
 
-6. **Overall Grade**: A/B/C/D/F based on:
+## 6. Overall Grade
+Rate A/B/C/D/F based on:
    - **A**: Excellent - achieved >95% of target QPS, met all SLOs, stable scaling
    - **B**: Good - achieved >80% of target QPS, met most SLOs, minor oscillations
    - **C**: Fair - achieved >60% of target QPS, some SLO misses, scaling issues
    - **D**: Poor - achieved <60% of target QPS, significant SLO misses
    - **F**: Failed - test failed, unable to scale, or unusable performance
 
-Keep analysis concise and actionable. Use bullet points with specific numbers."""
+Keep analysis concise and actionable. Use bullet points with specific numbers from the data."""
 
 
 def _build_find_max_prompt(
@@ -6977,25 +7101,29 @@ COST ANALYSIS:
     # Platform-specific intro and guidance
     if is_postgres:
         platform_intro = "You are analyzing a **PostgreSQL** FIND_MAX_CONCURRENCY benchmark test."
-        latency_guidance = """3. **Latency Breakdown Analysis**: Interpret the server vs network latency split.
+        latency_guidance = """## 3. Latency Breakdown Analysis
+Interpret the server vs network latency split:
    - What percentage of latency is network overhead vs PostgreSQL server execution?
    - Did server execution time increase as concurrency increased?
    - Is the cache hit ratio maintaining at higher concurrency?
    - At what concurrency did network overhead become the bottleneck?"""
-        bottleneck_guidance = """5. **Bottleneck Identification**: What resource was exhausted?
+        bottleneck_guidance = """## 5. Bottleneck Identification
+What resource was exhausted?
    - Network bandwidth or connection limits?
    - PostgreSQL server capacity (check server execution time)?
    - Connection pool exhaustion?
    - Shared buffer contention (cache hit ratio dropping)?
    - Lock contention at high concurrency?
    - Resource guardrails triggered (CPU/Memory limits)?"""
-        recommendations_guidance = """6. **Recommendations**:
+        recommendations_guidance = """## 6. Recommendations
+Specific suggestions:
    - Optimal operating point (usually 70-80% of max)?
    - Would a larger Postgres instance increase max concurrency?
    - Would improved network latency allow higher throughput?
    - Any connection pooling or batching optimizations?
    - Adjust resource guardrails if they're limiting discovery?"""
-        grade_criteria = f"""7. **Overall Grade**: A/B/C/D/F based on:
+        grade_criteria = f"""## 7. Overall Grade
+Rate A/B/C/D/F based on:
    - **A**: Excellent - found high max concurrency for {warehouse_size}, graceful degradation, clear optimal point
    - **B**: Good - reasonable max concurrency, mostly graceful degradation, useful results
    - **C**: Fair - lower than expected max, some abrupt degradation, but usable data
@@ -7003,29 +7131,33 @@ COST ANALYSIS:
    - **F**: Failed - test failed early, no useful max concurrency found"""
     else:
         platform_intro = "You are analyzing a Snowflake FIND_MAX_CONCURRENCY benchmark test."
-        latency_guidance = """3. **Latency Variance Analysis**: Interpret the spread ratios (P95/P50).
+        latency_guidance = """## 3. Latency Variance Analysis
+Interpret the spread ratios (P95/P50):
    - Is variance coming from Snowflake execution or app/network layer?
    - If high SF spread: warehouse contention, cold cache, multi-cluster scaling?
    - If high E2E but low SF: network latency, client processing, connection pooling?"""
-        bottleneck_guidance = """5. **Bottleneck Identification**: What resource was exhausted?
+        bottleneck_guidance = """## 5. Bottleneck Identification
+What resource was exhausted?
    - Warehouse compute capacity (queue saturation)?
    - Multi-cluster scaling limits reached?
    - Data access contention?
    - Resource guardrails triggered (CPU/Memory limits)?
-   
-   **IMPORTANT - Understanding Snowflake Scaling:**
+
+**IMPORTANT - Understanding Snowflake Scaling:**
    - "Workers/threads" in this test are CLIENT-SIDE concurrency (app threads sending queries)
    - Snowflake warehouses scale INDEPENDENTLY via compute clusters, not client threads
    - Reducing client threads does NOT free Snowflake resources - it just sends fewer queries
    - To handle more load: scale UP the warehouse (MEDIUM→LARGE) or enable multi-cluster warehouses
    - If cache hit rate is 0% and Result Cache is "Disabled", that's intentional test configuration"""
-        recommendations_guidance = """6. **Recommendations**:
+        recommendations_guidance = """## 6. Recommendations
+Specific suggestions:
    - What is the sustainable operating point found by this test?
    - Would a LARGER warehouse (not fewer threads) increase capacity?
    - Would multi-cluster warehousing help with queue saturation?
    - If cache is disabled, that's intentional - don't suggest enabling it
    - Consider warehouse auto-suspend/resume settings for cost optimization"""
-        grade_criteria = f"""7. **Overall Grade**: A/B/C/D/F based on:
+        grade_criteria = f"""## 7. Overall Grade
+Rate A/B/C/D/F based on:
    - **A**: Excellent - found high max concurrency for {warehouse_size}, graceful degradation, clear optimal point
    - **B**: Good - reasonable max concurrency, mostly graceful degradation, useful results
    - **C**: Fair - lower than expected max, some abrupt degradation, but usable data
@@ -7081,15 +7213,18 @@ FIND MAX RESULTS:
 {cost_text}
 {f"Additional Context: {context}" if context else ""}
 {logs_section}
-Provide analysis structured as:
+Provide your analysis using the following structure with markdown formatting.
+Use **bold** for emphasis and bullet points (-) for all sub-items with proper indentation.
 
-1. **Maximum Concurrency Found**: What was the result?
+## 1. Maximum Concurrency Found
+What was the result?
    - Best sustainable concurrency: {best_concurrency} workers
    - QPS at best concurrency: {best_qps}
    - Why did the test stop? ({final_reason})
    - Review the execution logs for detailed step-by-step decisions
 
-2. **Scaling Curve Analysis**: How did performance scale?
+## 2. Scaling Curve Analysis
+How did performance scale?
    - Was scaling linear (2x workers = 2x QPS)?
    - Where did diminishing returns begin?
    - At what point did latency start degrading?
@@ -7097,7 +7232,8 @@ Provide analysis structured as:
 
 {latency_guidance}
 
-4. **Degradation Point**: What caused the system to stop scaling?
+## 4. Degradation Point
+What caused the system to stop scaling?
    - Latency spike (compare baseline vs final p95)?
    - Error rate increase?
    {"- Cache hit ratio dropping or server time increasing?" if is_postgres else "- Queue saturation?"}
@@ -7110,7 +7246,7 @@ Provide analysis structured as:
 
 {grade_criteria}
 
-Keep analysis concise and actionable. Use bullet points with specific numbers."""
+Keep analysis concise and actionable. Use bullet points with specific numbers from the data."""
 
 
 # =============================================================================
@@ -7163,6 +7299,290 @@ async def get_compare_context(
             status_code=500,
             detail=f"Failed to build comparison context: {str(e)}",
         )
+
+
+# NOTE: This route must be defined BEFORE /{test_id}/ai-analysis to prevent
+# the parameterized route from capturing "compare" as a test_id.
+@router.post("/compare/ai-analysis")
+async def deep_compare_ai_analysis(req: DeepCompareAiRequest) -> dict[str, Any]:
+    """
+    Generate AI-powered comparison analysis for two benchmark tests.
+
+    This endpoint compares two specific tests side-by-side, highlighting
+    configuration differences and performance deltas, then generates
+    AI analysis explaining which test performed better and why.
+    """
+    try:
+        pool = snowflake_pool.get_default_pool()
+        prefix = _prefix()
+
+        primary_id = req.primary_id
+        secondary_id = req.secondary_id
+
+        # Fetch both tests' data
+        test_query = f"""
+        SELECT
+            TEST_ID, TEST_NAME, TEST_CONFIG:template_name::VARCHAR AS TEMPLATE_NAME, TABLE_TYPE,
+            WAREHOUSE, WAREHOUSE_SIZE, CONCURRENT_CONNECTIONS,
+            DURATION_SECONDS, STATUS, QPS, TOTAL_OPERATIONS,
+            FAILED_OPERATIONS, P50_LATENCY_MS, P95_LATENCY_MS,
+            P99_LATENCY_MS, READ_OPERATIONS, WRITE_OPERATIONS,
+            TEST_CONFIG
+        FROM {prefix}.TEST_RESULTS
+        WHERE TEST_ID = ?
+        """
+
+        test_a_row = await pool.execute_query(test_query, params=[primary_id])
+        test_b_row = await pool.execute_query(test_query, params=[secondary_id])
+
+        if not test_a_row:
+            raise HTTPException(status_code=404, detail=f"Primary test {primary_id} not found")
+        if not test_b_row:
+            raise HTTPException(status_code=404, detail=f"Secondary test {secondary_id} not found")
+
+        def _parse_test_row(row: tuple) -> dict[str, Any]:
+            """Parse a test row into a dict."""
+            test_config = row[17]
+            if isinstance(test_config, str):
+                test_config = json.loads(test_config)
+
+            template_cfg = (
+                test_config.get("template_config")
+                if isinstance(test_config, dict)
+                else {}
+            ) or {}
+
+            load_mode = str(template_cfg.get("load_mode", "CONCURRENCY")).upper()
+
+            # Extract timing config
+            timing_cfg = template_cfg.get("timing", {}) or {}
+
+            return {
+                "test_id": row[0],
+                "test_name": row[1],
+                "template_name": row[2],
+                "table_type": row[3],
+                "warehouse": row[4],
+                "warehouse_size": row[5],
+                "concurrency": row[6],
+                "duration_seconds": float(row[7] or 0),
+                "status": row[8],
+                "qps": float(row[9] or 0),
+                "total_operations": int(row[10] or 0),
+                "failed_operations": int(row[11] or 0),
+                "p50_latency_ms": float(row[12] or 0),
+                "p95_latency_ms": float(row[13] or 0),
+                "p99_latency_ms": float(row[14] or 0),
+                "read_operations": int(row[15] or 0),
+                "write_operations": int(row[16] or 0),
+                "load_mode": load_mode,
+                "workload_mix": template_cfg.get("workload_mix"),
+                "scaling_mode": (
+                    template_cfg.get("scaling", {}).get("mode")
+                    if isinstance(template_cfg.get("scaling"), dict)
+                    else None
+                ),
+                # Additional fields for comparison
+                "warmup_seconds": timing_cfg.get("warmup_seconds"),
+                "table_name": test_config.get("table_name") if isinstance(test_config, dict) else None,
+                "target_qps": template_cfg.get("target_qps"),
+                "latency_aggregation_method": template_cfg.get("latency_aggregation_method"),
+                "workload_type": template_cfg.get("workload_type"),
+            }
+
+        test_a = _parse_test_row(test_a_row[0])
+        test_b = _parse_test_row(test_b_row[0])
+
+        # Fetch statistics for both tests (for more accurate metrics)
+        async def _fetch_test_statistics(test_id: str) -> dict[str, Any] | None:
+            """Fetch comprehensive statistics for a test including SF execution data."""
+            try:
+                stats_query = f"""
+                SELECT
+                    COUNT(*) AS TOTAL_QUERIES,
+                    SUM(CASE WHEN SUCCESS = FALSE THEN 1 ELSE 0 END) AS ERROR_COUNT,
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P50_MS,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P95_MS,
+                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P99_MS,
+                    -- SF Execution timing
+                    AVG(SF_ELAPSED_MS) AS AVG_SF_ELAPSED_MS,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY SF_ELAPSED_MS) AS P95_SF_ELAPSED_MS,
+                    -- Queue time statistics
+                    AVG(COALESCE(SF_QUEUED_OVERLOAD_MS, 0)) AS AVG_QUEUED_OVERLOAD_MS,
+                    AVG(COALESCE(SF_QUEUED_PROVISIONING_MS, 0)) AS AVG_QUEUED_PROVISIONING_MS,
+                    SUM(CASE WHEN COALESCE(SF_QUEUED_OVERLOAD_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_OVERLOAD_QUEUE,
+                    SUM(CASE WHEN COALESCE(SF_QUEUED_PROVISIONING_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_PROVISIONING_QUEUE,
+                    -- Cache statistics
+                    AVG(SF_PCT_SCANNED_FROM_CACHE) AS AVG_CACHE_HIT_PCT,
+                    SUM(CASE WHEN COALESCE(SF_PCT_SCANNED_FROM_CACHE, 0) >= 100 THEN 1 ELSE 0 END) AS FULL_CACHE_HIT_QUERIES,
+                    -- Warmup queries count (tells us if cache warming was used)
+                    (SELECT COUNT(*) FROM {prefix}.QUERY_EXECUTIONS WHERE TEST_ID = qe.TEST_ID AND WARMUP = TRUE) AS WARMUP_QUERY_COUNT
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                WHERE TEST_ID = ?
+                  AND COALESCE(WARMUP, FALSE) = FALSE
+                GROUP BY TEST_ID
+                """
+                rows = await pool.execute_query(stats_query, params=[test_id])
+                if not rows or rows[0][0] is None:
+                    return None
+
+                r = rows[0]
+                total = int(r[0] or 0)
+                errors = int(r[1] or 0)
+                queries_with_overload = int(r[9] or 0)
+                queries_with_provisioning = int(r[10] or 0)
+                full_cache_hits = int(r[12] or 0)
+                warmup_count = int(r[13] or 0)
+
+                # Calculate test duration for QPS
+                duration_query = f"""
+                SELECT TIMESTAMPDIFF(SECOND, MIN(START_TIME), MAX(START_TIME))
+                FROM {prefix}.QUERY_EXECUTIONS
+                WHERE TEST_ID = ?
+                  AND COALESCE(WARMUP, FALSE) = FALSE
+                """
+                dur_rows = await pool.execute_query(duration_query, params=[test_id])
+                duration = float(dur_rows[0][0] or 0) if dur_rows and dur_rows[0] else 0
+
+                return {
+                    "total_queries": total,
+                    "duration_seconds": duration,
+                    "errors": {
+                        "error_count": errors,
+                        "error_rate_pct": (errors / total * 100) if total > 0 else 0,
+                    },
+                    "latency": {
+                        "p50_ms": _to_float_or_none(r[2]),
+                        "p95_ms": _to_float_or_none(r[3]),
+                        "p99_ms": _to_float_or_none(r[4]),
+                    },
+                    "sf_execution": {
+                        "avg_sf_elapsed_ms": _to_float_or_none(r[5]),
+                        "p95_sf_elapsed_ms": _to_float_or_none(r[6]),
+                        "available": r[5] is not None,
+                    },
+                    "queue_times": {
+                        "avg_overload_ms": _to_float_or_none(r[7]),
+                        "avg_provisioning_ms": _to_float_or_none(r[8]),
+                        "queries_with_overload_queue": queries_with_overload,
+                        "queries_with_provisioning_queue": queries_with_provisioning,
+                        "pct_with_overload": (queries_with_overload / total * 100) if total > 0 else 0,
+                        "pct_with_provisioning": (queries_with_provisioning / total * 100) if total > 0 else 0,
+                    },
+                    "cache": {
+                        "avg_cache_hit_pct": _to_float_or_none(r[11]),
+                        "full_cache_hit_queries": full_cache_hits,
+                        "full_cache_hit_pct": (full_cache_hits / total * 100) if total > 0 else 0,
+                    },
+                    "warmup": {
+                        "warmup_queries_used": warmup_count > 0,
+                        "warmup_query_count": warmup_count,
+                    },
+                    "throughput": {
+                        "avg_qps": (total / duration) if duration > 0 else None,
+                    },
+                }
+            except Exception as e:
+                logger.warning("Failed to fetch deep compare statistics for %s: %s", test_id, e)
+                return None
+
+        stats_a, stats_b = await asyncio.gather(
+            _fetch_test_statistics(primary_id),
+            _fetch_test_statistics(secondary_id),
+        )
+
+        # Generate the comparison prompt
+        prompt, deltas = generate_deep_compare_prompt(test_a, test_b, stats_a, stats_b)
+
+        # Calculate similarity score between tests
+        load_mode = test_a.get("load_mode", "CONCURRENCY")
+        similarity = calculate_similarity_score(test_a, test_b, load_mode)
+
+        # Identify configuration differences
+        differences = []
+        config_fields = [
+            ("warehouse_size", "Warehouse size"),
+            ("warehouse", "Warehouse"),
+            ("concurrency", "Concurrency"),
+            ("duration_seconds", "Duration"),
+            ("load_mode", "Load mode"),
+            ("table_type", "Table type"),
+            ("scaling_mode", "Scaling mode"),
+            ("latency_aggregation_method", "Latency type"),
+            ("warmup_seconds", "Warmup"),
+            ("table_name", "Table"),
+            ("workload_type", "Workload"),
+            ("target_qps", "Target QPS"),
+        ]
+        for field, label in config_fields:
+            val_a = test_a.get(field)
+            val_b = test_b.get(field)
+            if val_a != val_b and (val_a is not None or val_b is not None):
+                differences.append(f"{label}: {val_a} vs {val_b}")
+
+        # Determine verdict based on deltas
+        qps_delta = deltas.get("qps_delta_pct")
+        p95_delta = deltas.get("p95_delta_pct")
+        error_delta = deltas.get("error_rate_delta_pct")
+
+        verdict = "SIMILAR"
+        if qps_delta is not None and p95_delta is not None:
+            qps_class = classify_change("qps", qps_delta)
+            p95_class = classify_change("p95_latency", p95_delta)
+
+            # Determine overall verdict
+            if qps_class == "IMPROVEMENT" and p95_class in ("IMPROVEMENT", "NEUTRAL"):
+                verdict = "IMPROVED"
+            elif qps_class == "REGRESSION" or p95_class == "REGRESSION":
+                verdict = "REGRESSED"
+            elif qps_class == "IMPROVEMENT" and p95_class == "REGRESSION":
+                verdict = "MIXED"
+            elif qps_class == "REGRESSION" and p95_class == "IMPROVEMENT":
+                verdict = "MIXED"
+            else:
+                verdict = "SIMILAR"
+
+        # Call AI for analysis
+        try:
+            ai_resp = await pool.execute_query(
+                "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?)) AS RESP",
+                params=[
+                    "claude-4-sonnet",
+                    prompt,
+                    json.dumps({"temperature": 0.3, "max_tokens": 2000}),
+                ],
+            )
+            raw_analysis = (
+                ai_resp[0][0] if ai_resp and ai_resp[0] else "Analysis unavailable"
+            )
+            # AI_COMPLETE may return a JSON-encoded string; try to parse it
+            if isinstance(raw_analysis, str) and raw_analysis.startswith('"'):
+                try:
+                    analysis = json.loads(raw_analysis)
+                except json.JSONDecodeError:
+                    analysis = raw_analysis
+            else:
+                analysis = raw_analysis
+        except Exception as ai_err:
+            logger.warning("Deep compare AI analysis failed: %s", ai_err)
+            analysis = f"AI analysis unavailable: {ai_err}"
+
+        return {
+            "primary_id": primary_id,
+            "secondary_id": secondary_id,
+            "analysis": analysis,
+            "deltas": deltas,
+            "verdict": verdict,
+            "similarity_score": similarity,
+            "differences": differences,
+            "load_mode": test_a.get("load_mode", "CONCURRENCY"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Error in deep compare AI analysis")
+        raise http_exception("deep compare ai analysis", e)
 
 
 @router.post("/{test_id}/ai-analysis")
@@ -7951,265 +8371,6 @@ If asked about data you don't have access to, say so and suggest what data would
         raise
     except Exception as e:
         raise http_exception("ai chat", e)
-
-
-@router.post("/compare/ai-analysis")
-async def deep_compare_ai_analysis(req: DeepCompareAiRequest) -> dict[str, Any]:
-    """
-    Generate AI-powered comparison analysis for two benchmark tests.
-
-    This endpoint compares two specific tests side-by-side, highlighting
-    configuration differences and performance deltas, then generates
-    AI analysis explaining which test performed better and why.
-    """
-    try:
-        pool = snowflake_pool.get_default_pool()
-        prefix = _prefix()
-
-        primary_id = req.primary_id
-        secondary_id = req.secondary_id
-
-        # Fetch both tests' data
-        test_query = f"""
-        SELECT
-            TEST_ID, TEST_NAME, TEMPLATE_NAME, TABLE_TYPE,
-            WAREHOUSE, WAREHOUSE_SIZE, CONCURRENT_CONNECTIONS,
-            DURATION_SECONDS, STATUS, QPS, TOTAL_OPERATIONS,
-            FAILED_OPERATIONS, P50_LATENCY_MS, P95_LATENCY_MS,
-            P99_LATENCY_MS, READ_OPERATIONS, WRITE_OPERATIONS,
-            TEST_CONFIG
-        FROM {prefix}.TEST_RESULTS
-        WHERE TEST_ID = ?
-        """
-
-        test_a_row = await pool.execute_query(test_query, params=[primary_id])
-        test_b_row = await pool.execute_query(test_query, params=[secondary_id])
-
-        if not test_a_row:
-            raise HTTPException(status_code=404, detail=f"Primary test {primary_id} not found")
-        if not test_b_row:
-            raise HTTPException(status_code=404, detail=f"Secondary test {secondary_id} not found")
-
-        def _parse_test_row(row: tuple) -> dict[str, Any]:
-            """Parse a test row into a dict."""
-            test_config = row[17]
-            if isinstance(test_config, str):
-                test_config = json.loads(test_config)
-
-            template_cfg = (
-                test_config.get("template_config")
-                if isinstance(test_config, dict)
-                else {}
-            ) or {}
-
-            load_mode = str(template_cfg.get("load_mode", "CONCURRENCY")).upper()
-
-            return {
-                "test_id": row[0],
-                "test_name": row[1],
-                "template_name": row[2],
-                "table_type": row[3],
-                "warehouse": row[4],
-                "warehouse_size": row[5],
-                "concurrency": row[6],
-                "duration_seconds": float(row[7] or 0),
-                "status": row[8],
-                "qps": float(row[9] or 0),
-                "total_operations": int(row[10] or 0),
-                "failed_operations": int(row[11] or 0),
-                "p50_latency_ms": float(row[12] or 0),
-                "p95_latency_ms": float(row[13] or 0),
-                "p99_latency_ms": float(row[14] or 0),
-                "read_operations": int(row[15] or 0),
-                "write_operations": int(row[16] or 0),
-                "load_mode": load_mode,
-                "workload_mix": template_cfg.get("workload_mix"),
-                "scaling_mode": (
-                    template_cfg.get("scaling", {}).get("mode")
-                    if isinstance(template_cfg.get("scaling"), dict)
-                    else None
-                ),
-            }
-
-        test_a = _parse_test_row(test_a_row[0])
-        test_b = _parse_test_row(test_b_row[0])
-
-        # Fetch statistics for both tests (for more accurate metrics)
-        async def _fetch_test_statistics(test_id: str) -> dict[str, Any] | None:
-            """Fetch comprehensive statistics for a test including SF execution data."""
-            try:
-                stats_query = f"""
-                SELECT
-                    COUNT(*) AS TOTAL_QUERIES,
-                    SUM(CASE WHEN SUCCESS = FALSE THEN 1 ELSE 0 END) AS ERROR_COUNT,
-                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P50_MS,
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P95_MS,
-                    PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY APP_ELAPSED_MS) AS P99_MS,
-                    -- SF Execution timing
-                    AVG(SF_ELAPSED_MS) AS AVG_SF_ELAPSED_MS,
-                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY SF_ELAPSED_MS) AS P95_SF_ELAPSED_MS,
-                    -- Queue time statistics
-                    AVG(COALESCE(SF_QUEUED_OVERLOAD_MS, 0)) AS AVG_QUEUED_OVERLOAD_MS,
-                    AVG(COALESCE(SF_QUEUED_PROVISIONING_MS, 0)) AS AVG_QUEUED_PROVISIONING_MS,
-                    SUM(CASE WHEN COALESCE(SF_QUEUED_OVERLOAD_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_OVERLOAD_QUEUE,
-                    SUM(CASE WHEN COALESCE(SF_QUEUED_PROVISIONING_MS, 0) > 0 THEN 1 ELSE 0 END) AS QUERIES_WITH_PROVISIONING_QUEUE,
-                    -- Cache statistics
-                    AVG(SF_PCT_SCANNED_FROM_CACHE) AS AVG_CACHE_HIT_PCT,
-                    SUM(CASE WHEN COALESCE(SF_PCT_SCANNED_FROM_CACHE, 0) >= 100 THEN 1 ELSE 0 END) AS FULL_CACHE_HIT_QUERIES,
-                    -- Warmup queries count (tells us if cache warming was used)
-                    (SELECT COUNT(*) FROM {prefix}.QUERY_EXECUTIONS WHERE TEST_ID = qe.TEST_ID AND WARMUP = TRUE) AS WARMUP_QUERY_COUNT
-                FROM {prefix}.QUERY_EXECUTIONS qe
-                WHERE TEST_ID = ?
-                  AND COALESCE(WARMUP, FALSE) = FALSE
-                GROUP BY TEST_ID
-                """
-                rows = await pool.execute_query(stats_query, params=[test_id])
-                if not rows or rows[0][0] is None:
-                    return None
-
-                r = rows[0]
-                total = int(r[0] or 0)
-                errors = int(r[1] or 0)
-                queries_with_overload = int(r[9] or 0)
-                queries_with_provisioning = int(r[10] or 0)
-                full_cache_hits = int(r[12] or 0)
-                warmup_count = int(r[13] or 0)
-
-                # Calculate test duration for QPS
-                duration_query = f"""
-                SELECT TIMESTAMPDIFF(SECOND, MIN(START_TIME), MAX(START_TIME))
-                FROM {prefix}.QUERY_EXECUTIONS
-                WHERE TEST_ID = ?
-                  AND COALESCE(WARMUP, FALSE) = FALSE
-                """
-                dur_rows = await pool.execute_query(duration_query, params=[test_id])
-                duration = float(dur_rows[0][0] or 0) if dur_rows and dur_rows[0] else 0
-
-                return {
-                    "total_queries": total,
-                    "duration_seconds": duration,
-                    "errors": {
-                        "error_count": errors,
-                        "error_rate_pct": (errors / total * 100) if total > 0 else 0,
-                    },
-                    "latency": {
-                        "p50_ms": _to_float_or_none(r[2]),
-                        "p95_ms": _to_float_or_none(r[3]),
-                        "p99_ms": _to_float_or_none(r[4]),
-                    },
-                    "sf_execution": {
-                        "avg_sf_elapsed_ms": _to_float_or_none(r[5]),
-                        "p95_sf_elapsed_ms": _to_float_or_none(r[6]),
-                        "available": r[5] is not None,
-                    },
-                    "queue_times": {
-                        "avg_overload_ms": _to_float_or_none(r[7]),
-                        "avg_provisioning_ms": _to_float_or_none(r[8]),
-                        "queries_with_overload_queue": queries_with_overload,
-                        "queries_with_provisioning_queue": queries_with_provisioning,
-                        "pct_with_overload": (queries_with_overload / total * 100) if total > 0 else 0,
-                        "pct_with_provisioning": (queries_with_provisioning / total * 100) if total > 0 else 0,
-                    },
-                    "cache": {
-                        "avg_cache_hit_pct": _to_float_or_none(r[11]),
-                        "full_cache_hit_queries": full_cache_hits,
-                        "full_cache_hit_pct": (full_cache_hits / total * 100) if total > 0 else 0,
-                    },
-                    "warmup": {
-                        "warmup_queries_used": warmup_count > 0,
-                        "warmup_query_count": warmup_count,
-                    },
-                    "throughput": {
-                        "avg_qps": (total / duration) if duration > 0 else None,
-                    },
-                }
-            except Exception as e:
-                logger.warning("Failed to fetch deep compare statistics for %s: %s", test_id, e)
-                return None
-
-        stats_a, stats_b = await asyncio.gather(
-            _fetch_test_statistics(primary_id),
-            _fetch_test_statistics(secondary_id),
-        )
-
-        # Generate the comparison prompt
-        prompt, deltas = generate_deep_compare_prompt(test_a, test_b, stats_a, stats_b)
-
-        # Calculate similarity score between tests
-        similarity = calculate_similarity_score(test_a, test_b)
-
-        # Identify configuration differences
-        differences = []
-        config_fields = [
-            ("warehouse_size", "Warehouse size"),
-            ("warehouse", "Warehouse"),
-            ("concurrency", "Concurrency"),
-            ("duration_seconds", "Duration"),
-            ("load_mode", "Load mode"),
-            ("table_type", "Table type"),
-            ("scaling_mode", "Scaling mode"),
-        ]
-        for field, label in config_fields:
-            val_a = test_a.get(field)
-            val_b = test_b.get(field)
-            if val_a != val_b and (val_a is not None or val_b is not None):
-                differences.append(f"{label}: {val_a} vs {val_b}")
-
-        # Determine verdict based on deltas
-        qps_delta = deltas.get("qps_delta_pct")
-        p95_delta = deltas.get("p95_delta_pct")
-        error_delta = deltas.get("error_rate_delta_pct")
-
-        verdict = "SIMILAR"
-        if qps_delta is not None and p95_delta is not None:
-            qps_class = classify_change("qps", qps_delta)
-            p95_class = classify_change("p95_latency", p95_delta)
-
-            # Determine overall verdict
-            if qps_class == "IMPROVEMENT" and p95_class in ("IMPROVEMENT", "NEUTRAL"):
-                verdict = "IMPROVED"
-            elif qps_class == "REGRESSION" or p95_class == "REGRESSION":
-                verdict = "REGRESSED"
-            elif qps_class == "IMPROVEMENT" and p95_class == "REGRESSION":
-                verdict = "MIXED"
-            elif qps_class == "REGRESSION" and p95_class == "IMPROVEMENT":
-                verdict = "MIXED"
-            else:
-                verdict = "SIMILAR"
-
-        # Call AI for analysis
-        try:
-            ai_resp = await pool.execute_query(
-                "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?)) AS RESP",
-                params=[
-                    "claude-4-sonnet",
-                    prompt,
-                    json.dumps({"temperature": 0.3, "max_tokens": 2000}),
-                ],
-            )
-            analysis = (
-                ai_resp[0][0] if ai_resp and ai_resp[0] else "Analysis unavailable"
-            )
-        except Exception as ai_err:
-            logger.warning("Deep compare AI analysis failed: %s", ai_err)
-            analysis = f"AI analysis unavailable: {ai_err}"
-
-        return {
-            "primary_id": primary_id,
-            "secondary_id": secondary_id,
-            "analysis": analysis,
-            "deltas": deltas,
-            "verdict": verdict,
-            "similarity_score": similarity,
-            "differences": differences,
-            "load_mode": test_a.get("load_mode", "CONCURRENCY"),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Error in deep compare AI analysis")
-        raise http_exception("deep compare ai analysis", e)
 
 
 @router.get("/{test_id}/statistics")

@@ -113,13 +113,21 @@
                                         :title="tableTypeLabel(template)"
                                     >
                                 </td>
-                                <td class="templates-mono" x-text="tableFqn(template)"></td>
+                                <td class="templates-mono" x-html="tableFqnStacked(template)"></td>
                                 <td x-html="warehouseDisplay(template)"></td>
                                 <td x-html="loadModeDisplay(template.config)"></td>
                                 <td x-html="workloadMixDisplay(template.config)"></td>
                                 <td x-html="durationDisplay(template.config)"></td>
                                 <td x-html="scalingDisplay(template.config)"></td>
-                                <td x-text="template.usage_count || 0"></td>
+                                <td>
+                                    <a 
+                                        x-show="template.usage_count > 0"
+                                        :href="'/history?search=' + encodeURIComponent(template.template_name)"
+                                        class="link"
+                                        x-text="template.usage_count"
+                                    ></a>
+                                    <span x-show="!template.usage_count || template.usage_count === 0">0</span>
+                                </td>
                                 <td>
                                     <div class="templates-actions">
                                         <button

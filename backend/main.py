@@ -531,6 +531,28 @@ async def templates_page(request: Request):
     )
 
 
+@app.get("/analysis", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard_comparison_page(request: Request):
+    """
+    Table Type Comparison Dashboard - compare performance across table types.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    return templates.TemplateResponse(
+        "pages/dashboard_comparison.html", {"request": request, "is_htmx": is_htmx}
+    )
+
+
+@app.get("/analysis/templates", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard_templates_page(request: Request):
+    """
+    Template Analysis Dashboard - deep dive into individual template performance.
+    """
+    is_htmx = request.headers.get("HX-Request") == "true"
+    return templates.TemplateResponse(
+        "pages/dashboard_templates.html", {"request": request, "is_htmx": is_htmx}
+    )
+
+
 @app.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 async def settings_page(request: Request):
     """
@@ -645,6 +667,7 @@ from backend.api.routes import warehouses  # noqa: E402
 from backend.api.routes import catalog  # noqa: E402
 from backend.api.routes import test_results  # noqa: E402
 from backend.api.routes import connections  # noqa: E402
+from backend.api.routes import dashboard  # noqa: E402
 
 app.include_router(runs.router, prefix="/api/runs", tags=["runs"])
 app.include_router(tests.router, prefix="/api/test", tags=["tests"])
@@ -653,6 +676,7 @@ app.include_router(warehouses.router, prefix="/api/warehouses", tags=["warehouse
 app.include_router(catalog.router, prefix="/api/catalog", tags=["catalog"])
 app.include_router(test_results.router, prefix="/api/tests", tags=["test_results"])
 app.include_router(connections.router, prefix="/api/connections", tags=["connections"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
 
 # TODO: Import additional routers as they're created
 # from backend.api.routes import comparison, history

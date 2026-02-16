@@ -13,6 +13,67 @@
             border-color: #bfdbfe !important;
             border-top-color: #3b82f6 !important;
         }
+        
+        /* Markdown rendering styles for AI analysis */
+        .markdown-content h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+            color: #111827;
+            border-bottom: 1px solid #e5e7eb;
+            padding-bottom: 0.5rem;
+        }
+        .markdown-content h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 1.25rem;
+            margin-bottom: 0.5rem;
+            color: #1f2937;
+        }
+        .markdown-content h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-top: 1rem;
+            margin-bottom: 0.5rem;
+            color: #374151;
+        }
+        .markdown-content h4 {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-top: 0.75rem;
+            margin-bottom: 0.25rem;
+            color: #4b5563;
+        }
+        .markdown-content p {
+            margin-bottom: 0.75rem;
+            line-height: 1.6;
+        }
+        .markdown-content ul, .markdown-content ol {
+            margin-left: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .markdown-content li {
+            margin-bottom: 0.25rem;
+            line-height: 1.5;
+        }
+        .markdown-content strong {
+            font-weight: 600;
+            color: #111827;
+        }
+        .markdown-content code {
+            background-color: #f3f4f6;
+            padding: 0.125rem 0.25rem;
+            border-radius: 0.25rem;
+            font-size: 0.875em;
+        }
+        .markdown-content blockquote {
+            border-left: 3px solid #d1d5db;
+            padding-left: 1rem;
+            margin: 0.75rem 0;
+            color: #6b7280;
+            font-style: italic;
+        }
     </style>
     
     <script src="/static/js/htmx.min.js"></script>
@@ -21,13 +82,14 @@
     <script src="/static/js/cost-utils.js"></script>
     <script src="/static/js/chart.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/lib/marked.umd.min.js"></script>
     <script defer src="/static/js/templates_manager.js"></script>
     <script defer src="/static/js/settings_page.js?v=2"></script>
     <!-- Dashboard modules (load before main dashboard.js) -->
     <script defer src="/static/js/dashboard/state.js?v=5"></script>
     <script defer src="/static/js/dashboard/formatters.js?v=5"></script>
     <script defer src="/static/js/dashboard/test-actions.js?v=2"></script>
-    <script defer src="/static/js/dashboard/display.js?v=3"></script>
+    <script defer src="/static/js/dashboard/display.js?v=5"></script>
     <script defer src="/static/js/dashboard/workers.js?v=2"></script>
     <script defer src="/static/js/dashboard/find-max.js?v=2"></script>
     <script defer src="/static/js/dashboard/slo.js?v=2"></script>
@@ -47,9 +109,11 @@
     <script defer src="/static/js/dashboard/comparison.js?v=1"></script>
     <!-- Main dashboard (composes all modules) -->
     <script defer src="/static/js/dashboard.js?v=6"></script>
-    <script defer src="/static/js/display-utils.js"></script>
+    <script defer src="/static/js/display-utils.js?v=2"></script>
     <script defer src="/static/js/history.js"></script>
     <script defer src="/static/js/compare_detail.js"></script>
+    <script defer src="/static/js/analysis-comparison.js"></script>
+    <script defer src="/static/js/analysis-templates.js"></script>
     <script defer src="/static/js/alpine.min.js"></script>
     
     {% block extra_head %}{% endblock %}

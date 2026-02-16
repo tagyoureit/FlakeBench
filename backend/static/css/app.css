@@ -1220,33 +1220,35 @@ fieldset:disabled .alert,
 
 .templates-table th,
 .templates-table td {
-  padding: 0.55rem 0.7rem;
+  padding: 0.4rem 0.5rem;
   vertical-align: top;
+  font-size: 0.875rem;
 }
 
 .templates-name {
   font-weight: 600;
   color: var(--text-dark);
-  line-height: 1.25;
+  line-height: 1.2;
+  font-size: 0.875rem;
 }
 
 .templates-desc {
-  margin-top: 0.15rem;
-  font-size: 0.875rem;
+  margin-top: 0.1rem;
+  font-size: 0.75rem;
   color: var(--text-light);
-  line-height: 1.25;
+  line-height: 1.2;
 }
 
 .templates-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
-  font-size: 0.85rem;
+  font-size: 0.75rem;
   word-break: break-word;
 }
 
 .template-type-icon {
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   display: inline-block;
   vertical-align: middle;
 }
@@ -1259,8 +1261,13 @@ fieldset:disabled .alert,
 
 .templates-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.templates-actions .btn-sm {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
 }
 
 /* -------------------------------------------------------------------------- */

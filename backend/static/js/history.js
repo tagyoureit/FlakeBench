@@ -33,6 +33,7 @@ function testHistory() {
     const testName = t.test_name != null ? String(t.test_name) : "";
     const tableType = t.table_type != null ? String(t.table_type) : "";
     const warehouseSize = t.warehouse_size != null ? String(t.warehouse_size) : "";
+    const postgresInstanceSize = t.postgres_instance_size != null ? String(t.postgres_instance_size) : "";
 
     const opsPerSec = Number(t.ops_per_sec);
     const p50Latency = Number(t.p50_latency);
@@ -60,6 +61,7 @@ function testHistory() {
       test_name: testName,
       table_type: tableType,
       warehouse_size: warehouseSize,
+      postgres_instance_size: postgresInstanceSize,
       created_at: createdAt,
       status,
       ops_per_sec: Number.isFinite(opsPerSec) ? opsPerSec : 0,
@@ -139,6 +141,7 @@ function testHistory() {
     viewingTestId: null,
     applyingFilters: false,
     deepCompareLoading: false,
+    autoSelectLoading: false,
     togglingCompareIds: {},
 
     // Cost settings
@@ -217,6 +220,12 @@ function testHistory() {
     },
 
     init() {
+      // Check for search query param from URL (e.g., from templates page link)
+      const urlParams = new URLSearchParams(window.location.search);
+      const searchParam = urlParams.get('search');
+      if (searchParam) {
+        this.filters.search_query = searchParam;
+      }
       this.loadTests();
       // Start auto-refresh for running tests
       this._startAutoRefresh();
@@ -424,6 +433,46 @@ function testHistory() {
     openDeepCompare() {
       this.deepCompareLoading = true;
       window.location.href = this.deepCompareUrl();
+    },
+
+    /**
+     * Auto-select the best baseline for the selected test and navigate to deep compare.
+     * Only works when exactly 1 test is selected.
+     */
+    async autoSelectBaseline() {
+      if (this.compareTests.length !== 1) return;
+      if (this.autoSelectLoading) return;
+
+      const testId = this.compareTests[0]?.test_id;
+      if (!testId) return;
+
+      this.autoSelectLoading = true;
+
+      try {
+        const resp = await fetch(
+          `/api/tests/${encodeURIComponent(testId)}/compare-context?baseline_count=5&comparable_limit=1&min_similarity=0.55`
+        );
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const ctx = await resp.json();
+
+        if (ctx && !ctx.error && ctx.vs_previous?.test_id) {
+          // Use the previous test (most recent matching baseline)
+          window.location.href = `/history/compare?ids=${encodeURIComponent(testId)},${encodeURIComponent(ctx.vs_previous.test_id)}`;
+        } else if (ctx && ctx.comparable_candidates && ctx.comparable_candidates.length > 0) {
+          // Fall back to top comparable candidate
+          const bestMatch = ctx.comparable_candidates[0];
+          window.location.href = `/history/compare?ids=${encodeURIComponent(testId)},${encodeURIComponent(bestMatch.test_id)}`;
+        } else {
+          safeToastError("No suitable baseline found for this test.");
+          this.autoSelectLoading = false;
+        }
+      } catch (e) {
+        console.error("Auto-select baseline failed:", e);
+        safeToastError(`Failed to find baseline: ${e.message || e}`);
+        this.autoSelectLoading = false;
+      }
     },
 
     get sortedTests() {

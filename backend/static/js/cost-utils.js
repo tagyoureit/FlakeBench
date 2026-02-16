@@ -8,7 +8,7 @@
  * IMPORTANT: ALL Snowflake compute uses credits, but with different rates:
  * - STANDARD / HYBRID: Standard warehouse credits (Table 1(a))
  * - INTERACTIVE: Interactive warehouse credits (Table 1(d))
- * - SNOWFLAKE_POSTGRES / POSTGRES: Postgres Compute credits (Table 1(i))
+ * - POSTGRES: Postgres Compute credits (Table 1(i))
  *
  * From Snowflake Service Consumption Table (February 2026):
  * https://www.snowflake.com/legal-files/CreditConsumptionTable.pdf
@@ -19,7 +19,7 @@
  */
 const WAREHOUSE_TABLE_TYPES = new Set(["STANDARD", "HYBRID"]);
 const INTERACTIVE_TABLE_TYPES = new Set(["INTERACTIVE"]);
-const POSTGRES_TABLE_TYPES = new Set(["POSTGRES", "SNOWFLAKE_POSTGRES"]);
+const POSTGRES_TABLE_TYPES = new Set(["POSTGRES"]);
 
 /**
  * Get the pricing category for a table type.
@@ -279,7 +279,7 @@ function calculateCreditsUsed(durationSeconds, warehouseSize, tableType) {
  * @param {number} durationSeconds - Duration of the test in seconds
  * @param {string | null | undefined} warehouseSize - Warehouse/instance size string
  * @param {number} [dollarsPerCredit] - Cost per credit (defaults to user setting)
- * @param {string | null | undefined} [tableType] - Table type (e.g., "HYBRID", "SNOWFLAKE_POSTGRES")
+ * @param {string | null | undefined} [tableType] - Table type (e.g., "HYBRID", "POSTGRES")
  * @returns {{ creditsUsed: number, estimatedCostUsd: number, costPerHour: number, creditsPerHour: number }}
  */
 function calculateEstimatedCost(durationSeconds, warehouseSize, dollarsPerCredit, tableType) {
@@ -316,7 +316,7 @@ function formatCost(amount, decimals) {
  * Format cost for a specific table type.
  * All table types now use credits - format consistently.
  * @param {number | null | undefined} amount - Cost amount
- * @param {string | null | undefined} tableType - Table type (e.g., "HYBRID", "SNOWFLAKE_POSTGRES")
+ * @param {string | null | undefined} tableType - Table type (e.g., "HYBRID", "POSTGRES")
  * @param {string | null | undefined} calculationMethod - How cost was calculated
  * @returns {string}
  */

@@ -857,43 +857,55 @@ def _generate_deep_compare_instructions() -> str:
     """Generate analysis instructions for deep comparison."""
     return """ANALYSIS INSTRUCTIONS:
 
-Please analyze this comparison and provide:
+Provide your analysis using the following structure with markdown formatting.
+Use **bold** for section headers and bullet points (-) for all sub-items with proper indentation.
 
-1. **Performance Summary**: Summarize the key performance differences.
-   - Compare QPS, latency percentiles, and error rates using the data provided above.
-   - Note which test achieved better throughput and which had lower latency.
+## 1. Performance Summary
+Summarize the key performance differences:
+   - Compare QPS between tests (which achieved higher throughput?)
+   - Compare latency percentiles (P50, P95, P99)
+   - Compare error rates
+   - Overall: which test performed better?
 
-2. **Queue Time Analysis** (if data available):
-   - If queue times are shown, analyze whether queuing is a bottleneck.
-   - High overload queue times suggest warehouse capacity issues.
-   - High provisioning queue times suggest autoscaling delays (MCW spin-up).
-   - If queue times are "None", the warehouse had sufficient capacity.
+## 2. Queue Time Analysis
+If queue time data is available:
+   - Are queue times a bottleneck for either test?
+   - High overload queue times → warehouse capacity issues
+   - High provisioning queue times → autoscaling delays (MCW spin-up)
+   - "None" queue times → sufficient warehouse capacity
 
-3. **Cache Analysis** (if data available):
-   - Compare cache hit rates between tests.
-   - Note if one test used cache warming (warmup queries) and the other didn't.
-   - Higher cache hit rates typically correlate with lower latency.
+## 3. Cache Analysis
+If cache data is available:
+   - Compare cache hit rates between tests
+   - Did one test use cache warming and the other didn't?
+   - Impact of cache differences on latency
 
-4. **Configuration Impact**: 
-   - Only attribute differences to configuration changes that are ACTUALLY different.
-   - If warehouse sizes are the same, don't suggest warehouse sizing changes.
-   - If scaling mode shows MCW (multi-cluster), note that autoscaling handles concurrency.
+## 4. Configuration Impact
+Analyze how configuration differences affected results:
+   - Only attribute differences to settings that ACTUALLY differ
+   - If warehouse sizes are the same, don't suggest sizing changes
+   - If scaling mode shows MCW, note that autoscaling handles concurrency
 
-5. **Recommendations**: Provide actionable recommendations based ONLY on the data shown.
+## 5. Recommendations
+Provide actionable recommendations based ONLY on the data shown:
+   - What specific changes would improve performance?
+   - Which test configuration is preferable and why?
+
+## 6. Verdict
+Based ONLY on the metrics shown, provide one verdict:
+   - **IMPROVED**: Primary test clearly outperforms secondary
+   - **REGRESSED**: Primary test clearly underperforms secondary
+   - **SIMILAR**: Performance is within normal variance (~5%)
+   - **MIXED**: Some metrics improved, others regressed
 
 IMPORTANT CONSTRAINTS - DO NOT:
-- Conclude "warehouse is undersized" unless queue time data shows consistent overload queuing.
-- Suggest "reduce concurrency" if the test uses MCW scaling (autoscaling handles this).
-- Recommend "cache warming" if the test already shows warmup queries were used.
-- Make claims about "SF execution data unavailable" if SF Execution Time is shown above.
-- Speculate about bottlenecks not supported by the queue time or latency data.
-- Suggest investigation steps that ignore the data already provided.
+- Conclude "warehouse is undersized" unless queue time data shows consistent overload queuing
+- Suggest "reduce concurrency" if the test uses MCW scaling (autoscaling handles this)
+- Recommend "cache warming" if the test already shows warmup queries were used
+- Make claims about "SF execution data unavailable" if SF Execution Time is shown above
+- Speculate about bottlenecks not supported by the queue time or latency data
 
-6. **Verdict**: Based ONLY on the metrics shown, provide a verdict:
-   - IMPROVED: Primary test clearly outperforms secondary
-   - REGRESSED: Primary test clearly underperforms secondary  
-   - SIMILAR: Performance is within normal variance (~5%)
-   - MIXED: Some metrics improved, others regressed
+Keep analysis concise and actionable. Use bullet points with specific numbers from the data.
 """
 
 

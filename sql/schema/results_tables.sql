@@ -292,6 +292,9 @@ CREATE OR ALTER TABLE WORKER_METRICS_SNAPSHOTS (
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
+-- Clustering key for efficient filtering by RUN_ID (used by /metrics endpoint)
+ALTER TABLE WORKER_METRICS_SNAPSHOTS CLUSTER BY (RUN_ID);
+
 -- =============================================================================
 -- QUERY_EXECUTIONS: Detailed query execution history
 -- =============================================================================
@@ -348,6 +351,9 @@ CREATE OR ALTER TABLE QUERY_EXECUTIONS (
     sf_cluster_number INTEGER,
     sf_pct_scanned_from_cache FLOAT
 );
+
+-- Clustering key for efficient filtering by TEST_ID (used by /worker-metrics, /statistics, /ai-analysis endpoints)
+ALTER TABLE QUERY_EXECUTIONS CLUSTER BY (TEST_ID);
 
 -- =============================================================================
 -- QUERY_EXECUTIONS_STAGE: Internal stage for bulk loading query execution records

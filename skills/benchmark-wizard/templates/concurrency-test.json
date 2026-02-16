@@ -1,0 +1,66 @@
+{
+  "$schema": "https://unistore-benchmark.snowflake.com/schemas/test-config.json",
+  "$comment": "CONCURRENCY mode template - Fixed concurrent connections",
+  
+  "template_name": "concurrency-benchmark",
+  "description": "Fixed concurrency benchmark measuring latency at a specific load level",
+  
+  "config": {
+    "table_type": "{{TABLE_TYPE}}",
+    "database": "{{DATABASE}}",
+    "schema": "{{SCHEMA}}",
+    "table_name": "{{TABLE_NAME}}",
+    
+    "load_mode": "CONCURRENCY",
+    "concurrent_connections": 25,
+    "duration_seconds": 300,
+    "warmup_seconds": 10,
+    "think_time_ms": 0,
+    
+    "workload_type": "CUSTOM",
+    "custom_point_lookup_pct": 50,
+    "custom_range_scan_pct": 50,
+    "custom_insert_pct": 0,
+    "custom_update_pct": 0,
+    
+    "custom_point_lookup_sql": "SELECT * FROM {table} WHERE {{KEY_COLUMN}} = ?",
+    "custom_range_scan_sql": "SELECT * FROM {table} WHERE {{TIME_COLUMN}} >= ? ORDER BY {{TIME_COLUMN}} DESC LIMIT 100",
+    "custom_insert_sql": "",
+    "custom_update_sql": "",
+    
+    "warehouse_name": "{{WAREHOUSE_NAME}}",
+    "warehouse_size": "Medium",
+    
+    "metrics_interval_seconds": 1.0,
+    "collect_query_history": false
+  },
+  
+  "tags": {
+    "source": "benchmark-wizard",
+    "load_mode": "CONCURRENCY"
+  },
+  
+  "_placeholders": {
+    "TABLE_TYPE": "HYBRID | STANDARD | POSTGRES | INTERACTIVE | DYNAMIC",
+    "DATABASE": "Snowflake database name",
+    "SCHEMA": "Snowflake schema name",
+    "TABLE_NAME": "Target table name",
+    "KEY_COLUMN": "Primary key column for point lookups",
+    "TIME_COLUMN": "Timestamp column for range scans",
+    "WAREHOUSE_NAME": "Snowflake warehouse name"
+  },
+  
+  "_usage": {
+    "description": "Use this template for measuring latency at a fixed concurrency level",
+    "best_for": [
+      "Comparing configurations with equal load",
+      "Measuring baseline latency",
+      "Testing specific concurrency requirements"
+    ],
+    "key_parameters": {
+      "concurrent_connections": "Number of parallel threads (1-1000)",
+      "duration_seconds": "Test duration (10-3600)",
+      "workload_pct": "Must sum to 100"
+    }
+  }
+}

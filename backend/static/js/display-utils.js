@@ -29,8 +29,7 @@ function tableTypeKey(data) {
  */
 function tableTypeLabel(data) {
   const t = tableTypeKey(data);
-  // Consolidate SNOWFLAKE_POSTGRES to POSTGRES for display
-  if (t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES") return "POSTGRES";
+  if (t === "POSTGRES") return "POSTGRES";
   if (t === "HYBRID") return "HYBRID";
   if (t === "STANDARD") return "STANDARD";
   if (t === "INTERACTIVE") return "INTERACTIVE";
@@ -45,7 +44,7 @@ function tableTypeLabel(data) {
  */
 function tableTypeIconSrc(data) {
   const t = tableTypeKey(data);
-  if (t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES") {
+  if (t === "POSTGRES") {
     return "/static/img/postgres_elephant.svg";
   }
   if (t === "HYBRID") {
@@ -70,7 +69,7 @@ function tableTypeIconSrc(data) {
  */
 function isPostgresType(data) {
   const t = tableTypeKey(data);
-  return t === "POSTGRES" || t === "SNOWFLAKE_POSTGRES";
+  return t === "POSTGRES";
 }
 
 // =============================================================================
@@ -283,10 +282,18 @@ function deriveWorkloadLabel(config) {
  */
 function durationDisplay(config) {
   const loadMode = String(config?.load_mode || "CONCURRENCY").toUpperCase();
-  if (loadMode === "FIND_MAX_CONCURRENCY") return "—";
+  
+  if (loadMode === "FIND_MAX_CONCURRENCY") {
+    const start = Number(config?.start_concurrency || 0);
+    const inc = Number(config?.concurrency_increment || 0);
+    if (start > 0 && inc > 0) {
+      return `<span style="color: #6b7280; font-size: 0.85em;">start ${start}, +${inc}</span>`;
+    }
+    return "—";
+  }
 
-  const duration = Number(config?.duration || 0);
-  const warmup = Number(config?.warmup || 0);
+  const duration = Number(config?.duration || config?.duration_seconds || 0);
+  const warmup = Number(config?.warmup || config?.warmup_seconds || 0);
   if (duration <= 0) return "—";
 
   const total = warmup + duration;
@@ -328,7 +335,7 @@ function warehouseDisplay(data) {
   if (!config) return "—";
 
   const tableType = String(config.table_type || "").toUpperCase();
-  if (tableType === "POSTGRES" || tableType === "SNOWFLAKE_POSTGRES") {
+  if (tableType === "POSTGRES") {
     // Show Postgres instance size (e.g., STANDARD_M)
     const instanceSize = config.postgres_instance_size || "—";
     return instanceSize;
@@ -355,7 +362,7 @@ function sizeSimple(data) {
   if (!config) return "—";
 
   const tableType = String(config.table_type || "").toUpperCase();
-  if (tableType === "POSTGRES" || tableType === "SNOWFLAKE_POSTGRES") {
+  if (tableType === "POSTGRES") {
     return config.postgres_instance_size || "—";
   }
   return config.warehouse_size || config.warehouse_name || "—";
@@ -377,6 +384,20 @@ function tableFqn(data) {
   const tbl = String(config?.table_name || "").trim();
   const parts = [db, sch, tbl].filter(Boolean);
   return parts.join(".");
+}
+
+/**
+ * Format table name stacked (DB, Schema, Table on separate lines).
+ * @param {object | null | undefined} data - Object with config or direct fields
+ * @returns {string} HTML string with line breaks
+ */
+function tableFqnStacked(data) {
+  const config = data?.config || data;
+  const db = (config?.database ?? "").toString().trim();
+  const sch = (config?.schema ?? "").toString().trim();
+  const tbl = (config?.table_name ?? "").toString().trim();
+  if (!db && !sch && !tbl) return "—";
+  return `${db || "—"}<br><span style="color: #6b7280; font-size: 0.85em;">${sch || "—"}<br>${tbl || "—"}</span>`;
 }
 
 // =============================================================================
@@ -416,5 +437,6 @@ if (typeof window !== "undefined") {
 
     // Table FQN
     tableFqn,
+    tableFqnStacked,
   };
 }

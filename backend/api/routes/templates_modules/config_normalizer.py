@@ -298,10 +298,10 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
     if not isinstance(guardrails_cfg, dict):
         guardrails_cfg = {}
 
-    # Check if guardrails are explicitly disabled
+    # Check if guardrails are explicitly enabled
     guardrails_enabled = guardrails_cfg.get("enabled")
     if guardrails_enabled is None:
-        guardrails_enabled = True  # Default to enabled for backward compatibility
+        guardrails_enabled = False  # Default to disabled
 
     if guardrails_enabled:
         # Get max_cpu_percent from guardrails or legacy field

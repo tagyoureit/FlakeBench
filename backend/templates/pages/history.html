@@ -168,7 +168,24 @@
         </div>
 
         <div x-show="compareTests.length < 2" class="alert alert-info">
-            Select 2 tests (from search or from the table below) to compare high-level metrics.
+            <template x-if="compareTests.length === 0">
+                <span>Select 2 tests (from search or from the table below) to compare high-level metrics.</span>
+            </template>
+            <template x-if="compareTests.length === 1">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+                    <span>Select 1 more test to compare, or auto-find a baseline.</span>
+                    <button
+                        type="button"
+                        class="btn btn-primary btn-sm"
+                        @click="autoSelectBaseline()"
+                        :disabled="autoSelectLoading"
+                        title="Find the best matching baseline and open deep comparison"
+                    >
+                        <span class="loading-spinner" x-show="autoSelectLoading"></span>
+                        <span x-text="autoSelectLoading ? 'Finding…' : '🎯 Find Baseline'"></span>
+                    </button>
+                </div>
+            </template>
         </div>
 
         <div x-show="compareTests.length === 2" class="mt-4">
@@ -422,12 +439,15 @@
                                 </div>
                             </td>
                             <!-- Date -->
-                            <td class="text-sm" x-text="new Date(test.created_at).toLocaleDateString()"></td>
+                            <td class="text-sm">
+                                <div x-text="new Date(test.created_at).toLocaleDateString()"></div>
+                                <div class="text-gray-500 text-xs" x-text="new Date(test.created_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})"></div>
+                            </td>
                             <!-- Results: QPS / Duration / P95 -->
                             <td>
                                 <div class="flex flex-col text-sm">
                                     <span><strong x-text="test.ops_per_sec.toFixed(0)"></strong> <span class="text-gray-500">QPS</span></span>
-                                    <span class="text-gray-600" x-text="durationDisplay(test)"></span>
+                                    <span class="text-gray-600" x-html="durationDisplay(test)"></span>
                                     <span class="text-gray-500 text-xs" x-text="'P95: ' + test.p95_latency.toFixed(0) + 'ms'"></span>
                                 </div>
                             </td>

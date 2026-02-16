@@ -15,6 +15,8 @@ window.DashboardMixins.timeseries = {
 
   async loadWarehouseTimeseries() {
     if (!this.testId) return;
+    // Prevent duplicate concurrent calls
+    if (this.warehouseTsLoading) return;
     this.warehouseTsLoading = true;
     this.warehouseTsError = null;
     this.warehouseTs = [];
@@ -173,6 +175,8 @@ window.DashboardMixins.timeseries = {
   async loadOverheadTimeseries() {
     if (!this.testId) return;
     if (this.mode !== "history") return;
+    // Prevent duplicate concurrent calls
+    if (this.overheadTsLoading) return;
 
     this.overheadTsLoading = true;
     this.overheadTsError = null;

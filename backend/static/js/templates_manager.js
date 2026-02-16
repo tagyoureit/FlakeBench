@@ -52,6 +52,10 @@ function templatesManager() {
       return DU.tableFqn ? DU.tableFqn(template) : "";
     },
 
+    tableFqnStacked(template) {
+      return DU.tableFqnStacked ? DU.tableFqnStacked(template) : "";
+    },
+
     async loadTemplates() {
       this.loading = true;
       this.error = null;

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://unistore-benchmark.snowflake.com/schemas/test-config.json",
+  "$comment": "QPS mode template - Target queries per second",
+  
+  "template_name": "qps-benchmark",
+  "description": "Target QPS benchmark testing if system can sustain a specific throughput",
+  
+  "config": {
+    "table_type": "{{TABLE_TYPE}}",
+    "database": "{{DATABASE}}",
+    "schema": "{{SCHEMA}}",
+    "table_name": "{{TABLE_NAME}}",
+    
+    "load_mode": "QPS",
+    "target_qps": 500,
+    "min_threads_per_worker": 1,
+    "starting_threads": 5,
+    "max_thread_increase": 15,
+    
+    "duration_seconds": 300,
+    "warmup_seconds": 10,
+    "think_time_ms": 0,
+    
+    "workload_type": "CUSTOM",
+    "custom_point_lookup_pct": 50,
+    "custom_range_scan_pct": 50,
+    "custom_insert_pct": 0,
+    "custom_update_pct": 0,
+    
+    "custom_point_lookup_sql": "SELECT * FROM {table} WHERE {{KEY_COLUMN}} = ?",
+    "custom_range_scan_sql": "SELECT * FROM {table} WHERE {{TIME_COLUMN}} >= ? ORDER BY {{TIME_COLUMN}} DESC LIMIT 100",
+    "custom_insert_sql": "",
+    "custom_update_sql": "",
+    
+    "warehouse_name": "{{WAREHOUSE_NAME}}",
+    "warehouse_size": "Medium",
+    
+    "metrics_interval_seconds": 1.0,
+    "collect_query_history": false
+  },
+  
+  "tags": {
+    "source": "benchmark-wizard",
+    "load_mode": "QPS"
+  },
+  
+  "_placeholders": {
+    "TABLE_TYPE": "HYBRID | STANDARD | POSTGRES | INTERACTIVE | DYNAMIC",
+    "DATABASE": "Snowflake database name",
+    "SCHEMA": "Snowflake schema name",
+    "TABLE_NAME": "Target table name",
+    "KEY_COLUMN": "Primary key column for point lookups",
+    "TIME_COLUMN": "Timestamp column for range scans",
+    "WAREHOUSE_NAME": "Snowflake warehouse name"
+  },
+  
+  "_usage": {
+    "description": "Use this template for testing if system can sustain a target throughput",
+    "best_for": [
+      "Validating SLA requirements",
+      "Testing production-like traffic patterns",
+      "Capacity verification before launch"
+    ],
+    "key_parameters": {
+      "target_qps": "Target queries per second to achieve",
+      "min_threads_per_worker": "Starting thread count per worker (1-100)",
+      "starting_threads": "Initial thread count for ramp-up",
+      "max_thread_increase": "Max threads to add per 10s control interval"
+    },
+    "behavior": {
+      "description": "System auto-scales workers to try to achieve target QPS",
+      "success": "Achieved QPS >= target_qps with acceptable latency",
+      "failure": "Unable to reach target QPS, or latency/errors too high"
+    }
+  }
+}

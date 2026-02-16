@@ -1,0 +1,471 @@
+{
+  "content": [
+    {
+      "thinking": {
+        "text": "\nThe user wants me to compare two specific test IDs and determine:\n1. Which performed better\n2. If the difference is statistically significant\n3. Include cost analysis\n\nI need to use multiple tools for this comprehensive analysis:\n1. First, get the basic test results and metrics for both tests using query_benchmark_data\n2. Use statistical_analysis to determine if differences are statistically significant\n3. Use cost_calculator for cost analysis\n\nLet me start by getting the test results for both tests.\n"
+      },
+      "type": "thinking"
+    },
+    {
+      "tool_use": {
+        "client_side_execute": false,
+        "input": {
+          "has_time_column": true,
+          "need_future_forecasting_data": false,
+          "original_query": "Compare test aed49a19-1d13-499d-879b-5fe2ee323dba vs test 113b56d0-1354-430d-8fa4-1b65fffdba8b. Which performed better? Is the difference statistically significant? Include cost analysis.",
+          "previous_related_tool_result_id": "",
+          "query": "Show detailed performance metrics for test IDs aed49a19-1d13-499d-879b-5fe2ee323dba and 113b56d0-1354-430d-8fa4-1b65fffdba8b including QPS, latency metrics, error rates, and test configuration details"
+        },
+        "name": "query_benchmark_data",
+        "tool_use_id": "toolu_bdrk_01QfXoJckfADTqU8hLbqwiWB",
+        "type": "cortex_analyst_text_to_sql"
+      },
+      "type": "tool_use"
+    },
+    {
+      "tool_result": {
+        "content": [
+          {
+            "json": {
+              "query_id": "01c26438-0307-c65b-0005-5fdf0b9ff23a",
+              "result_set": {
+                "data": [
+                  [
+                    "113b56d0-1354-430d-8fa4-1b65fffdba8b",
+                    "707 - Standard Table SO - Fixed threads",
+                    "STANDARD",
+                    "MEDIUM",
+                    "707 - Standard Table SO - Fixed threads",
+                    "COMPLETED",
+                    "39.107342494648485",
+                    "532.88004099886166",
+                    "1216.0814999988361",
+                    "1763.842416999978",
+                    "631.01296380137126",
+                    "3075.5567919986788",
+                    "",
+                    "",
+                    "0",
+                    "4682",
+                    "4682",
+                    "0",
+                    "0",
+                    "25",
+                    "141.178933",
+                    "",
+                    "",
+                    "2026-02-12 05:08:34.111",
+                    "2026-02-12 05:10:56.057"
+                  ],
+                  [
+                    "aed49a19-1d13-499d-879b-5fe2ee323dba",
+                    "707 - Standard Table SO - Fixed threads",
+                    "STANDARD",
+                    "MEDIUM",
+                    "707 - Standard Table SO - Fixed threads",
+                    "COMPLETED",
+                    "38.695103831494798",
+                    "536.5305420000368",
+                    "1216.1695419999887",
+                    "1842.6112499982992",
+                    "638.79049907846843",
+                    "3365.3619169999729",
+                    "",
+                    "",
+                    "0",
+                    "4613",
+                    "4613",
+                    "0",
+                    "0",
+                    "25",
+                    "141.76819699999999",
+                    "",
+                    "",
+                    "2026-02-12 05:08:34.161",
+                    "2026-02-12 05:10:56.557"
+                  ]
+                ],
+                "resultSetMetaData": {
+                  "format": "jsonv2",
+                  "numRows": 2,
+                  "partition": 0,
+                  "partitionInfo": [
+                    {
+                      "rowCount": 2,
+                      "uncompressedSize": 815
+                    }
+                  ],
+                  "rowType": [
+                    {
+                      "length": 36,
+                      "name": "TEST_ID",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "text"
+                    },
+                    {
+                      "length": 500,
+                      "name": "TEST_NAME",
+                      "nullable": false,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "text"
+                    },
+                    {
+                      "length": 50,
+                      "name": "DATABASE_TYPE",
+                      "nullable": false,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "text"
+                    },
+                    {
+                      "length": 50,
+                      "name": "WAREHOUSE_SIZE",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "text"
+                    },
+                    {
+                      "length": 500,
+                      "name": "SCENARIO_NAME",
+                      "nullable": false,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "text"
+                    },
+                    {
+                      "length": 50,
+                      "name": "STATUS",
+                      "nullable": false,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "text"
+                    },
+                    {
+                      "length": 0,
+                      "name": "QPS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "P50_LATENCY_MS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "P95_LATENCY_MS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "P99_LATENCY_MS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "AVG_LATENCY_MS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "MAX_LATENCY_MS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "PG_MEAN_EXEC_TIME_MS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "NETWORK_OVERHEAD_MS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "ERROR_RATE",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "TOTAL_OPERATIONS",
+                      "nullable": true,
+                      "precision": 38,
+                      "scale": 0,
+                      "type": "fixed"
+                    },
+                    {
+                      "length": 0,
+                      "name": "READ_OPERATIONS",
+                      "nullable": true,
+                      "precision": 38,
+                      "scale": 0,
+                      "type": "fixed"
+                    },
+                    {
+                      "length": 0,
+                      "name": "WRITE_OPERATIONS",
+                      "nullable": true,
+                      "precision": 38,
+                      "scale": 0,
+                      "type": "fixed"
+                    },
+                    {
+                      "length": 0,
+                      "name": "FAILED_OPERATIONS",
+                      "nullable": true,
+                      "precision": 38,
+                      "scale": 0,
+                      "type": "fixed"
+                    },
+                    {
+                      "length": 0,
+                      "name": "CONCURRENT_CONNECTIONS",
+                      "nullable": false,
+                      "precision": 38,
+                      "scale": 0,
+                      "type": "fixed"
+                    },
+                    {
+                      "length": 0,
+                      "name": "DURATION_SECONDS",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "WAREHOUSE_CREDITS_USED",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "PG_CACHE_HIT_RATIO",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 0,
+                      "type": "real"
+                    },
+                    {
+                      "length": 0,
+                      "name": "START_TIME",
+                      "nullable": false,
+                      "precision": 0,
+                      "scale": 9,
+                      "type": "timestamp_ntz"
+                    },
+                    {
+                      "length": 0,
+                      "name": "END_TIME",
+                      "nullable": true,
+                      "precision": 0,
+                      "scale": 9,
+                      "type": "timestamp_ntz"
+                    }
+                  ]
+                },
+                "statementHandle": "01c26438-0307-c65b-0005-5fdf0b9ff23a"
+              },
+              "sql": "WITH __test_results AS (\n  SELECT\n    end_time,\n    scenario_name,\n    start_time,\n    status,\n    table_type,\n    test_id,\n    test_name,\n    warehouse_size,\n    avg_latency_ms,\n    concurrent_connections,\n    duration_seconds,\n    error_rate,\n    failed_operations,\n    max_latency_ms,\n    p50_latency_ms,\n    p95_latency_ms,\n    p99_latency_ms,\n    pg_cache_hit_ratio,\n    pg_mean_exec_time_ms,\n    qps,\n    read_operations,\n    total_operations,\n    warehouse_credits_used,\n    write_operations\n  FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS\n)\nSELECT\n  t.test_id,\n  t.test_name,\n  t.table_type AS database_type,\n  t.warehouse_size,\n  t.scenario_name,\n  t.status,\n  t.qps,\n  t.p50_latency_ms,\n  t.p95_latency_ms,\n  t.p99_latency_ms,\n  t.avg_latency_ms,\n  t.max_latency_ms,\n  t.pg_mean_exec_time_ms,\n  CASE\n    WHEN NOT t.pg_mean_exec_time_ms IS NULL\n    THEN t.p50_latency_ms - t.pg_mean_exec_time_ms\n  END AS network_overhead_ms,\n  t.error_rate,\n  t.total_operations,\n  t.read_operations,\n  t.write_operations,\n  t.failed_operations,\n  t.concurrent_connections,\n  t.duration_seconds,\n  t.warehouse_credits_used,\n  t.pg_cache_hit_ratio,\n  t.start_time,\n  t.end_time\nFROM __test_results AS t\nWHERE\n  t.test_id IN ('aed49a19-1d13-499d-879b-5fe2ee323dba', '113b56d0-1354-430d-8fa4-1b65fffdba8b')\n  AND t.start_time <= CURRENT_TIMESTAMP()\nORDER BY\n  t.test_id\n -- Generated by Cortex Analyst (request_id: 18bc13eb-2b8f-4f2b-9813-08f221800eab)\n;",
+              "text": "The question is clear and I can answer it with the following SQL.",
+              "verified_query_used": true
+            },
+            "type": "json"
+          }
+        ],
+        "name": "query_benchmark_data",
+        "status": "success",
+        "tool_use_id": "toolu_bdrk_01QfXoJckfADTqU8hLbqwiWB",
+        "type": "cortex_analyst_text_to_sql"
+      },
+      "type": "tool_result"
+    },
+    {
+      "thinking": {
+        "text": "\nNow I have the basic test results for both tests. Let me analyze the key performance metrics:\n\nTest 113b56d0-1354-430d-8fa4-1b65fffdba8b:\n- QPS: 39.11\n- P50 Latency: 532.88ms\n- P95 Latency: 1216.08ms\n- P99 Latency: 1763.84ms\n- Error Rate: 0%\n\nTest aed49a19-1d13-499d-879b-5fe2ee323dba:\n- QPS: 38.70\n- P50 Latency: 536.53ms\n- P95 Latency: 1216.17ms\n- P99 Latency: 1842.61ms\n- Error Rate: 0%\n\nBoth tests are identical configuration (Standard tables, Medium warehouse, same scenario), so this is a good comparison. Test 113b56d0 appears to perform slightly better with higher QPS and lower latencies.\n\nNow I need to check if this difference is statistically significant using the statistical_analysis tool.\n"
+      },
+      "type": "thinking"
+    },
+    {
+      "tool_use": {
+        "client_side_execute": false,
+        "input": {
+          "p_compare_to_test_id": "aed49a19-1d13-499d-879b-5fe2ee323dba",
+          "p_include_mann_whitney": true,
+          "p_test_id": "113b56d0-1354-430d-8fa4-1b65fffdba8b"
+        },
+        "name": "statistical_analysis",
+        "tool_use_id": "toolu_bdrk_01FzuoAhJaG6s82vwGHFibUp",
+        "type": "generic"
+      },
+      "type": "tool_use"
+    },
+    {
+      "tool_result": {
+        "content": [
+          {
+            "json": {
+              "execution_type": "procedure",
+              "query_id": "01c26438-0307-c65b-0005-5fdf0b9ff242",
+              "result": "{\n  \"analysis_timestamp\": \"2026-02-13 11:36:55.941 -0800\",\n  \"comparison\": {\n    \"analysis_timestamp\": \"2026-02-13 11:36:53.277 -0800\",\n    \"comparison_type\": \"DIRECT\",\n    \"deltas\": {\n      \"error_rate_delta\": 0.000000000000000e+00,\n      \"p50_delta_pct\": -6.800000000000000e-01,\n      \"p95_delta_pct\": -1.000000000000000e-02,\n      \"p99_delta_pct\": -4.270000000000000e+00,\n      \"qps_delta_pct\": 1.070000000000000e+00\n    },\n    \"test_a\": {\n      \"error_rate_pct\": 0.000000000000000e+00,\n      \"p50_latency_ms\": 5.328800000000000e+02,\n      \"p95_latency_ms\": 1.216080000000000e+03,\n      \"p99_latency_ms\": 1.763840000000000e+03,\n      \"qps\": 3.911000000000000e+01,\n      \"table_type\": \"STANDARD\",\n      \"test_id\": \"113b56d0-1354-430d-8fa4-1b65fffdba8b\",\n      \"test_name\": \"707 - Standard Table SO - Fixed threads\",\n      \"total_operations\": 4682,\n      \"warehouse_size\": \"MEDIUM\"\n    },\n    \"test_b\": {\n      \"error_rate_pct\": 0.000000000000000e+00,\n      \"p50_latency_ms\": 5.365300000000000e+02,\n      \"p95_latency_ms\": 1.216170000000000e+03,\n      \"p99_latency_ms\": 1.842610000000000e+03,\n      \"qps\": 3.870000000000000e+01,\n      \"table_type\": \"STANDARD\",\n      \"test_id\": \"aed49a19-1d13-499d-879b-5fe2ee323dba\",\n      \"test_name\": \"707 - Standard Table SO - Fixed threads\",\n      \"total_operations\": 4613,\n      \"warehouse_size\": \"MEDIUM\"\n    },\n    \"verdict\": {\n      \"latency_verdict\": \"STABLE\",\n      \"overall\": \"STABLE\",\n      \"qps_verdict\": \"STABLE\"\n    }\n  },\n  \"mann_whitney\": {\n    \"effect_size\": {\n      \"difference_pct\": -1.220000000000000e+00,\n      \"direction\": \"B_HIGHER\"\n    },\n    \"interpretation\": \"No significant difference detected between groups\",\n    \"is_significant\": false,\n    \"mean_a\": 6.310130000000000e+02,\n    \"mean_b\": 6.387905000000000e+02,\n    \"median_a\": 5.330631000000000e+02,\n    \"median_b\": 5.365305000000000e+02,\n    \"metric\": \"APP_ELAPSED_MS\",\n    \"n_a\": 4682,\n    \"n_b\": 4613,\n    \"p_value_approx\": 3.912860000000000e-01,\n    \"significance_level\": \"NOT_SIGNIFICANT\",\n    \"test_a\": \"113b56d0-1354-430d-8fa4-1b65fffdba8b\",\n    \"test_b\": \"aed49a19-1d13-499d-879b-5fe2ee323dba\",\n    \"u_statistic\": 10691590,\n    \"z_score\": -8.306000000000000e-01\n  },\n  \"rolling_statistics\": {\n    \"available\": true,\n    \"baseline_tests\": [\n      \"cbfe59ce-2895-43ee-a8dd-e1c4485ea2da\",\n      \"f2573aac-c728-4199-866b-6912a9ea5a88\"\n    ],\n    \"candidate_count\": 2,\n    \"coefficient_of_variation\": {\n      \"p95_cv\": 1.673000000000000e-01,\n      \"qps_cv\": 3.492000000000000e-01,\n      \"stability\": \"HIGH_VARIANCE\"\n    },\n    \"confidence_band\": {\n      \"p95_p10\": 1.287250000000000e+03,\n      \"p95_p90\": 1.556330000000000e+03,\n      \"qps_p10\": 1.414200000000000e+02,\n      \"qps_p90\": 2.110400000000000e+02\n    },\n    \"date_range\": {\n      \"newest\": \"2026-02-12 05:08:33.986\",\n      \"oldest\": \"2026-02-10 17:02:15.316\"\n    },\n    \"load_mode\": \"CONCURRENCY\",\n    \"rolling_median\": {\n      \"error_rate_pct\": 0.000000000000000e+00,\n      \"p50_latency_ms\": 5.883800000000000e+02,\n      \"p95_latency_ms\": 1.421790000000000e+03,\n      \"p99_latency_ms\": 4.683550000000000e+03,\n      \"qps\": 1.762300000000000e+02\n    },\n    \"table_type\": \"STANDARD\",\n    \"template_id\": \"8ba0774c-aa64-41a7-bb15-f1eef8c7ff77\",\n    \"test_id\": \"113b56d0-1354-430d-8fa4-1b65fffdba8b\",\n    \"used_count\": 2\n  },\n  \"template_id\": \"8ba0774c-aa64-41a7-bb15-f1eef8c7ff77\",\n  \"test_id\": \"113b56d0-1354-430d-8fa4-1b65fffdba8b\",\n  \"trends\": {\n    \"p95_latency\": {\n      \"direction\": \"INSUFFICIENT_DATA\",\n      \"intercept\": 1.589967700000000e+03,\n      \"interpretation\": \"Need at least 3 data points for trend analysis\",\n      \"metric\": \"P95_LATENCY_MS\",\n      \"r_squared\": 1.000000000000000e+00,\n      \"sample_size\": 2,\n      \"slope\": -3.363553760000000e+02,\n      \"template_id\": \"8ba0774c-aa64-41a7-bb15-f1eef8c7ff77\"\n    },\n    \"qps\": {\n      \"direction\": \"INSUFFICIENT_DATA\",\n      \"intercept\": 1.327148000000000e+02,\n      \"interpretation\": \"Need at least 3 data points for trend analysis\",\n      \"metric\": \"QPS\",\n      \"r_squared\": 1.000000000000000e+00,\n      \"sample_size\": 2,\n      \"slope\": 8.702775200000001e+01,\n      \"template_id\": \"8ba0774c-aa64-41a7-bb15-f1eef8c7ff77\"\n    }\n  }\n}"
+            },
+            "type": "json"
+          }
+        ],
+        "name": "statistical_analysis",
+        "status": "success",
+        "tool_use_id": "toolu_bdrk_01FzuoAhJaG6s82vwGHFibUp",
+        "type": "generic"
+      },
+      "type": "tool_result"
+    },
+    {
+      "thinking": {
+        "text": "\nNow I have the statistical analysis results. Key findings:\n\n1. Performance comparison:\n   - QPS: Test 113b56d0 has 1.07% higher QPS (39.11 vs 38.70)\n   - P50 Latency: Test 113b56d0 has 0.68% lower latency (532.88ms vs 536.53ms) \n   - P95 Latency: Virtually identical (1216.08ms vs 1216.17ms)\n   - P99 Latency: Test 113b56d0 has 4.27% lower latency (1763.84ms vs 1842.61ms)\n\n2. Statistical significance: \n   - Overall verdict: \"STABLE\" - no significant difference\n   - Mann-Whitney U test: p-value = 0.391 (not significant)\n   - Effect size: Only -1.22% difference in mean latency\n\nNow I need to get cost analysis for both tests.\n"
+      },
+      "type": "thinking"
+    },
+    {
+      "tool_use": {
+        "client_side_execute": false,
+        "input": {
+          "p_comparison_type": "per_query",
+          "p_test_ids": "113b56d0-1354-430d-8fa4-1b65fffdba8b,aed49a19-1d13-499d-879b-5fe2ee323dba"
+        },
+        "name": "cost_calculator",
+        "tool_use_id": "toolu_bdrk_01FXX1uDHdTxqeQgYRGSUEmn",
+        "type": "generic"
+      },
+      "type": "tool_use"
+    },
+    {
+      "tool_result": {
+        "content": [
+          {
+            "json": {
+              "execution_type": "procedure",
+              "query_id": "01c26439-0307-c580-0005-5fdf0b9f9d02",
+              "result": "{\n  \"analysis_timestamp\": \"2026-02-13 11:37:03.124 -0800\",\n  \"comparison_type\": \"per_query\",\n  \"credit_rate_usd\": 3,\n  \"summary\": {\n    \"avg_cost_per_1k_queries_usd\": 1.015000000000000e-01,\n    \"avg_cost_per_query_usd\": 1.010000000000000e-04,\n    \"total_cost_usd\": 9.399999999999999e-01,\n    \"total_credits\": 3.144000000000000e-01,\n    \"total_queries\": 9295\n  },\n  \"tests\": [\n    {\n      \"cost_per_1k_queries_usd\": 1.005000000000000e-01,\n      \"cost_per_query_usd\": 1.005100000000000e-04,\n      \"cost_usd\": 4.706000000000000e-01,\n      \"credits_per_hour\": 4,\n      \"credits_used\": 1.569000000000000e-01,\n      \"duration_seconds\": 1.411800000000000e+02,\n      \"qps\": 3.911000000000000e+01,\n      \"queries_per_credit\": 2.984723000000000e+04,\n      \"test_id\": \"113b56d0-1354-430d-8fa4-1b65fffdba8b\",\n      \"test_name\": \"707 - Standard Table SO - Fixed threads\",\n      \"total_operations\": 4682,\n      \"warehouse_size\": \"MEDIUM\"\n    },\n    {\n      \"cost_per_1k_queries_usd\": 1.024000000000000e-01,\n      \"cost_per_query_usd\": 1.024400000000000e-04,\n      \"cost_usd\": 4.726000000000000e-01,\n      \"credits_per_hour\": 4,\n      \"credits_used\": 1.575000000000000e-01,\n      \"duration_seconds\": 1.417700000000000e+02,\n      \"qps\": 3.870000000000000e+01,\n      \"queries_per_credit\": 2.928513000000000e+04,\n      \"test_id\": \"aed49a19-1d13-499d-879b-5fe2ee323dba\",\n      \"test_name\": \"707 - Standard Table SO - Fixed threads\",\n      \"total_operations\": 4613,\n      \"warehouse_size\": \"MEDIUM\"\n    }\n  ]\n}"
+            },
+            "type": "json"
+          }
+        ],
+        "name": "cost_calculator",
+        "status": "success",
+        "tool_use_id": "toolu_bdrk_01FXX1uDHdTxqeQgYRGSUEmn",
+        "type": "generic"
+      },
+      "type": "tool_result"
+    },
+    {
+      "thinking": {
+        "text": "\nNow I have all the information needed for a comprehensive comparison. Let me create a visualization to help show the performance metrics comparison since this involves comparing multiple numerical metrics between two tests.\n\nThe SQL results from the first query have the test data in a format that would benefit from visualization to show the comparison clearly. Let me generate a chart.\n"
+      },
+      "type": "thinking"
+    },
+    {
+      "tool_use": {
+        "client_side_execute": false,
+        "input": {
+          "question": "Show a comparison of key performance metrics (QPS, P50 latency, P95 latency, P99 latency) between the two tests as a bar chart",
+          "sql": "WITH __test_results AS (\n  SELECT\n    end_time,\n    scenario_name,\n    start_time,\n    status,\n    table_type,\n    test_id,\n    test_name,\n    warehouse_size,\n    avg_latency_ms,\n    concurrent_connections,\n    duration_seconds,\n    error_rate,\n    failed_operations,\n    max_latency_ms,\n    p50_latency_ms,\n    p95_latency_ms,\n    p99_latency_ms,\n    pg_cache_hit_ratio,\n    pg_mean_exec_time_ms,\n    qps,\n    read_operations,\n    total_operations,\n    warehouse_credits_used,\n    write_operations\n  FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS\n)\nSELECT\n  t.test_id,\n  t.test_name,\n  t.table_type AS database_type,\n  t.warehouse_size,\n  t.scenario_name,\n  t.status,\n  t.qps,\n  t.p50_latency_ms,\n  t.p95_latency_ms,\n  t.p99_latency_ms,\n  t.avg_latency_ms,\n  t.max_latency_ms,\n  t.pg_mean_exec_time_ms,\n  CASE\n    WHEN NOT t.pg_mean_exec_time_ms IS NULL\n    THEN t.p50_latency_ms - t.pg_mean_exec_time_ms\n  END AS network_overhead_ms,\n  t.error_rate,\n  t.total_operations,\n  t.read_operations,\n  t.write_operations,\n  t.failed_operations,\n  t.concurrent_connections,\n  t.duration_seconds,\n  t.warehouse_credits_used,\n  t.pg_cache_hit_ratio,\n  t.start_time,\n  t.end_time\nFROM __test_results AS t\nWHERE\n  t.test_id IN ('aed49a19-1d13-499d-879b-5fe2ee323dba', '113b56d0-1354-430d-8fa4-1b65fffdba8b')\n  AND t.start_time <= CURRENT_TIMESTAMP()\nORDER BY\n  t.test_id\n -- Generated by Cortex Analyst (request_id: 18bc13eb-2b8f-4f2b-9813-08f221800eab)\n;",
+          "tool_result_id": "toolu_bdrk_01QfXoJckfADTqU8hLbqwiWB"
+        },
+        "name": "data_to_chart",
+        "tool_use_id": "toolu_bdrk_016yWU8e9gcGjrz7ztJ9RGHA",
+        "type": "data_to_chart"
+      },
+      "type": "tool_use"
+    },
+    {
+      "tool_result": {
+        "content": [
+          {
+            "json": {
+              "charts": [
+                "{\"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\", \"title\": \"Comparison of Key Performance Metrics Between Two Tests\", \"transform\": [{\"fold\": [\"QPS\", \"P50_LATENCY_MS\", \"P95_LATENCY_MS\", \"P99_LATENCY_MS\"]}, {\"calculate\": \"({'QPS': 'QPS', 'P50_LATENCY_MS': 'P50 Latency (ms)', 'P95_LATENCY_MS': 'P95 Latency (ms)', 'P99_LATENCY_MS': 'P99 Latency (ms)'})[datum.key]\", \"as\": \"key\"}], \"mark\": \"bar\", \"encoding\": {\"x\": {\"field\": \"value\", \"title\": \"Value\", \"type\": \"quantitative\", \"sort\": null, \"axis\": {\"labelSeparation\": 25}}, \"y\": {\"field\": \"key\", \"title\": \"Performance Metric\", \"type\": \"nominal\", \"sort\": null}, \"color\": {\"field\": \"TEST_ID\", \"title\": \"Test ID\", \"type\": \"nominal\"}, \"tooltip\": [{\"field\": \"value\", \"type\": \"quantitative\", \"title\": \"Value\", \"format\": \",.6~f\"}, {\"field\": \"key\", \"type\": \"nominal\", \"title\": \"Performance Metric\"}, {\"field\": \"TEST_ID\", \"type\": \"nominal\", \"title\": \"Test ID\"}], \"yOffset\": {\"field\": \"TEST_ID\", \"title\": \"Test ID\", \"type\": \"nominal\"}}, \"data\": {\"values\": [{\"TEST_ID\": \"113b56d0-1354-430d-8fa4-1b65fffdba8b\", \"QPS\": \"39.107342494648485\", \"P50_LATENCY_MS\": \"532.88004099886166\", \"P95_LATENCY_MS\": \"1216.0814999988361\", \"P99_LATENCY_MS\": \"1763.842416999978\"}, {\"TEST_ID\": \"aed49a19-1d13-499d-879b-5fe2ee323dba\", \"QPS\": \"38.695103831494798\", \"P50_LATENCY_MS\": \"536.5305420000368\", \"P95_LATENCY_MS\": \"1216.1695419999887\", \"P99_LATENCY_MS\": \"1842.6112499982992\"}]}}"
+              ]
+            },
+            "type": "json"
+          }
+        ],
+        "name": "data_to_chart",
+        "status": "success",
+        "tool_use_id": "toolu_bdrk_016yWU8e9gcGjrz7ztJ9RGHA",
+        "type": "data_to_chart"
+      },
+      "type": "tool_result"
+    },
+    {
+      "text": "\n## Performance Comparison Results\n\n**Test 113b56d0-1354-430d-8fa4-1b65fffdba8b performed slightly better**, but the difference is **not statistically significant**.\n\n### Performance Metrics Comparison\n\n",
+      "type": "text"
+    },
+    {
+      "chart": {
+        "chart_spec": "{\"$schema\": \"https://vega.github.io/schema/vega-lite/v5.json\", \"title\": \"Comparison of Key Performance Metrics Between Two Tests\", \"transform\": [{\"fold\": [\"QPS\", \"P50_LATENCY_MS\", \"P95_LATENCY_MS\", \"P99_LATENCY_MS\"]}, {\"calculate\": \"({'QPS': 'QPS', 'P50_LATENCY_MS': 'P50 Latency (ms)', 'P95_LATENCY_MS': 'P95 Latency (ms)', 'P99_LATENCY_MS': 'P99 Latency (ms)'})[datum.key]\", \"as\": \"key\"}], \"mark\": \"bar\", \"encoding\": {\"x\": {\"field\": \"value\", \"title\": \"Value\", \"type\": \"quantitative\", \"sort\": null, \"axis\": {\"labelSeparation\": 25}}, \"y\": {\"field\": \"key\", \"title\": \"Performance Metric\", \"type\": \"nominal\", \"sort\": null}, \"color\": {\"field\": \"TEST_ID\", \"title\": \"Test ID\", \"type\": \"nominal\"}, \"tooltip\": [{\"field\": \"value\", \"type\": \"quantitative\", \"title\": \"Value\", \"format\": \",.6~f\"}, {\"field\": \"key\", \"type\": \"nominal\", \"title\": \"Performance Metric\"}, {\"field\": \"TEST_ID\", \"type\": \"nominal\", \"title\": \"Test ID\"}], \"yOffset\": {\"field\": \"TEST_ID\", \"title\": \"Test ID\", \"type\": \"nominal\"}}, \"data\": {\"values\": [{\"TEST_ID\": \"113b56d0-1354-430d-8fa4-1b65fffdba8b\", \"QPS\": \"39.107342494648485\", \"P50_LATENCY_MS\": \"532.88004099886166\", \"P95_LATENCY_MS\": \"1216.0814999988361\", \"P99_LATENCY_MS\": \"1763.842416999978\"}, {\"TEST_ID\": \"aed49a19-1d13-499d-879b-5fe2ee323dba\", \"QPS\": \"38.695103831494798\", \"P50_LATENCY_MS\": \"536.5305420000368\", \"P95_LATENCY_MS\": \"1216.1695419999887\", \"P99_LATENCY_MS\": \"1842.6112499982992\"}]}}",
+        "tool_use_id": "toolu_bdrk_016yWU8e9gcGjrz7ztJ9RGHA"
+      },
+      "type": "chart"
+    },
+    {
+      "text": "\n\n**Key Performance Differences:**\n- **QPS**: 39.11 vs 38.70 (+1.07% advantage for 113b56d0)\n- **P50 Latency**: 532.88ms vs 536.53ms (-0.68% better for 113b56d0)  \n- **P95 Latency**: 1216.08ms vs 1216.17ms (virtually identical)\n- **P99 Latency**: 1763.84ms vs 1842.61ms (-4.27% better for 113b56d0)\n- **Error Rate**: 0% for both tests\n\n### Statistical Significance Analysis\n\n**The performance differences are NOT statistically significant:**\n- Overall verdict: **STABLE** (no meaningful difference)\n- Mann-Whitney U test p-value: 0.391 (not significant at \u03b1=0.05)\n- Effect size: Only -1.22% difference in mean latency\n- Both tests show high variance in the baseline (CV > 16%)\n\n### Cost Analysis\n\n**Cost efficiency is nearly identical:**\n\n| Test ID (shortened) | Cost per Query | Cost per 1K Queries | Queries per Credit | Total Cost |\n|---------------------|----------------|---------------------|-------------------|------------|\n| 113b56d0 | $0.000101 | $0.1005 | 29,847 | $0.47 |\n| aed49a19 | $0.000102 | $0.1024 | 29,285 | $0.47 |\n\n**Cost Difference**: Test 113b56d0 is 1.9% more cost-efficient per query ($0.000101 vs $0.000102).\n\n### Conclusion\n\nWhile test 113b56d0 shows marginally better performance across most metrics, **the differences fall within normal variance** and are not statistically significant. Both tests demonstrate identical reliability (0% error rate) and very similar cost efficiency. The performance difference is too small to indicate a meaningful improvement or regression.\n",
+      "type": "text"
+    }
+  ],
+  "metadata": {
+    "usage": {
+      "tokens_consumed": [
+        {
+          "context_window": 200000,
+          "input_tokens": {
+            "cache_read": 103933,
+            "cache_write": 7437,
+            "total": 115273,
+            "uncached": 3903
+          },
+          "model_name": "claude-4-sonnet",
+          "output_tokens": {
+            "total": 2257
+          }
+        }
+      ]
+    }
+  },
+  "role": "assistant",
+  "schema_version": "v2",
+  "sequence_number": 457
+}

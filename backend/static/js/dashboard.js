@@ -93,8 +93,15 @@ function dashboard(opts) {
         if (this.mode === "live") {
           this.updateLiveTransport();
         } else if (this.mode === "history") {
+          // Fire all independent history-mode loads in parallel
+          // These don't depend on loadTestInfo response, only testId
+          // Historical tests are completed, so we can start chart data loads immediately
           this.loadLogs();
-          // Load comparison context for historical tests
+          this.loadErrorSummary();
+          this.loadHistoricalMetrics();
+          this.loadNodeMetrics();
+          this.loadWarehouseTimeseries();
+          this.loadOverheadTimeseries();
           if (typeof this.loadCompareContext === "function") {
             this.loadCompareContext();
           }

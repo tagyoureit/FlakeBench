@@ -1,0 +1,652 @@
+name: BENCHMARK_ANALYTICS
+description: "Benchmark analytics for comparing Snowflake (HYBRID, STANDARD, ICEBERG) vs PostgreSQL performance. Filter by table_type dimension for database comparisons."
+tables:
+  - name: QUERY_EXECUTIONS
+    synonyms:
+      - queries
+      - operations
+      - query log
+    base_table:
+      database: UNISTORE_BENCHMARK
+      schema: TEST_RESULTS
+      table: QUERY_EXECUTIONS
+    primary_key:
+      columns:
+        - EXECUTION_ID
+    dimensions:
+      - name: QUERY_KIND
+        synonyms:
+          - operation type
+          - query type
+        description: "Operation type: POINT_LOOKUP, RANGE_SCAN, INSERT, UPDATE, DELETE"
+        expr: query_kind
+        data_type: VARCHAR(50)
+      - name: SUCCESS
+        description: Whether query succeeded (true/false)
+        expr: success
+        data_type: BOOLEAN
+      - name: WARMUP
+        description: True if warmup phase query (exclude for metrics)
+        expr: warmup
+        data_type: BOOLEAN
+    facts:
+      - name: IS_FAILED_QUERY
+        synonyms:
+          - failed flag
+          - error flag
+        description: "1 if query failed, 0 if successful. Use for counting/summing failures."
+        expr: CASE WHEN success = FALSE THEN 1 ELSE 0 END
+        data_type: "NUMBER(1,0)"
+        access_modifier: public_access
+      - name: SUCCESS_INDICATOR
+        synonyms:
+          - success flag
+          - passed flag
+        description: "1 if query succeeded, 0 if failed. Use for counting/summing successes."
+        expr: CASE WHEN success = TRUE THEN 1 ELSE 0 END
+        data_type: "NUMBER(1,0)"
+        access_modifier: public_access
+    metrics:
+      - name: ERROR_COUNT
+        synonyms:
+          - total errors
+          - failure count
+        description: Count of failed query executions
+        expr: SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END)
+        access_modifier: public_access
+      - name: FAILED_QUERY_COUNT
+        synonyms:
+          - failed queries
+          - error query count
+        description: Number of queries that failed
+        expr: COUNT(CASE WHEN success = FALSE THEN 1 END)
+        access_modifier: public_access
+      - name: QUERY_ERROR_RATE
+        synonyms:
+          - query failure rate
+        description: Percentage of queries that failed
+        expr: "100.0 * SUM(CASE WHEN success = FALSE THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)"
+        access_modifier: public_access
+      - name: SUCCESSFUL_QUERY_COUNT
+        synonyms:
+          - successful queries
+          - passed queries
+        description: Number of queries that succeeded
+        expr: COUNT(CASE WHEN success = TRUE THEN 1 END)
+        access_modifier: public_access
+      - name: TOTAL_QUERY_COUNT
+        synonyms:
+          - query count
+          - execution count
+        description: Total number of query executions
+        expr: COUNT(*)
+        access_modifier: public_access
+    filters:
+      - name: exclude_warmup_queries
+        synonyms:
+          - no warmup
+          - measurement only queries
+        description: Filter to exclude warmup phase queries for accurate metrics
+        expr: warmup = FALSE
+      - name: read_operations_only
+        synonyms:
+          - reads only
+          - selects only
+        description: Filter to only show read operations (POINT_LOOKUP and RANGE_SCAN)
+        expr: "query_kind IN ('POINT_LOOKUP', 'RANGE_SCAN')"
+      - name: write_operations_only
+        synonyms:
+          - writes only
+          - mutations only
+        description: "Filter to only show write operations (INSERT, UPDATE, DELETE)"
+        expr: "query_kind IN ('INSERT', 'UPDATE', 'DELETE')"
+      - name: successful_queries_only
+        synonyms:
+          - success only
+          - no errors
+        description: Filter to only show successful query executions
+        expr: success = TRUE
+      - name: failed_queries_only
+        synonyms:
+          - errors only
+          - failures only
+        description: Filter to only show failed query executions
+        expr: success = FALSE
+      - name: write_operations_insert_update
+        synonyms:
+          - inserts and updates only
+        description: Filter to only show INSERT and UPDATE operations (excludes DELETE)
+        expr: "query_kind IN ('INSERT', 'UPDATE')"
+  - name: STEP_HISTORY
+    synonyms:
+      - find max steps
+      - scaling steps
+    base_table:
+      database: UNISTORE_BENCHMARK
+      schema: TEST_RESULTS
+      table: CONTROLLER_STEP_HISTORY
+    primary_key:
+      columns:
+        - STEP_ID
+    dimensions:
+      - name: OUTCOME
+        synonyms:
+          - step outcome
+        description: "Step outcome: STABLE, DEGRADED, ERROR_THRESHOLD"
+        expr: outcome
+        data_type: VARCHAR(50)
+      - name: STEP_NUMBER
+        description: Step number in FIND_MAX progression
+        expr: step_number
+        data_type: "NUMBER(38,0)"
+  - name: TEST_RESULTS
+    synonyms:
+      - tests
+      - benchmarks
+      - test runs
+      - benchmark results
+    base_table:
+      database: UNISTORE_BENCHMARK
+      schema: TEST_RESULTS
+      table: TEST_RESULTS
+    primary_key:
+      columns:
+        - TEST_ID
+    dimensions:
+      - name: END_TIME
+        synonyms:
+          - ended
+          - finish time
+        description: Test end timestamp
+        expr: end_time
+        data_type: TIMESTAMP_NTZ(9)
+      - name: RUN_ID
+        description: Run identifier for grouping tests
+        expr: run_id
+        data_type: VARCHAR(36)
+      - name: SCENARIO_NAME
+        synonyms:
+          - scenario
+          - workload
+        description: Test scenario or workload pattern
+        expr: scenario_name
+        data_type: VARCHAR(500)
+      - name: START_TIME
+        synonyms:
+          - started
+          - begin time
+        description: Test start timestamp
+        expr: start_time
+        data_type: TIMESTAMP_NTZ(9)
+      - name: STATUS
+        synonyms:
+          - test status
+          - result
+        description: "Test status: COMPLETED, FAILED, CANCELLED, RUNNING"
+        expr: status
+        data_type: VARCHAR(50)
+      - name: TABLE_NAME
+        synonyms:
+          - target table
+        description: Database table being benchmarked
+        expr: table_name
+        data_type: VARCHAR(500)
+      - name: TABLE_TYPE
+        synonyms:
+          - database type
+          - storage type
+          - db type
+          - database
+          - database system
+          - table type
+        description: "DATABASE SYSTEM: POSTGRES=PostgreSQL, HYBRID=Snowflake Unistore/Hybrid tables, STANDARD=Snowflake standard tables, ICEBERG=Snowflake Iceberg tables, INTERACTIVE=Snowflake Interactive tables. Use to compare database performance."
+        expr: table_type
+        data_type: VARCHAR(50)
+      - name: TEST_ID
+        description: Unique test identifier (UUID)
+        expr: test_id
+        data_type: VARCHAR(36)
+      - name: TEST_NAME
+        synonyms:
+          - name
+          - benchmark name
+        description: Human-readable test name
+        expr: test_name
+        data_type: VARCHAR(500)
+      - name: WAREHOUSE
+        synonyms:
+          - warehouse name
+          - compute
+          - instance
+        description: Snowflake warehouse or PostgreSQL instance name
+        expr: warehouse
+        data_type: VARCHAR(500)
+      - name: WAREHOUSE_SIZE
+        synonyms:
+          - size
+          - compute size
+          - instance size
+        description: "Compute size: XSMALL/SMALL/MEDIUM/LARGE/XLARGE"
+        expr: warehouse_size
+        data_type: VARCHAR(50)
+    facts:
+      - name: AVG_LATENCY_MS
+        synonyms:
+          - average latency
+          - mean latency
+          - app latency
+          - roundtrip latency
+        description: "Average end-to-end app roundtrip latency in ms (measured by benchmark tool, includes network overhead). For PostgreSQL server-side execution time, use PG_MEAN_EXEC_TIME_MS."
+        expr: avg_latency_ms
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: CONCURRENT_CONNECTIONS
+        synonyms:
+          - concurrency
+          - workers
+          - threads
+          - connections
+        description: Number of concurrent worker threads
+        expr: concurrent_connections
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: DURATION_SECONDS
+        synonyms:
+          - duration
+          - runtime
+        description: Test duration in seconds
+        expr: duration_seconds
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: ERROR_RATE
+        synonyms:
+          - error percentage
+          - failure rate
+        description: Percentage of failed operations (0-100)
+        expr: error_rate
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: FAILED_OPERATIONS
+        synonyms:
+          - failures
+          - errors
+        description: Failed query count
+        expr: failed_operations
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: MAX_LATENCY_MS
+        synonyms:
+          - max latency
+          - peak latency
+        description: Maximum latency observed
+        expr: max_latency_ms
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: P50_LATENCY_MS
+        synonyms:
+          - p50
+          - median latency
+          - median
+          - app p50
+        description: "Median (P50) end-to-end app roundtrip latency in ms - typical user experience. Includes network overhead. For PostgreSQL server-side execution time, use PG_MEAN_EXEC_TIME_MS."
+        expr: p50_latency_ms
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: P95_LATENCY_MS
+        synonyms:
+          - p95
+          - 95th percentile
+          - app p95
+        description: "95th percentile end-to-end app roundtrip latency in ms. Includes network overhead."
+        expr: p95_latency_ms
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: P99_LATENCY_MS
+        synonyms:
+          - p99
+          - 99th percentile
+          - tail latency
+          - app p99
+        description: "99th percentile end-to-end app roundtrip latency for SLOs. Includes network overhead."
+        expr: p99_latency_ms
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: QPS
+        synonyms:
+          - throughput
+          - queries per second
+          - ops per second
+        description: Queries per second throughput
+        expr: qps
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: READ_OPERATIONS
+        synonyms:
+          - reads
+          - selects
+        description: Number of read operations
+        expr: read_operations
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: TOTAL_OPERATIONS
+        synonyms:
+          - total ops
+          - query count
+        description: Total queries executed
+        expr: total_operations
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: WAREHOUSE_CREDITS_USED
+        synonyms:
+          - credits
+          - cost
+        description: Snowflake credits used (NULL for PostgreSQL)
+        expr: warehouse_credits_used
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: WRITE_OPERATIONS
+        synonyms:
+          - writes
+          - inserts
+          - updates
+        description: Number of write operations
+        expr: write_operations
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: PG_MEAN_EXEC_TIME_MS
+        synonyms:
+          - postgres execution time
+          - pg server time
+          - server execution time
+          - db latency
+          - postgres latency
+          - true postgres latency
+          - database latency
+        description: "PostgreSQL server-side mean query execution time in ms (from pg_stat_statements). This is the actual database processing time, WITHOUT network overhead. Only populated for POSTGRES table_type tests. Compare to P50_LATENCY_MS (app roundtrip) to calculate network overhead."
+        expr: pg_mean_exec_time_ms
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: PG_TOTAL_EXEC_TIME_MS
+        synonyms:
+          - postgres total time
+          - total server time
+        description: "Total PostgreSQL server-side execution time across all queries (from pg_stat_statements). Only for POSTGRES tests."
+        expr: pg_total_exec_time_ms
+        data_type: FLOAT
+        access_modifier: public_access
+      - name: PG_TOTAL_CALLS
+        synonyms:
+          - postgres calls
+          - pg query count
+        description: "Total number of query calls tracked by pg_stat_statements. Only for POSTGRES tests."
+        expr: pg_total_calls
+        data_type: "NUMBER(38,0)"
+        access_modifier: public_access
+      - name: PG_CACHE_HIT_RATIO
+        synonyms:
+          - cache hit rate
+          - buffer cache ratio
+        description: "PostgreSQL shared buffer cache hit ratio (0-1). Higher is better. Only for POSTGRES tests."
+        expr: pg_cache_hit_ratio
+        data_type: FLOAT
+        access_modifier: public_access
+    metrics:
+      - name: AVG_ERROR_RATE
+        synonyms:
+          - average error rate
+          - mean error rate
+        description: Average error rate across tests (percentage)
+        expr: AVG(error_rate)
+        access_modifier: public_access
+      - name: AVG_P50
+        description: Average median latency
+        expr: AVG(p50_latency_ms)
+        access_modifier: public_access
+      - name: AVG_P95
+        synonyms:
+          - average p95
+        description: Average P95 latency
+        expr: AVG(p95_latency_ms)
+        access_modifier: public_access
+      - name: AVG_P99
+        synonyms:
+          - average p99
+        description: Average P99 latency
+        expr: AVG(p99_latency_ms)
+        access_modifier: public_access
+      - name: AVG_QPS
+        synonyms:
+          - average throughput
+          - mean qps
+        description: Average QPS across tests
+        expr: AVG(qps)
+        access_modifier: public_access
+      - name: MAX_QPS
+        synonyms:
+          - peak throughput
+          - best qps
+        description: Maximum QPS achieved
+        expr: MAX(qps)
+        access_modifier: public_access
+      - name: MIN_QPS
+        synonyms:
+          - lowest throughput
+        description: Minimum QPS observed
+        expr: MIN(qps)
+        access_modifier: public_access
+      - name: TEST_COUNT
+        synonyms:
+          - number of tests
+          - total tests
+        description: Count of distinct tests
+        expr: COUNT(DISTINCT test_id)
+        access_modifier: public_access
+      - name: TOTAL_ERRORS
+        description: Total failed operations
+        expr: SUM(failed_operations)
+        access_modifier: public_access
+      - name: TOTAL_OPS
+        description: Sum of all operations
+        expr: SUM(total_operations)
+        access_modifier: public_access
+      - name: AVG_NETWORK_OVERHEAD_MS
+        synonyms:
+          - average network overhead
+          - network latency
+          - overhead
+        description: "Average network overhead in ms (P50 app latency minus PostgreSQL server execution time). Only meaningful for POSTGRES tests where pg_mean_exec_time_ms is populated."
+        expr: AVG(p50_latency_ms - pg_mean_exec_time_ms)
+        access_modifier: public_access
+    filters:
+      - name: completed_tests_only
+        description: Filter to only show completed benchmark tests
+        expr: status = 'COMPLETED'
+      - name: postgresql_tests_only
+        synonyms:
+          - postgres only
+          - postgresql filter
+        description: Filter to only show PostgreSQL database tests
+        expr: table_type = 'POSTGRES'
+      - name: snowflake_hybrid_tests_only
+        synonyms:
+          - hybrid only
+          - unistore only
+        description: Filter to only show Snowflake Unistore/Hybrid table tests
+        expr: table_type = 'HYBRID'
+      - name: snowflake_standard_tests_only
+        synonyms:
+          - standard only
+        description: Filter to only show Snowflake standard table tests
+        expr: table_type = 'STANDARD'
+      - name: failed_tests_only
+        synonyms:
+          - failures only
+          - failed benchmarks
+        description: Filter to only show failed benchmark tests
+        expr: status = 'FAILED'
+      - name: interactive_tests_only
+        synonyms:
+          - interactive only
+          - interactive tables
+        description: Filter to only show Snowflake Interactive table tests
+        expr: table_type = 'INTERACTIVE'
+      - name: postgres_tests_only
+        synonyms:
+          - postgres only
+        description: Filter to only show Postgres tests
+        expr: table_type = 'POSTGRES'
+  - name: WORKER_METRICS
+    synonyms:
+      - worker snapshots
+      - time series
+      - metrics over time
+    base_table:
+      database: UNISTORE_BENCHMARK
+      schema: TEST_RESULTS
+      table: WORKER_METRICS_SNAPSHOTS
+    primary_key:
+      columns:
+        - SNAPSHOT_ID
+    dimensions:
+      - name: PHASE
+        synonyms:
+          - test phase
+        description: "Test phase: WARMUP, MEASUREMENT, COOLDOWN"
+        expr: phase
+        data_type: VARCHAR(50)
+      - name: WORKER_ID
+        description: Worker thread identifier
+        expr: worker_id
+        data_type: VARCHAR(100)
+    filters:
+      - name: measurement_phase_only
+        synonyms:
+          - measurement only
+          - exclude warmup
+        description: Filter to only show measurement phase metrics (excludes warmup and cooldown)
+        expr: phase = 'MEASUREMENT'
+relationships:
+  - name: QUERY_TO_TEST
+    left_table: QUERY_EXECUTIONS
+    right_table: TEST_RESULTS
+    relationship_columns:
+      - left_column: TEST_ID
+        right_column: TEST_ID
+  - name: WORKER_TO_TEST
+    left_table: WORKER_METRICS
+    right_table: TEST_RESULTS
+    relationship_columns:
+      - left_column: TEST_ID
+        right_column: TEST_ID
+module_custom_instructions:
+  sql_generation: |-
+    DATABASE COMPARISON: table_type identifies the database system:
+    - POSTGRES = PostgreSQL database
+    - HYBRID = Snowflake Unistore/Hybrid tables
+    - STANDARD = Snowflake standard tables
+    - ICEBERG = Snowflake Iceberg tables
+    - INTERACTIVE = Snowflake Interactive tables
+
+    IMPORTANT: 'interactive' means table_type = 'INTERACTIVE', NOT 'HYBRID'
+
+    LATENCY METRICS - TWO TYPES:
+    1. APP ROUNDTRIP LATENCY (p50_latency_ms, p95_latency_ms, p99_latency_ms, avg_latency_ms):
+       - End-to-end latency measured by the benchmark tool
+       - Includes: database execution + network round-trip + client processing
+       - Available for ALL database types
+    
+    2. POSTGRESQL SERVER EXECUTION TIME (pg_mean_exec_time_ms):
+       - Actual database query processing time from pg_stat_statements
+       - Does NOT include network overhead
+       - Only available for table_type = 'POSTGRES' tests
+    
+    NETWORK OVERHEAD = p50_latency_ms - pg_mean_exec_time_ms
+    - The difference between app roundtrip and server execution time
+    - Represents network latency + client-side processing overhead
+
+    When asked about "true postgres latency" or "database latency" vs "app latency", use pg_mean_exec_time_ms for server-side and p50_latency_ms for app-side.
+
+    COMMON PATTERNS:
+    - PostgreSQL tests: WHERE table_type = 'POSTGRES'
+    - Interactive table tests: WHERE table_type = 'INTERACTIVE'
+    - Snowflake tests: WHERE table_type != 'POSTGRES'
+    - Compare all: GROUP BY table_type
+    - Completed only: WHERE status = 'COMPLETED'
+
+    METRICS: Higher qps = better throughput. Lower p50/p95/p99 = better latency. Lower error_rate = more reliable.
+verified_queries:
+  - name: '"Compare PostgreSQL vs Snowflake Performance"'
+    sql: "SELECT TABLE_TYPE AS database_type, COUNT(DISTINCT TEST_ID) AS test_count, ROUND(AVG(QPS), 1) AS avg_qps, ROUND(AVG(P50_LATENCY_MS), 2) AS avg_p50_ms, ROUND(AVG(P95_LATENCY_MS), 2) AS avg_p95_ms, ROUND(AVG(P99_LATENCY_MS), 2) AS avg_p99_ms, ROUND(AVG(ERROR_RATE), 2) AS avg_error_rate FROM TEST_RESULTS WHERE STATUS = 'COMPLETED' GROUP BY TABLE_TYPE ORDER BY avg_qps DESC"
+    question: Compare PostgreSQL vs Snowflake performance
+  - name: '"List Recent Tests"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE AS database_type, WAREHOUSE_SIZE, STATUS, QPS, P50_LATENCY_MS, P95_LATENCY_MS, ERROR_RATE, START_TIME FROM TEST_RESULTS ORDER BY START_TIME DESC LIMIT 20"
+    question: Show recent benchmark tests
+  - name: '"Performance by Warehouse Size"'
+    sql: "SELECT WAREHOUSE_SIZE, TABLE_TYPE AS database_type, COUNT(DISTINCT TEST_ID) AS test_count, ROUND(AVG(QPS), 1) AS avg_qps, ROUND(AVG(P50_LATENCY_MS), 2) AS avg_p50_ms, ROUND(AVG(P95_LATENCY_MS), 2) AS avg_p95_ms FROM TEST_RESULTS WHERE STATUS = 'COMPLETED' GROUP BY WAREHOUSE_SIZE, TABLE_TYPE ORDER BY WAREHOUSE_SIZE, avg_qps DESC"
+    question: Compare performance by warehouse size
+  - name: '"PostgreSQL Tests Only"'
+    sql: "SELECT TEST_ID, TEST_NAME, WAREHOUSE_SIZE, QPS, P50_LATENCY_MS AS p50_ms, P95_LATENCY_MS AS p95_ms, P99_LATENCY_MS AS p99_ms, ERROR_RATE, TOTAL_OPERATIONS, START_TIME FROM TEST_RESULTS WHERE TABLE_TYPE = 'POSTGRES' AND STATUS = 'COMPLETED' ORDER BY START_TIME DESC"
+    question: Show PostgreSQL test results
+  - name: '"Snowflake Hybrid Table Tests"'
+    sql: "SELECT TEST_ID, TEST_NAME, WAREHOUSE_SIZE, QPS, P50_LATENCY_MS AS p50_ms, P95_LATENCY_MS AS p95_ms, P99_LATENCY_MS AS p99_ms, ERROR_RATE, TOTAL_OPERATIONS, START_TIME FROM TEST_RESULTS WHERE TABLE_TYPE = 'HYBRID' AND STATUS = 'COMPLETED' ORDER BY START_TIME DESC"
+    question: Show Snowflake Unistore hybrid table test results
+  - name: '"Best Performing Tests by QPS"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE AS database_type, WAREHOUSE_SIZE, QPS AS queries_per_second, P50_LATENCY_MS, P95_LATENCY_MS, ERROR_RATE FROM TEST_RESULTS WHERE STATUS = 'COMPLETED' ORDER BY QPS DESC LIMIT 10"
+    question: Which tests had the best throughput?
+  - name: '"Lowest Latency Tests"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE AS database_type, WAREHOUSE_SIZE, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS, QPS FROM TEST_RESULTS WHERE STATUS = 'COMPLETED' ORDER BY P50_LATENCY_MS ASC LIMIT 10"
+    question: Which tests had the lowest latency?
+  - name: '"Test Performance Summary"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE AS database_type, WAREHOUSE_SIZE, STATUS, QPS, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS, ERROR_RATE, TOTAL_OPERATIONS, READ_OPERATIONS, WRITE_OPERATIONS, FAILED_OPERATIONS, DURATION_SECONDS, START_TIME, END_TIME FROM TEST_RESULTS WHERE TEST_ID = :test_id"
+    question: What is the overall performance summary and operational status for a specific benchmark run?
+  - name: '"Operation Type Breakdown"'
+    sql: "SELECT QUERY_KIND AS operation_type, COUNT(*) AS total_queries, SUM(CASE WHEN SUCCESS = TRUE THEN 1 ELSE 0 END) AS successful, SUM(CASE WHEN SUCCESS = FALSE THEN 1 ELSE 0 END) AS failed, ROUND(100.0 * SUM(CASE WHEN SUCCESS = FALSE THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS error_rate_pct FROM QUERY_EXECUTIONS WHERE TEST_ID = :test_id AND WARMUP = FALSE GROUP BY QUERY_KIND ORDER BY total_queries DESC"
+    question: What is the breakdown of operation types and their error counts for this benchmark run?
+  - name: '"Test Execution Metrics"'
+    sql: "SELECT t.TEST_ID, t.TEST_NAME, t.TABLE_TYPE AS database_type, t.QPS, t.P50_LATENCY_MS, t.P95_LATENCY_MS, t.P99_LATENCY_MS, t.AVG_LATENCY_MS, t.MAX_LATENCY_MS, t.ERROR_RATE, t.TOTAL_OPERATIONS, t.CONCURRENT_CONNECTIONS, t.DURATION_SECONDS FROM TEST_RESULTS AS t WHERE t.TEST_ID = :test_id"
+    question: What are the detailed execution metrics and timing information for a specific benchmark test?
+  - name: '"Failed Tests in Run"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE AS database_type, WAREHOUSE_SIZE, STATUS, ERROR_RATE, START_TIME FROM TEST_RESULTS WHERE STATUS = 'FAILED' ORDER BY START_TIME DESC"
+    question: Which benchmark tests failed during the specific benchmark run?
+  - name: '"Warmup vs Test Phase Queries"'
+    sql: "SELECT CASE WHEN WARMUP = TRUE THEN 'Warmup' ELSE 'Measurement' END AS phase, COUNT(*) AS query_count, SUM(CASE WHEN SUCCESS = TRUE THEN 1 ELSE 0 END) AS successful, SUM(CASE WHEN SUCCESS = FALSE THEN 1 ELSE 0 END) AS failed FROM QUERY_EXECUTIONS WHERE TEST_ID = :test_id GROUP BY WARMUP"
+    question: How many queries were executed during warmup versus actual testing phases for this benchmark test?
+  - name: '"Successful Operations by Type"'
+    sql: "SELECT QUERY_KIND AS operation_type, COUNT(*) AS successful_count FROM QUERY_EXECUTIONS WHERE TEST_ID = :test_id AND WARMUP = FALSE AND SUCCESS = TRUE GROUP BY QUERY_KIND ORDER BY successful_count DESC"
+    question: How many successful operations of specific types were completed in a particular test run?
+  - name: '"Multiple Tests Comparison"'
+    sql: "SELECT t.TEST_ID, t.TEST_NAME, t.TABLE_TYPE AS database_type, t.TOTAL_OPERATIONS, t.FAILED_OPERATIONS, t.QPS, t.ERROR_RATE FROM TEST_RESULTS AS t WHERE t.STATUS = 'COMPLETED' ORDER BY t.START_TIME DESC LIMIT 10"
+    question: What are the execution volumes and failure counts for multiple benchmark tests?
+  - name: '"Recent PostgreSQL Tests"'
+    sql: "SELECT TEST_ID, TEST_NAME, WAREHOUSE_SIZE, QPS, P50_LATENCY_MS, P95_LATENCY_MS, ERROR_RATE, STATUS, START_TIME FROM TEST_RESULTS WHERE TABLE_TYPE = 'POSTGRES' ORDER BY START_TIME DESC LIMIT 10"
+    question: What are my recent postgres tests?
+  - name: '"Analyze Latest PostgreSQL Test"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE, WAREHOUSE_SIZE, STATUS, QPS, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS, AVG_LATENCY_MS, ERROR_RATE, TOTAL_OPERATIONS, READ_OPERATIONS, WRITE_OPERATIONS, FAILED_OPERATIONS, DURATION_SECONDS, CONCURRENT_CONNECTIONS, START_TIME, END_TIME FROM TEST_RESULTS WHERE TABLE_TYPE = 'POSTGRES' ORDER BY START_TIME DESC LIMIT 1"
+    question: Analyze my latest postgres test
+  - name: '"Benchmark Scope and Coverage"'
+    sql: "SELECT COUNT(DISTINCT TEST_ID) AS total_tests, COUNT(DISTINCT TABLE_TYPE) AS database_types_tested, COUNT(DISTINCT WAREHOUSE_SIZE) AS warehouse_sizes_tested, SUM(TOTAL_OPERATIONS) AS total_operations, SUM(READ_OPERATIONS) AS total_reads, SUM(WRITE_OPERATIONS) AS total_writes, SUM(FAILED_OPERATIONS) AS total_failures FROM TEST_RESULTS WHERE STATUS = 'COMPLETED'"
+    question: "What is the scope and coverage of the benchmark run in terms of total operations executed, operation types tested, and number of individual tests performed?"
+  - name: '"Tests with Query Failures"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE AS database_type, WAREHOUSE_SIZE, FAILED_OPERATIONS, ERROR_RATE, TOTAL_OPERATIONS, STATUS FROM TEST_RESULTS WHERE FAILED_OPERATIONS > 0 OR ERROR_RATE > 0 ORDER BY ERROR_RATE DESC, FAILED_OPERATIONS DESC"
+    question: Which benchmark tests experienced query failures during this specific benchmark run?
+  - name: '"Benchmark Test Count"'
+    sql: "SELECT TABLE_TYPE AS database_type, WAREHOUSE_SIZE, STATUS, COUNT(*) AS test_count FROM TEST_RESULTS GROUP BY TABLE_TYPE, WAREHOUSE_SIZE, STATUS ORDER BY TABLE_TYPE, WAREHOUSE_SIZE, STATUS"
+    question: How many benchmark tests match the search criteria across all database systems and configurations?
+  - name: '"Operations and Failures per Test"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE AS database_type, TOTAL_OPERATIONS, FAILED_OPERATIONS, ERROR_RATE, QPS FROM TEST_RESULTS WHERE STATUS = 'COMPLETED' ORDER BY START_TIME DESC"
+    question: What is the total number of operations and failure count for each benchmark test run?
+  - name: '"Latest Interactive Table Test"'
+    sql: "SELECT TEST_ID, TEST_NAME, TABLE_TYPE, WAREHOUSE_SIZE, STATUS, QPS, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS, AVG_LATENCY_MS, ERROR_RATE, TOTAL_OPERATIONS, READ_OPERATIONS, WRITE_OPERATIONS, FAILED_OPERATIONS, DURATION_SECONDS, CONCURRENT_CONNECTIONS, START_TIME, END_TIME FROM TEST_RESULTS WHERE TABLE_TYPE = 'INTERACTIVE' ORDER BY START_TIME DESC LIMIT 1"
+    question: Tell me about my latest interactive table test
+  - name: '"Recent Interactive Table Tests"'
+    sql: "SELECT TEST_ID, TEST_NAME, WAREHOUSE_SIZE, QPS, P50_LATENCY_MS, P95_LATENCY_MS, ERROR_RATE, STATUS, START_TIME FROM TEST_RESULTS WHERE TABLE_TYPE = 'INTERACTIVE' ORDER BY START_TIME DESC LIMIT 10"
+    question: What are my recent interactive table tests?
+  - name: '"PostgreSQL App vs Server Latency"'
+    sql: "SELECT TEST_ID, TEST_NAME, ROUND(P50_LATENCY_MS, 3) AS app_roundtrip_p50_ms, ROUND(PG_MEAN_EXEC_TIME_MS, 3) AS postgres_server_exec_ms, ROUND(P50_LATENCY_MS - PG_MEAN_EXEC_TIME_MS, 3) AS network_overhead_ms, ROUND(100.0 * PG_MEAN_EXEC_TIME_MS / NULLIF(P50_LATENCY_MS, 0), 1) AS db_pct_of_total, QPS, STATUS, START_TIME FROM TEST_RESULTS WHERE TABLE_TYPE = 'POSTGRES' AND PG_MEAN_EXEC_TIME_MS IS NOT NULL ORDER BY START_TIME DESC LIMIT 10"
+    question: What is the difference between app roundtrip latency and true postgres latency?
+  - name: '"Latest PostgreSQL Latency Breakdown"'
+    sql: "SELECT TEST_ID, TEST_NAME, ROUND(P50_LATENCY_MS, 3) AS app_roundtrip_p50_ms, ROUND(P95_LATENCY_MS, 3) AS app_roundtrip_p95_ms, ROUND(AVG_LATENCY_MS, 3) AS app_roundtrip_avg_ms, ROUND(PG_MEAN_EXEC_TIME_MS, 3) AS postgres_server_exec_ms, ROUND(P50_LATENCY_MS - PG_MEAN_EXEC_TIME_MS, 3) AS network_overhead_ms, PG_CACHE_HIT_RATIO AS cache_hit_ratio, QPS, TOTAL_OPERATIONS FROM TEST_RESULTS WHERE TABLE_TYPE = 'POSTGRES' AND STATUS = 'COMPLETED' ORDER BY START_TIME DESC LIMIT 1"
+    question: Show the latency breakdown for my latest postgres test
+  - name: '"PostgreSQL Network Overhead Analysis"'
+    sql: "SELECT TEST_NAME, ROUND(AVG(P50_LATENCY_MS), 3) AS avg_app_latency_ms, ROUND(AVG(PG_MEAN_EXEC_TIME_MS), 3) AS avg_server_exec_ms, ROUND(AVG(P50_LATENCY_MS - PG_MEAN_EXEC_TIME_MS), 3) AS avg_network_overhead_ms, ROUND(100.0 * AVG(PG_MEAN_EXEC_TIME_MS) / NULLIF(AVG(P50_LATENCY_MS), 0), 1) AS db_pct_of_total, COUNT(*) AS test_count FROM TEST_RESULTS WHERE TABLE_TYPE = 'POSTGRES' AND STATUS = 'COMPLETED' AND PG_MEAN_EXEC_TIME_MS IS NOT NULL GROUP BY TEST_NAME ORDER BY avg_network_overhead_ms DESC"
+    question: Analyze network overhead across PostgreSQL

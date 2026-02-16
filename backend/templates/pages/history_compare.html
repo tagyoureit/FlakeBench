@@ -22,14 +22,6 @@
             >
                 Back to History
             </a>
-            <button
-                type="button"
-                class="btn btn-primary"
-                @click="autoSelectBaseline()"
-                title="Automatically find and compare with the best matching baseline run"
-            >
-                🎯 Auto-Select Baseline
-            </button>
         </div>
     </div>
 
@@ -69,50 +61,110 @@
             <span class="floating-toolbar-indicator" :class="{ 'active': showWarmup }">
                 <span x-text="showWarmup ? 'Showing warmup' : 'Measurement only'"></span>
             </span>
+            <button
+                type="button"
+                class="btn btn-sm"
+                :class="alignmentMode === 'warmup_end' ? 'btn-primary' : 'btn-secondary'"
+                @click="toggleAlignmentMode()"
+            >
+                <span x-text="getAlignmentLabel()"></span>
+            </button>
+            <span class="floating-toolbar-indicator" :class="{ 'active': alignmentMode === 'warmup_end' }">
+                <span x-text="getAlignmentIndicatorLabel()"></span>
+            </span>
+            <div style="width: 100%; margin-top: 0.5rem; font-size: 0.7rem; color: #475569; line-height: 1.35; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">
+                <div x-text="getDebugLineToggles()"></div>
+                <div x-text="getDebugLinePrimary()"></div>
+                <div x-text="getDebugLineSecondary()"></div>
+            </div>
         </div>
 
         <div class="dashboard-top-grid">
             <div class="card" x-show="testA">
-                <div class="card-title" style="margin-bottom: 0.25rem;">
-                    <span style="display: inline-block; font-size: 0.75rem; font-weight: 700; color: #1d4ed8; margin-right: 0.5rem;">PRIMARY</span>
-                    <span x-text="testA ? (testA.template_name || testA.test_name || '') : ''"></span>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <img
+                            x-show="DisplayUtils.tableTypeIconSrc(testA)"
+                            class="template-type-icon"
+                            :src="DisplayUtils.tableTypeIconSrc(testA)"
+                            :alt="DisplayUtils.tableTypeLabel(testA)"
+                            :title="DisplayUtils.tableTypeLabel(testA)"
+                            style="width: 24px; height: 24px;"
+                        >
+                        <div class="card-title" style="margin-bottom: 0;">
+                            <span style="display: inline-block; font-size: 0.75rem; font-weight: 700; color: #1d4ed8; margin-right: 0.5rem;">PRIMARY</span>
+                            <span x-text="testA ? (testA.template_name || testA.test_name || '') : ''"></span>
+                        </div>
+                    </div>
+                    <a
+                        x-show="testA && testA.template_id"
+                        :href="testA ? `/configure?template_id=${encodeURIComponent(testA.template_id)}&mode=view` : '#'"
+                        target="_blank"
+                        rel="noopener"
+                        title="View template"
+                        style="color: var(--text-secondary); display: flex; align-items: center;"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                            <polyline points="15 3 21 3 21 9"></polyline>
+                            <line x1="10" y1="14" x2="21" y2="3"></line>
+                        </svg>
+                    </a>
                 </div>
                 <div class="text-sm text-gray-600">
-                    <div>
+                    <div class="mt-1">
                         <strong>Table:</strong>
                         <span x-text="testA ? (testA.table_full_name || testA.table_name || '') : ''"></span>
                         (<span x-text="testA ? (testA.table_type || '') : ''"></span>)
                     </div>
-                    <div class="mt-1" x-show="testA && (testA.table_type || '').toUpperCase() !== 'POSTGRES'">
+                    <div class="mt-1" x-show="!DisplayUtils.isPostgresType(testA)">
                         <strong>Warehouse:</strong>
-                        <span x-text="testA ? (testA.warehouse || '') : ''"></span>
-                        (<span x-text="testA ? (testA.warehouse_size || '') : ''"></span>)
+                        <span x-html="DisplayUtils.warehouseDisplay(testA)"></span>
                     </div>
-                    <div class="mt-1" x-show="testA && (testA.table_type || '').toUpperCase() === 'POSTGRES'">
+                    <div class="mt-1" x-show="!DisplayUtils.isPostgresType(testA) && testA?.resource_constraint">
+                        <strong>Resource:</strong>
+                        <span x-text="testA?.resource_constraint || ''"></span>
+                    </div>
+                    <div class="mt-1" x-show="DisplayUtils.isPostgresType(testA)">
                         <strong>Database:</strong>
                         <span>Postgres</span>
                     </div>
-                    <div class="mt-1" x-show="testA && testA.load_mode">
+                    <div class="mt-1" x-show="DisplayUtils.isPostgresType(testA) && testA?.postgres_connections">
+                        <strong>Pool:</strong>
+                        <span x-text="(testA?.postgres_connections || '') + ' connections'"></span>
+                    </div>
+                    <div class="mt-1" x-show="testA?.load_mode">
                         <strong>Load Mode:</strong>
-                        <span x-text="testA ? (testA.load_mode || '') : ''"></span>
+                        <span x-text="DisplayUtils.loadModeDisplay(testA)"></span>
                     </div>
-                    <div class="mt-1" x-show="testA && testA.workload_mix">
+                    <div class="mt-1" x-show="DisplayUtils.workloadMixCompact(testA)">
                         <strong>Workload Mix:</strong>
-                        <span x-text="testA ? (testA.workload_mix || '') : ''"></span>
+                        <span x-text="DisplayUtils.workloadMixCompact(testA)"></span>
                     </div>
-                    <div class="mt-1">
+                    <div class="mt-1" x-show="DisplayUtils.durationSimple(testA)">
                         <strong>Duration:</strong>
-                        <span x-text="testA && testA.duration_seconds != null ? Number(testA.duration_seconds).toFixed(0) : ''"></span>s
+                        <span x-text="DisplayUtils.durationSimple(testA)"></span>
                     </div>
-                    <div class="mt-1" x-show="testA && testA.scaling_mode">
+                    <div class="mt-1" x-show="testA?.scaling">
                         <strong>Scaling:</strong>
-                        <span x-text="testA ? (testA.scaling_mode === 'AUTO' ? 'Auto' : testA.scaling_mode || '') : ''"></span>
+                        <span x-html="DisplayUtils.scalingDisplay(testA)"></span>
                     </div>
-                    <div class="mt-1">
+                    <div class="mt-1" x-show="testA?.bounds_completion_reason">
+                        <strong>Bounds:</strong>
+                        <span x-text="testA?.bounds_completion_reason || ''"></span>
+                    </div>
+                    <div class="mt-1" x-show="testA && (testA.qps || testA.p95_latency_ms)">
                         <strong>QPS:</strong>
                         <span x-text="testA ? Number(testA.qps || 0).toFixed(0) : ''"></span>
                         • <strong>P95:</strong>
                         <span x-text="testA ? Number(testA.p95_latency_ms || 0).toFixed(2) : ''"></span> ms
+                    </div>
+                    <div class="mt-1" x-show="testA?.query_tag">
+                        <strong>Query Tag:</strong>
+                        <code
+                            style="font-size: 0.75rem; background: #f3f4f6; padding: 0.125rem 0.375rem; border-radius: 0.25rem; word-break: break-all;"
+                            x-text="testA?.query_tag || ''"
+                        ></code>
                     </div>
                 </div>
                 <div style="margin-top: 0.75rem;">
@@ -123,46 +175,90 @@
             </div>
 
             <div class="card" x-show="testB">
-                <div class="card-title" style="margin-bottom: 0.25rem;">
-                    <span style="display: inline-block; font-size: 0.75rem; font-weight: 700; color: #6b7280; margin-right: 0.5rem;">SECONDARY</span>
-                    <span x-text="testB ? (testB.template_name || testB.test_name || '') : ''"></span>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+                    <div style="display: flex; align-items: center; gap: 0.5rem;">
+                        <img
+                            x-show="DisplayUtils.tableTypeIconSrc(testB)"
+                            class="template-type-icon"
+                            :src="DisplayUtils.tableTypeIconSrc(testB)"
+                            :alt="DisplayUtils.tableTypeLabel(testB)"
+                            :title="DisplayUtils.tableTypeLabel(testB)"
+                            style="width: 24px; height: 24px;"
+                        >
+                        <div class="card-title" style="margin-bottom: 0;">
+                            <span style="display: inline-block; font-size: 0.75rem; font-weight: 700; color: #6b7280; margin-right: 0.5rem;">SECONDARY</span>
+                            <span x-text="testB ? (testB.template_name || testB.test_name || '') : ''"></span>
+                        </div>
+                    </div>
+                    <a
+                        x-show="testB && testB.template_id"
+                        :href="testB ? `/configure?template_id=${encodeURIComponent(testB.template_id)}&mode=view` : '#'"
+                        target="_blank"
+                        rel="noopener"
+                        title="View template"
+                        style="color: var(--text-secondary); display: flex; align-items: center;"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                            <polyline points="15 3 21 3 21 9"></polyline>
+                            <line x1="10" y1="14" x2="21" y2="3"></line>
+                        </svg>
+                    </a>
                 </div>
                 <div class="text-sm text-gray-600">
-                    <div>
+                    <div class="mt-1">
                         <strong>Table:</strong>
                         <span x-text="testB ? (testB.table_full_name || testB.table_name || '') : ''"></span>
                         (<span x-text="testB ? (testB.table_type || '') : ''"></span>)
                     </div>
-                    <div class="mt-1" x-show="testB && (testB.table_type || '').toUpperCase() !== 'POSTGRES'">
+                    <div class="mt-1" x-show="!DisplayUtils.isPostgresType(testB)">
                         <strong>Warehouse:</strong>
-                        <span x-text="testB ? (testB.warehouse || '') : ''"></span>
-                        (<span x-text="testB ? (testB.warehouse_size || '') : ''"></span>)
+                        <span x-html="DisplayUtils.warehouseDisplay(testB)"></span>
                     </div>
-                    <div class="mt-1" x-show="testB && (testB.table_type || '').toUpperCase() === 'POSTGRES'">>
+                    <div class="mt-1" x-show="!DisplayUtils.isPostgresType(testB) && testB?.resource_constraint">
+                        <strong>Resource:</strong>
+                        <span x-text="testB?.resource_constraint || ''"></span>
+                    </div>
+                    <div class="mt-1" x-show="DisplayUtils.isPostgresType(testB)">
                         <strong>Database:</strong>
                         <span>Postgres</span>
                     </div>
-                    <div class="mt-1" x-show="testB && testB.load_mode">
+                    <div class="mt-1" x-show="DisplayUtils.isPostgresType(testB) && testB?.postgres_connections">
+                        <strong>Pool:</strong>
+                        <span x-text="(testB?.postgres_connections || '') + ' connections'"></span>
+                    </div>
+                    <div class="mt-1" x-show="testB?.load_mode">
                         <strong>Load Mode:</strong>
-                        <span x-text="testB ? (testB.load_mode || '') : ''"></span>
+                        <span x-text="DisplayUtils.loadModeDisplay(testB)"></span>
                     </div>
-                    <div class="mt-1" x-show="testB && testB.workload_mix">
+                    <div class="mt-1" x-show="DisplayUtils.workloadMixCompact(testB)">
                         <strong>Workload Mix:</strong>
-                        <span x-text="testB ? (testB.workload_mix || '') : ''"></span>
+                        <span x-text="DisplayUtils.workloadMixCompact(testB)"></span>
                     </div>
-                    <div class="mt-1">
+                    <div class="mt-1" x-show="DisplayUtils.durationSimple(testB)">
                         <strong>Duration:</strong>
-                        <span x-text="testB && testB.duration_seconds != null ? Number(testB.duration_seconds).toFixed(0) : ''"></span>s
+                        <span x-text="DisplayUtils.durationSimple(testB)"></span>
                     </div>
-                    <div class="mt-1" x-show="testB && testB.scaling_mode">
+                    <div class="mt-1" x-show="testB?.scaling">
                         <strong>Scaling:</strong>
-                        <span x-text="testB ? (testB.scaling_mode === 'AUTO' ? 'Auto' : testB.scaling_mode || '') : ''"></span>
+                        <span x-html="DisplayUtils.scalingDisplay(testB)"></span>
                     </div>
-                    <div class="mt-1">
+                    <div class="mt-1" x-show="testB?.bounds_completion_reason">
+                        <strong>Bounds:</strong>
+                        <span x-text="testB?.bounds_completion_reason || ''"></span>
+                    </div>
+                    <div class="mt-1" x-show="testB && (testB.qps || testB.p95_latency_ms)">
                         <strong>QPS:</strong>
                         <span x-text="testB ? Number(testB.qps || 0).toFixed(0) : ''"></span>
                         • <strong>P95:</strong>
                         <span x-text="testB ? Number(testB.p95_latency_ms || 0).toFixed(2) : ''"></span> ms
+                    </div>
+                    <div class="mt-1" x-show="testB?.query_tag">
+                        <strong>Query Tag:</strong>
+                        <code
+                            style="font-size: 0.75rem; background: #f3f4f6; padding: 0.125rem 0.375rem; border-radius: 0.25rem; word-break: break-all;"
+                            x-text="testB?.query_tag || ''"
+                        ></code>
                     </div>
                 </div>
                 <div style="margin-top: 0.75rem;">
@@ -190,34 +286,100 @@
         </template>
 
         <!-- Suggested Comparisons Panel -->
-        <div class="card" x-show="suggestedComparisons.length > 0">
+        <div class="card" x-show="suggestedBaselineComparisons.length > 0 || suggestedSimilarComparisons.length > 0">
             <div class="card-title">Suggested Comparisons</div>
             <div class="text-sm text-gray-600 -mt-1 mb-3">
-                Other similar tests you can compare with the primary run. Click to switch.
+                Choose either a strict baseline or a cross-template analog for the primary run.
             </div>
 
             <div x-show="suggestedComparisonsLoading" class="text-sm text-gray-500">
                 Loading suggestions...
             </div>
 
-            <div class="flex flex-wrap gap-2" x-show="!suggestedComparisonsLoading">
-                <template x-for="suggestion in suggestedComparisons" :key="suggestion.test_id">
-                    <button
-                        type="button"
-                        class="inline-flex items-center gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 rounded-lg border border-gray-200 transition-colors text-left"
-                        @click="switchToSuggested(suggestion.test_id)"
-                    >
-                        <span
-                            class="badge badge-sm"
-                            :class="suggestion.similarity >= 0.85 ? 'badge-success' : suggestion.similarity >= 0.7 ? 'badge-warning' : 'badge-secondary'"
-                            x-text="formatSimilarity(suggestion.similarity)"
-                        ></span>
-                        <div class="flex flex-col">
-                            <span class="text-sm font-medium truncate max-w-[200px]" x-text="suggestion.test_name || suggestion.test_id.slice(0, 8)"></span>
-                            <span class="text-xs text-gray-500" x-text="suggestion.qps_avg ? formatCompact(suggestion.qps_avg) + ' QPS' : ''"></span>
-                        </div>
-                    </button>
-                </template>
+            <div x-show="!suggestedComparisonsLoading" style="display: grid; gap: 1rem;">
+                <div x-show="suggestedBaselineComparisons.length > 0">
+                    <div class="text-xs font-semibold text-gray-700 mb-2">Baseline Candidates (Same Template)</div>
+                    <div class="flex flex-wrap gap-2">
+                        <template x-for="(suggestion, idx) in suggestedBaselineComparisons" :key="'b-' + suggestion.test_id">
+                            <button
+                                type="button"
+                                class="inline-flex items-start gap-2 px-3 py-2 bg-blue-50 hover:bg-blue-100 rounded-lg border border-blue-200 transition-colors text-left"
+                                @click="switchToSuggested(suggestion.test_id)"
+                                style="min-width: 260px;"
+                            >
+                                <div>
+                                    <span class="badge badge-sm"
+                                          :class="suggestion.similarity_score >= 0.85 ? 'badge-success' : suggestion.similarity_score >= 0.7 ? 'badge-warning' : 'badge-secondary'"
+                                          x-text="formatSimilarity(suggestion.similarity_score)"></span>
+                                </div>
+                                <div class="flex flex-col" style="gap: 0.15rem;">
+                                    <span class="text-sm font-medium truncate max-w-[220px]" x-text="suggestion.test_name || ('Test ' + suggestion.test_id.slice(0, 8))"></span>
+                                    <span class="text-xs text-gray-600">
+                                        <span x-text="formatSuggestionDate(suggestion.test_date)"></span>
+                                        <span> • </span>
+                                        <span x-text="formatRelativeAge(suggestion.test_date)"></span>
+                                    </span>
+                                    <span class="text-xs text-gray-500">
+                                        <span x-text="suggestion.metrics?.qps != null ? formatCompact(suggestion.metrics.qps) + ' QPS' : 'N/A QPS'"></span>
+                                        <span> • </span>
+                                        <span x-text="suggestion.metrics?.p95_latency_ms != null ? Number(suggestion.metrics.p95_latency_ms).toFixed(2) + ' ms P95' : 'N/A P95'"></span>
+                                    </span>
+                                    <span class="text-xs">
+                                        <span :class="formatSuggestionDelta(calcSuggestionDeltaPct(testA?.qps, suggestion.metrics?.qps), false).className"
+                                              x-text="'QPS ' + formatSuggestionDelta(calcSuggestionDeltaPct(testA?.qps, suggestion.metrics?.qps), false).text"></span>
+                                        <span> • </span>
+                                        <span :class="formatSuggestionDelta(calcSuggestionDeltaPct(testA?.p95_latency_ms, suggestion.metrics?.p95_latency_ms), true).className"
+                                              x-text="'P95 ' + formatSuggestionDelta(calcSuggestionDeltaPct(testA?.p95_latency_ms, suggestion.metrics?.p95_latency_ms), true).text"></span>
+                                    </span>
+                                    <span class="text-xs text-blue-700" x-text="getSuggestionIntent(suggestion, idx, 'baseline')"></span>
+                                </div>
+                            </button>
+                        </template>
+                    </div>
+                </div>
+
+                <div x-show="suggestedSimilarComparisons.length > 0">
+                    <div class="text-xs font-semibold text-gray-700 mb-2">Similar Candidates (Cross Template)</div>
+                    <div class="flex flex-wrap gap-2">
+                        <template x-for="(suggestion, idx) in suggestedSimilarComparisons" :key="'s-' + suggestion.test_id">
+                            <button
+                                type="button"
+                                class="inline-flex items-start gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 rounded-lg border border-gray-200 transition-colors text-left"
+                                @click="switchToSuggested(suggestion.test_id)"
+                                style="min-width: 260px;"
+                            >
+                                <div>
+                                    <span class="badge badge-sm"
+                                          :class="suggestion.similarity_score >= 0.85 ? 'badge-success' : suggestion.similarity_score >= 0.7 ? 'badge-warning' : 'badge-secondary'"
+                                          x-text="formatSimilarity(suggestion.similarity_score)"></span>
+                                </div>
+                                <div class="flex flex-col" style="gap: 0.15rem;">
+                                    <span class="text-sm font-medium truncate max-w-[220px]" x-text="suggestion.test_name || ('Test ' + suggestion.test_id.slice(0, 8))"></span>
+                                    <span class="text-xs text-gray-600">
+                                        <span x-text="formatSuggestionDate(suggestion.test_date)"></span>
+                                        <span> • </span>
+                                        <span x-text="formatRelativeAge(suggestion.test_date)"></span>
+                                    </span>
+                                    <span class="text-xs text-gray-500">
+                                        <span x-text="suggestion.metrics?.qps != null ? formatCompact(suggestion.metrics.qps) + ' QPS' : 'N/A QPS'"></span>
+                                        <span> • </span>
+                                        <span x-text="suggestion.config?.warehouse_size || 'N/A WH'"></span>
+                                        <span> • </span>
+                                        <span x-text="suggestion.config?.load_mode || 'N/A Mode'"></span>
+                                    </span>
+                                    <span class="text-xs">
+                                        <span :class="formatSuggestionDelta(calcSuggestionDeltaPct(testA?.qps, suggestion.metrics?.qps), false).className"
+                                              x-text="'QPS ' + formatSuggestionDelta(calcSuggestionDeltaPct(testA?.qps, suggestion.metrics?.qps), false).text"></span>
+                                        <span> • </span>
+                                        <span :class="formatSuggestionDelta(calcSuggestionDeltaPct(testA?.p95_latency_ms, suggestion.metrics?.p95_latency_ms), true).className"
+                                              x-text="'P95 ' + formatSuggestionDelta(calcSuggestionDeltaPct(testA?.p95_latency_ms, suggestion.metrics?.p95_latency_ms), true).text"></span>
+                                    </span>
+                                    <span class="text-xs text-gray-700" x-text="getSuggestionIntent(suggestion, idx, 'similar')"></span>
+                                </div>
+                            </button>
+                        </template>
+                    </div>
+                </div>
             </div>
         </div>
 

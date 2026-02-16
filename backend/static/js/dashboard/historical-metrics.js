@@ -7,6 +7,9 @@ window.DashboardMixins = window.DashboardMixins || {};
 window.DashboardMixins.historicalMetrics = {
   async loadHistoricalMetrics() {
     if (!this.testId) return;
+    // Prevent duplicate concurrent calls
+    if (this._historicalMetricsLoading) return;
+    this._historicalMetricsLoading = true;
     try {
       // Fetch both main metrics and per-worker metrics in parallel
       const [resp, workerResp] = await Promise.all([
@@ -67,6 +70,8 @@ window.DashboardMixins.historicalMetrics = {
           window.toast.error(`Failed to render charts: ${e && e.message ? e.message : String(e)}`);
         }
       } catch (_) {}
+    } finally {
+      this._historicalMetricsLoading = false;
     }
   },
 

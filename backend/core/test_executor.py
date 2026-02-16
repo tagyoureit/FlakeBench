@@ -29,6 +29,7 @@ from backend.models import (
     TestStatus,
     WorkloadType,
     Metrics,
+    TableType,
 )
 from backend.config import settings
 from backend.connectors import snowflake_pool
@@ -687,10 +688,29 @@ class TestExecutor:
             # Optional: per-test Snowflake pool override (used for template-selected warehouses).
             pool_override = getattr(self, "_snowflake_pool_override", None)
             if pool_override is not None:
+                override_wh = getattr(pool_override, "warehouse", None)
+                logger.info(
+                    f"Applying pool override: warehouse={override_wh}, "
+                    f"managers={len(self.table_managers)}"
+                )
                 for manager in self.table_managers:
-                    if hasattr(manager, "pool") and hasattr(
+                    # Apply to Snowflake table types (STANDARD, HYBRID, INTERACTIVE, DYNAMIC)
+                    # Check table type from config, not pool existence (pool may be lazy-init)
+                    ttype = getattr(getattr(manager, "config", None), "table_type", None)
+                    if ttype in (
+                        TableType.STANDARD,
+                        TableType.HYBRID,
+                        TableType.INTERACTIVE,
+                        TableType.DYNAMIC,
+                    ):
+                        cast(Any, manager).pool = pool_override
+                        logger.debug(
+                            f"Applied pool override to {manager.table_name} (table_type={ttype})"
+                        )
+                    elif hasattr(manager, "pool") and hasattr(
                         manager.pool, "execute_query"
                     ):
+                        # Fallback for any other manager with Snowflake-like pool
                         cast(Any, manager).pool = pool_override
 
             # Optional: per-test Postgres pool override (used for properly-sized worker pools).
@@ -832,6 +852,14 @@ class TestExecutor:
 
             # Snowflake-first: lightweight profiling for adaptive reads/range scans
             await self._profile_tables()
+
+            # Validate that CUSTOM queries requiring key values have the necessary data
+            validation_error = self._validate_custom_query_requirements()
+            if validation_error:
+                self._setup_error = validation_error
+                logger.error(self._setup_error)
+                return False
+
             return True
 
         except Exception as e:
@@ -1012,6 +1040,97 @@ class TestExecutor:
                     full_name,
                     e,
                 )
+
+    def _validate_custom_query_requirements(self) -> Optional[str]:
+        """
+        Validate that CUSTOM queries requiring key/time values have the necessary data.
+
+        Returns an error message if validation fails, None if successful.
+        """
+        custom_queries = self.scenario.custom_queries or []
+        if not custom_queries:
+            return None
+
+        needs_key = False
+        needs_time = False
+
+        for q in custom_queries:
+            kind = str(q.get("query_kind") or "").strip().upper()
+            # Check both field names - weight_pct is used in saved templates, percentage in some forms
+            pct = q.get("weight_pct", q.get("percentage", q.get("pct", 0)))
+            try:
+                pct = float(pct or 0)
+            except (ValueError, TypeError):
+                pct = 0
+            if pct <= 0:
+                continue
+            if kind in {"POINT_LOOKUP", "UPDATE"}:
+                needs_key = True
+            elif kind == "RANGE_SCAN":
+                # RANGE_SCAN can use either time (1 placeholder) or key (2+ placeholders).
+                # Check the SQL to determine which is needed.
+                sql = str(q.get("sql") or "")
+                placeholder_count = sql.count("?")
+                if placeholder_count >= 2:
+                    # ID-based BETWEEN form - needs key values
+                    needs_key = True
+                else:
+                    # Time-based cutoff - needs time values
+                    needs_time = True
+
+        if not needs_key and not needs_time:
+            return None
+
+        pools = getattr(self, "_value_pools", {}) or {}
+        has_key_pool = bool(pools.get("KEY"))
+        has_range_pool = bool(pools.get("RANGE"))
+
+        logger.info(
+            f"CUSTOM query validation: needs_key={needs_key}, needs_time={needs_time}, "
+            f"has_key_pool={has_key_pool}, has_range_pool={has_range_pool}"
+        )
+
+        for manager in self.table_managers:
+            full_name = manager.get_full_table_name()
+            state = self._table_state.get(full_name)
+            profile = state.profile if state else None
+
+            if needs_key:
+                has_key_bounds = (
+                    profile
+                    and profile.id_column
+                    and profile.id_min is not None
+                    and profile.id_max is not None
+                    and profile.id_max >= profile.id_min
+                )
+                if not has_key_pool and not has_key_bounds:
+                    return (
+                        f"CUSTOM workload requires key values for POINT_LOOKUP/UPDATE queries, "
+                        f"but table '{full_name}' has no sampled key values and no valid id bounds "
+                        f"(id_column={profile.id_column if profile else None}, "
+                        f"id_min={profile.id_min if profile else None}, "
+                        f"id_max={profile.id_max if profile else None}). "
+                        f"Either click 'Update Table Metadata' in the template editor, "
+                        f"or ensure the table has a numeric key column with valid min/max values."
+                    )
+
+            if needs_time:
+                has_time_bounds = (
+                    profile
+                    and profile.time_column
+                    and profile.time_max is not None
+                )
+                if not has_range_pool and not has_time_bounds:
+                    return (
+                        f"CUSTOM workload requires time values for RANGE_SCAN queries, "
+                        f"but table '{full_name}' has no sampled time values and no valid time bounds "
+                        f"(time_column={profile.time_column if profile else None}, "
+                        f"time_max={profile.time_max if profile else None}). "
+                        f"Either click 'Update Table Metadata' in the template editor, "
+                        f"or ensure the table has a time column with valid data."
+                    )
+
+        return None
 
     async def _load_value_pools(self) -> None:
         """
@@ -3377,6 +3496,11 @@ class TestExecutor:
                 rows_read = 0
                 sf_query_id = str(info.get("query_id") or "")
                 sf_rowcount = info.get("rowcount")
+
+            # Check for errors returned in info dict (e.g., from swallowed exceptions
+            # in snowflake_pool). Raise so error handling captures it properly.
+            if info.get("error"):
+                raise RuntimeError(info["error"])
 
             end_wall = datetime.now(UTC)
             app_elapsed_ms = (time.perf_counter() - start_perf) * 1000.0

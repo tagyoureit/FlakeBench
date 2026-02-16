@@ -294,7 +294,7 @@
                     type="button" 
                     class="text-gray-400 hover:text-blue-600 transition-colors"
                     @click="showQueryHelp = true"
-                    title="Learn about SQL parameters and value pools"
+                    title="Learn about SQL parameters and table metadata"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-3a1 1 0 00-.867.5 1 1 0 11-1.731-1A3 3 0 0113 8a3.001 3.001 0 01-2 2.83V11a1 1 0 11-2 0v-1a1 1 0 011-1 1 1 0 100-2zm0 8a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd" />
@@ -547,23 +547,23 @@
                         </div>
                         <!-- Threads field - hidden when FIXED scaling -->
                         <div class="form-group" x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() !== 'FIXED'">
-                            <label class="form-label">Total Threads</label>
-                            <input type="number" class="form-input" x-model.number="config.concurrent_connections" min="1">
-                            <small class="form-text">Concurrent operations across all workers</small>
+                            <label class="form-label" for="concurrency-total-threads">Total Threads</label>
+                            <input type="number" class="form-input" id="concurrency-total-threads" name="concurrent_connections" data-testid="concurrency-total-threads" x-model.number="config.concurrent_connections" min="1" aria-describedby="concurrency-total-threads-hint">
+                            <small id="concurrency-total-threads-hint" class="form-text">Concurrent operations across all workers</small>
                         </div>
                         <!-- Timing -->
                         <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem;">
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Warmup (s)</label>
-                                <input type="number" class="form-input" x-model.number="config.warmup" min="0" max="300">
+                                <label class="form-label" for="concurrency-warmup" style="font-size: 0.75rem;">Warmup (s)</label>
+                                <input type="number" class="form-input" id="concurrency-warmup" name="warmup" data-testid="concurrency-warmup" x-model.number="config.warmup" min="0" max="300">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Duration (s)</label>
-                                <input type="number" class="form-input" x-model.number="config.duration" min="10" max="3600">
+                                <label class="form-label" for="concurrency-duration" style="font-size: 0.75rem;">Duration (s)</label>
+                                <input type="number" class="form-input" id="concurrency-duration" name="duration" data-testid="concurrency-duration" x-model.number="config.duration" min="10" max="3600">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Think (ms)</label>
-                                <input type="number" class="form-input" x-model.number="config.think_time" min="0" max="10000">
+                                <label class="form-label" for="concurrency-think-time" style="font-size: 0.75rem;">Think (ms)</label>
+                                <input type="number" class="form-input" id="concurrency-think-time" name="think_time" data-testid="concurrency-think-time" x-model.number="config.think_time" min="0" max="10000">
                             </div>
                         </div>
                     </div>
@@ -577,12 +577,12 @@
                         <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'FIXED'" style="margin-bottom: 0.75rem;">
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                    <label class="form-label" for="concurrency-fixed-workers" style="font-size: 0.75rem;">Workers</label>
+                                    <input type="number" class="form-input" id="concurrency-fixed-workers" name="scaling_min_workers" data-testid="concurrency-fixed-workers" x-model.number="config.scaling.min_workers" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Threads/Worker</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" max="200" step="1">
+                                    <label class="form-label" for="concurrency-fixed-threads-per-worker" style="font-size: 0.75rem;">Threads/Worker</label>
+                                    <input type="number" class="form-input" id="concurrency-fixed-threads-per-worker" name="scaling_min_connections" data-testid="concurrency-fixed-threads-per-worker" x-model.number="config.scaling.min_connections" min="1" max="200" step="1">
                                 </div>
                             </div>
                             <div style="padding: 0.5rem; border-radius: 0.25rem; font-size: 0.875rem; background-color: #dbeafe; color: #1e40af;">
@@ -594,37 +594,37 @@
                         <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'" style="margin-bottom: 0.75rem;">
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Min Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                    <label class="form-label" for="concurrency-bounded-min-workers" style="font-size: 0.75rem;">Min Workers</label>
+                                    <input type="number" class="form-input" id="concurrency-bounded-min-workers" name="scaling_min_workers" data-testid="concurrency-bounded-min-workers" x-model.number="config.scaling.min_workers" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Max Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="∞">
+                                    <label class="form-label" for="concurrency-bounded-max-workers" style="font-size: 0.75rem;">Max Workers</label>
+                                    <input type="number" class="form-input" id="concurrency-bounded-max-workers" name="scaling_max_workers" data-testid="concurrency-bounded-max-workers" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="∞">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Min Threads/Wkr</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" step="1">
+                                    <label class="form-label" for="concurrency-bounded-min-threads" style="font-size: 0.75rem;">Min Threads/Wkr</label>
+                                    <input type="number" class="form-input" id="concurrency-bounded-min-threads" name="scaling_min_connections" data-testid="concurrency-bounded-min-threads" x-model.number="config.scaling.min_connections" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Max Threads/Wkr</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.max_connections" min="1" max="200" step="1" placeholder="200">
+                                    <label class="form-label" for="concurrency-bounded-max-threads" style="font-size: 0.75rem;">Max Threads/Wkr</label>
+                                    <input type="number" class="form-input" id="concurrency-bounded-max-threads" name="scaling_max_connections" data-testid="concurrency-bounded-max-threads" x-model.number="config.scaling.max_connections" min="1" max="200" step="1" placeholder="200">
                                 </div>
                             </div>
                         </div>
                         <!-- Resource Guardrails -->
                         <div style="padding: 0.5rem; border-radius: 0.25rem; background-color: #f9fafb; border: 1px solid #e5e7eb;">
-                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
-                                <input type="checkbox" x-model="config.guardrails.enabled" style="margin: 0;">
+                            <label for="concurrency-guardrails-enabled" style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
+                                <input type="checkbox" id="concurrency-guardrails-enabled" name="guardrails_enabled" data-testid="concurrency-guardrails-enabled" x-model="config.guardrails.enabled" style="margin: 0;">
                                 <span>Resource Guardrails</span>
                             </label>
                             <div x-show="config.guardrails?.enabled !== false" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label" style="font-size: 0.75rem;">CPU %</label>
-                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
+                                    <label class="form-label" for="concurrency-guardrails-cpu" style="font-size: 0.75rem;">CPU %</label>
+                                    <input type="number" class="form-input" id="concurrency-guardrails-cpu" name="guardrails_max_cpu_percent" data-testid="concurrency-guardrails-cpu" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
                                 </div>
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label" style="font-size: 0.75rem;">Memory %</label>
-                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
+                                    <label class="form-label" for="concurrency-guardrails-memory" style="font-size: 0.75rem;">Memory %</label>
+                                    <input type="number" class="form-input" id="concurrency-guardrails-memory" name="guardrails_max_memory_percent" data-testid="concurrency-guardrails-memory" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
                                 </div>
                             </div>
                             <small x-show="config.guardrails?.enabled === false" style="color: #9ca3af; font-size: 0.75rem;">
@@ -647,34 +647,34 @@
                             </div>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Target QPS</label>
-                            <input type="number" class="form-input" x-model.number="config.target_qps" min="1" max="100000" step="1">
-                            <small class="form-text">Operations per second</small>
+                            <label class="form-label" for="qps-target-qps">Target QPS</label>
+                            <input type="number" class="form-input" id="qps-target-qps" name="target_qps" data-testid="qps-target-qps" x-model.number="config.target_qps" min="1" max="100000" step="1" aria-describedby="qps-target-qps-hint">
+                            <small id="qps-target-qps-hint" class="form-text">Operations per second</small>
                         </div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Starting Threads</label>
-                                <input type="number" class="form-input" x-model.number="config.starting_threads" min="0" step="1" placeholder="0">
-                                <small class="form-text">Initial threads (0 = ramp from min)</small>
+                                <label class="form-label" for="qps-starting-threads" style="font-size: 0.75rem;">Starting Threads</label>
+                                <input type="number" class="form-input" id="qps-starting-threads" name="starting_threads" data-testid="qps-starting-threads" x-model.number="config.starting_threads" min="0" step="1" placeholder="0" aria-describedby="qps-starting-threads-hint">
+                                <small id="qps-starting-threads-hint" class="form-text">Initial threads (0 = ramp from min)</small>
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Max Threads/Interval</label>
-                                <input type="number" class="form-input" x-model.number="config.max_thread_increase" min="1" max="200" step="1" placeholder="15">
-                                <small class="form-text">Max thread increase (~10s)</small>
+                                <label class="form-label" for="qps-max-thread-increase" style="font-size: 0.75rem;">Max Threads/Interval</label>
+                                <input type="number" class="form-input" id="qps-max-thread-increase" name="max_thread_increase" data-testid="qps-max-thread-increase" x-model.number="config.max_thread_increase" min="1" max="200" step="1" placeholder="15" aria-describedby="qps-max-thread-increase-hint">
+                                <small id="qps-max-thread-increase-hint" class="form-text">Max thread increase (~10s)</small>
                             </div>
                         </div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem;">
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Warmup (s)</label>
-                                <input type="number" class="form-input" x-model.number="config.warmup" min="0" max="300">
+                                <label class="form-label" for="qps-warmup" style="font-size: 0.75rem;">Warmup (s)</label>
+                                <input type="number" class="form-input" id="qps-warmup" name="warmup" data-testid="qps-warmup" x-model.number="config.warmup" min="0" max="300">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Duration (s)</label>
-                                <input type="number" class="form-input" x-model.number="config.duration" min="10" max="3600">
+                                <label class="form-label" for="qps-duration" style="font-size: 0.75rem;">Duration (s)</label>
+                                <input type="number" class="form-input" id="qps-duration" name="duration" data-testid="qps-duration" x-model.number="config.duration" min="10" max="3600">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Think (ms)</label>
-                                <input type="number" class="form-input" x-model.number="config.think_time" min="0" max="10000">
+                                <label class="form-label" for="qps-think-time" style="font-size: 0.75rem;">Think (ms)</label>
+                                <input type="number" class="form-input" id="qps-think-time" name="think_time" data-testid="qps-think-time" x-model.number="config.think_time" min="0" max="10000">
                             </div>
                         </div>
                     </div>
@@ -686,48 +686,48 @@
                         <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'FIXED'" style="margin-bottom: 0.75rem;">
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                    <label class="form-label" for="qps-fixed-workers" style="font-size: 0.75rem;">Workers</label>
+                                    <input type="number" class="form-input" id="qps-fixed-workers" name="scaling_min_workers" data-testid="qps-fixed-workers" x-model.number="config.scaling.min_workers" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Threads/Worker</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" max="200" step="1">
+                                    <label class="form-label" for="qps-fixed-threads-per-worker" style="font-size: 0.75rem;">Threads/Worker</label>
+                                    <input type="number" class="form-input" id="qps-fixed-threads-per-worker" name="scaling_min_connections" data-testid="qps-fixed-threads-per-worker" x-model.number="config.scaling.min_connections" min="1" max="200" step="1">
                                 </div>
                             </div>
                         </div>
                         <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'" style="margin-bottom: 0.75rem;">
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Min Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                    <label class="form-label" for="qps-bounded-min-workers" style="font-size: 0.75rem;">Min Workers</label>
+                                    <input type="number" class="form-input" id="qps-bounded-min-workers" name="scaling_min_workers" data-testid="qps-bounded-min-workers" x-model.number="config.scaling.min_workers" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Max Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="∞">
+                                    <label class="form-label" for="qps-bounded-max-workers" style="font-size: 0.75rem;">Max Workers</label>
+                                    <input type="number" class="form-input" id="qps-bounded-max-workers" name="scaling_max_workers" data-testid="qps-bounded-max-workers" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="∞">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Min Threads/Wkr</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" step="1">
+                                    <label class="form-label" for="qps-bounded-min-threads" style="font-size: 0.75rem;">Min Threads/Wkr</label>
+                                    <input type="number" class="form-input" id="qps-bounded-min-threads" name="scaling_min_connections" data-testid="qps-bounded-min-threads" x-model.number="config.scaling.min_connections" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Max Threads/Wkr</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.max_connections" min="1" max="200" step="1" placeholder="200">
+                                    <label class="form-label" for="qps-bounded-max-threads" style="font-size: 0.75rem;">Max Threads/Wkr</label>
+                                    <input type="number" class="form-input" id="qps-bounded-max-threads" name="scaling_max_connections" data-testid="qps-bounded-max-threads" x-model.number="config.scaling.max_connections" min="1" max="200" step="1" placeholder="200">
                                 </div>
                             </div>
                         </div>
                         <div style="padding: 0.5rem; border-radius: 0.25rem; background-color: #f9fafb; border: 1px solid #e5e7eb;">
-                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
-                                <input type="checkbox" x-model="config.guardrails.enabled" style="margin: 0;">
+                            <label for="qps-guardrails-enabled" style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
+                                <input type="checkbox" id="qps-guardrails-enabled" name="guardrails_enabled" data-testid="qps-guardrails-enabled" x-model="config.guardrails.enabled" style="margin: 0;">
                                 <span>Resource Guardrails</span>
                             </label>
                             <div x-show="config.guardrails?.enabled !== false" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label" style="font-size: 0.75rem;">CPU %</label>
-                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
+                                    <label class="form-label" for="qps-guardrails-cpu" style="font-size: 0.75rem;">CPU %</label>
+                                    <input type="number" class="form-input" id="qps-guardrails-cpu" name="guardrails_max_cpu_percent" data-testid="qps-guardrails-cpu" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
                                 </div>
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label" style="font-size: 0.75rem;">Memory %</label>
-                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
+                                    <label class="form-label" for="qps-guardrails-memory" style="font-size: 0.75rem;">Memory %</label>
+                                    <input type="number" class="form-input" id="qps-guardrails-memory" name="guardrails_max_memory_percent" data-testid="qps-guardrails-memory" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
                                 </div>
                             </div>
                             <small x-show="config.guardrails?.enabled === false" style="color: #9ca3af; font-size: 0.75rem;">
@@ -751,20 +751,20 @@
                         </div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem;">
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Start Threads</label>
-                                <input type="number" class="form-input" x-model.number="config.start_concurrency" min="1" max="100" step="1">
+                                <label class="form-label" for="findmax-start-threads" style="font-size: 0.75rem;">Start Threads</label>
+                                <input type="number" class="form-input" id="findmax-start-threads" name="start_concurrency" data-testid="findmax-start-threads" x-model.number="config.start_concurrency" min="1" max="100" step="1">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Increment</label>
-                                <input type="number" class="form-input" x-model.number="config.concurrency_increment" min="1" max="100" step="1">
+                                <label class="form-label" for="findmax-increment" style="font-size: 0.75rem;">Increment</label>
+                                <input type="number" class="form-input" id="findmax-increment" name="concurrency_increment" data-testid="findmax-increment" x-model.number="config.concurrency_increment" min="1" max="100" step="1">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Step Duration (s)</label>
-                                <input type="number" class="form-input" x-model.number="config.step_duration_seconds" min="10" max="300" step="5">
+                                <label class="form-label" for="findmax-step-duration" style="font-size: 0.75rem;">Step Duration (s)</label>
+                                <input type="number" class="form-input" id="findmax-step-duration" name="step_duration_seconds" data-testid="findmax-step-duration" x-model.number="config.step_duration_seconds" min="10" max="300" step="5">
                             </div>
                             <div class="form-group">
-                                <label class="form-label" style="font-size: 0.75rem;">Warmup (s)</label>
-                                <input type="number" class="form-input" x-model.number="config.warmup" min="0" max="300">
+                                <label class="form-label" for="findmax-warmup" style="font-size: 0.75rem;">Warmup (s)</label>
+                                <input type="number" class="form-input" id="findmax-warmup" name="warmup" data-testid="findmax-warmup" x-model.number="config.warmup" min="0" max="300">
                             </div>
                         </div>
 
@@ -774,33 +774,33 @@
                             </summary>
                             <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem;">
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">QPS Drop %</label>
-                                    <input type="number" class="form-input" x-model.number="config.qps_stability_pct" min="1" max="50" step="1">
+                                    <label class="form-label" for="findmax-qps-stability" style="font-size: 0.75rem;">QPS Drop %</label>
+                                    <input type="number" class="form-input" id="findmax-qps-stability" name="qps_stability_pct" data-testid="findmax-qps-stability" x-model.number="config.qps_stability_pct" min="1" max="50" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">P95 Latency %</label>
-                                    <input type="number" class="form-input" x-model.number="config.latency_stability_pct" min="5" max="100" step="5">
+                                    <label class="form-label" for="findmax-latency-stability" style="font-size: 0.75rem;">P95 Latency %</label>
+                                    <input type="number" class="form-input" id="findmax-latency-stability" name="latency_stability_pct" data-testid="findmax-latency-stability" x-model.number="config.latency_stability_pct" min="5" max="100" step="5">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Max Error %</label>
-                                    <input type="number" class="form-input" x-model.number="config.max_error_rate_pct" min="0" max="100" step="0.5">
+                                    <label class="form-label" for="findmax-max-error-rate" style="font-size: 0.75rem;">Max Error %</label>
+                                    <input type="number" class="form-input" id="findmax-max-error-rate" name="max_error_rate_pct" data-testid="findmax-max-error-rate" x-model.number="config.max_error_rate_pct" min="0" max="100" step="0.5">
                                 </div>
                             </div>
                         </details>
 
                         <div style="padding: 0.5rem; border-radius: 0.25rem; background-color: #f9fafb; border: 1px solid #e5e7eb; max-width: 350px;">
-                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
-                                <input type="checkbox" x-model="config.guardrails.enabled" style="margin: 0;">
+                            <label for="findmax-guardrails-enabled" style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; font-weight: 500;">
+                                <input type="checkbox" id="findmax-guardrails-enabled" name="guardrails_enabled" data-testid="findmax-guardrails-enabled" x-model="config.guardrails.enabled" style="margin: 0;">
                                 <span>Resource Guardrails</span>
                             </label>
                             <div x-show="config.guardrails?.enabled !== false" style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label" style="font-size: 0.75rem;">CPU %</label>
-                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
+                                    <label class="form-label" for="findmax-guardrails-cpu" style="font-size: 0.75rem;">CPU %</label>
+                                    <input type="number" class="form-input" id="findmax-guardrails-cpu" name="guardrails_max_cpu_percent" data-testid="findmax-guardrails-cpu" x-model.number="config.guardrails.max_cpu_percent" min="1" max="100" step="1">
                                 </div>
                                 <div class="form-group" style="margin-bottom: 0;">
-                                    <label class="form-label" style="font-size: 0.75rem;">Memory %</label>
-                                    <input type="number" class="form-input" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
+                                    <label class="form-label" for="findmax-guardrails-memory" style="font-size: 0.75rem;">Memory %</label>
+                                    <input type="number" class="form-input" id="findmax-guardrails-memory" name="guardrails_max_memory_percent" data-testid="findmax-guardrails-memory" x-model.number="config.guardrails.max_memory_percent" min="1" max="100" step="1">
                                 </div>
                             </div>
                             <small x-show="config.guardrails?.enabled === false" style="color: #9ca3af; font-size: 0.75rem;">
@@ -819,12 +819,12 @@
                         <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'FIXED'" style="margin-bottom: 0.75rem;">
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                    <label class="form-label" for="findmax-fixed-workers" style="font-size: 0.75rem;">Workers</label>
+                                    <input type="number" class="form-input" id="findmax-fixed-workers" name="scaling_min_workers" data-testid="findmax-fixed-workers" x-model.number="config.scaling.min_workers" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Threads/Worker</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" max="200" step="1">
+                                    <label class="form-label" for="findmax-fixed-threads-per-worker" style="font-size: 0.75rem;">Threads/Worker</label>
+                                    <input type="number" class="form-input" id="findmax-fixed-threads-per-worker" name="scaling_min_connections" data-testid="findmax-fixed-threads-per-worker" x-model.number="config.scaling.min_connections" min="1" max="200" step="1">
                                 </div>
                             </div>
                             <div style="padding: 0.5rem; border-radius: 0.25rem; font-size: 0.875rem; background-color: #dbeafe; color: #1e40af;">
@@ -835,20 +835,20 @@
                         <div x-show="String(config.scaling?.mode || 'AUTO').toUpperCase() === 'BOUNDED'" style="margin-bottom: 0.75rem;">
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem;">
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Min Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_workers" min="1" step="1">
+                                    <label class="form-label" for="findmax-bounded-min-workers" style="font-size: 0.75rem;">Min Workers</label>
+                                    <input type="number" class="form-input" id="findmax-bounded-min-workers" name="scaling_min_workers" data-testid="findmax-bounded-min-workers" x-model.number="config.scaling.min_workers" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Max Workers</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="∞">
+                                    <label class="form-label" for="findmax-bounded-max-workers" style="font-size: 0.75rem;">Max Workers</label>
+                                    <input type="number" class="form-input" id="findmax-bounded-max-workers" name="scaling_max_workers" data-testid="findmax-bounded-max-workers" x-model.number="config.scaling.max_workers" min="1" step="1" placeholder="∞">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Min Threads/Wkr</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.min_connections" min="1" step="1">
+                                    <label class="form-label" for="findmax-bounded-min-threads" style="font-size: 0.75rem;">Min Threads/Wkr</label>
+                                    <input type="number" class="form-input" id="findmax-bounded-min-threads" name="scaling_min_connections" data-testid="findmax-bounded-min-threads" x-model.number="config.scaling.min_connections" min="1" step="1">
                                 </div>
                                 <div class="form-group">
-                                    <label class="form-label" style="font-size: 0.75rem;">Max Threads/Wkr</label>
-                                    <input type="number" class="form-input" x-model.number="config.scaling.max_connections" min="1" max="200" step="1" placeholder="200">
+                                    <label class="form-label" for="findmax-bounded-max-threads" style="font-size: 0.75rem;">Max Threads/Wkr</label>
+                                    <input type="number" class="form-input" id="findmax-bounded-max-threads" name="scaling_max_connections" data-testid="findmax-bounded-max-threads" x-model.number="config.scaling.max_connections" min="1" max="200" step="1" placeholder="200">
                                 </div>
                             </div>
                         </div>
@@ -888,8 +888,8 @@
                     :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading || (mode === 'edit' && !isDirty())"
                     @click="(hasExistingPools() && !arePoolsStale()) ? submitTest() : saveAndPrepare()"
                     :title="(hasExistingPools() && !arePoolsStale()) 
-                        ? 'Saves template settings without regenerating value pools' 
-                        : 'Saves template and generates value pools via Snowflake SAMPLE. Value pools provide realistic parameter values and skip expensive table profiling on each run.'"
+                        ? 'Saves template settings without refreshing table metadata' 
+                        : 'Saves template and samples key values from table. This provides realistic parameter values and avoids expensive table profiling on each run.'"
                 >
                     <span class="loading-spinner" x-show="saveAndPrepareLoading || isSaving"></span>
                     <span x-text="(saveAndPrepareLoading || isSaving) 
@@ -916,8 +916,8 @@
                         @click="saveAndPrepare(); saveMenuOpen = false"
                         :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading || (mode === 'edit' && !isDirty())"
                     >
-                        <span class="split-btn-menu-label" x-text="mode === 'edit' ? 'Update & Populate' : 'Save & Populate'"></span>
-                        <span class="split-btn-menu-desc">Generates value pools for realistic benchmark parameters</span>
+                        <span class="split-btn-menu-label" x-text="mode === 'edit' ? 'Update & Refresh Metadata' : 'Save & Refresh Metadata'"></span>
+                        <span class="split-btn-menu-desc">Samples key values from table for realistic benchmark parameters</span>
                     </button>
                     <button
                         type="button"
@@ -926,7 +926,7 @@
                         :disabled="isSaving || (mode === 'edit' && !isDirty())"
                     >
                         <span class="split-btn-menu-label" x-text="mode === 'edit' ? 'Update Only' : 'Save Only'"></span>
-                        <span class="split-btn-menu-desc">Quick save without value pools — useful when iterating on settings</span>
+                        <span class="split-btn-menu-desc">Quick save without refreshing metadata — useful when iterating on settings</span>
                     </button>
                 </div>
             </div>
@@ -945,27 +945,51 @@
         </fieldset>
     </form>
 
-    <!-- Value Pool Status (shown in view mode) -->
+    <!-- Table Metadata Status (shown in view mode) -->
     <div x-show="isReadOnly && loadedTemplate" class="card">
-        <div class="card-title">Value Pool Status</div>
+        <div class="card-title">Table Metadata</div>
         
         <div x-show="!config.ai_workload || !config.ai_workload.pool_id" class="alert alert-warning">
-            <strong>Not populated.</strong> This template has not been populated with value pools.
-            <span x-show="hasResults">Copy this template to create an editable version that can be populated.</span>
+            <div class="flex items-center justify-between">
+                <div>
+                    <strong>Not initialized.</strong> Table metadata has not been collected for this template.
+                    Click "Update Table Metadata" to sample key values from the table for realistic benchmark parameters.
+                </div>
+                <button 
+                    type="button" 
+                    class="btn btn-sm btn-primary ml-4"
+                    :disabled="updateMetadataLoading"
+                    @click="updateTableMetadata()"
+                >
+                    <span class="loading-spinner" x-show="updateMetadataLoading"></span>
+                    <span x-text="updateMetadataLoading ? 'Updating…' : 'Update Table Metadata'"></span>
+                </button>
+            </div>
         </div>
 
         <div x-show="aiPrepError && isReadOnly" class="alert alert-error mt-3">
-            <strong>Value pool population failed.</strong>
+            <strong>Metadata update failed.</strong>
             <span x-text="aiPrepError"></span>
         </div>
 
         <div x-show="config.ai_workload && config.ai_workload.pool_id" class="alert alert-success">
             <div class="text-sm">
-                <div>
-                    <strong>Populated:</strong> Yes
-                    <span x-show="config.ai_workload?.prepared_at">
-                        • <strong>At:</strong> <code x-text="config.ai_workload?.prepared_at || ''"></code>
-                    </span>
+                <div class="flex items-center justify-between">
+                    <div>
+                        <strong>Initialized:</strong> Yes
+                        <span x-show="config.ai_workload?.prepared_at">
+                            • <strong>At:</strong> <code x-text="config.ai_workload?.prepared_at || ''"></code>
+                        </span>
+                    </div>
+                    <button 
+                        type="button" 
+                        class="btn btn-sm btn-secondary"
+                        :disabled="updateMetadataLoading"
+                        @click="updateTableMetadata()"
+                    >
+                        <span class="loading-spinner" x-show="updateMetadataLoading"></span>
+                        <span x-text="updateMetadataLoading ? 'Updating…' : 'Refresh Metadata'"></span>
+                    </button>
                 </div>
                 <div class="mt-1" x-show="config.ai_workload?.pool_id">
                     <strong>Pool ID:</strong> <code x-text="config.ai_workload?.pool_id || ''"></code>
@@ -1041,7 +1065,7 @@
     >
         <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center mb-4">
-                <h3 class="text-lg font-semibold">SQL Parameters & Value Pools</h3>
+                <h3 class="text-lg font-semibold">SQL Parameters & Table Metadata</h3>
                 <button 
                     type="button" 
                     class="text-gray-500 hover:text-gray-700 text-2xl"
@@ -1055,7 +1079,7 @@
                     <p class="text-gray-700">
                         Use <code class="bg-gray-100 px-1 rounded">?</code> (Snowflake) or 
                         <code class="bg-gray-100 px-1 rounded">$1, $2</code> (Postgres) as parameter placeholders.
-                        These are replaced at runtime with values from the <strong>value pool</strong>.
+                        These are replaced at runtime with sampled values from your table.
                     </p>
                 </div>
 
@@ -1068,11 +1092,11 @@
                 </div>
 
                 <div>
-                    <h4 class="font-semibold text-gray-900 mb-1">Value Pools</h4>
+                    <h4 class="font-semibold text-gray-900 mb-1">Table Metadata</h4>
                     <p class="text-gray-700">
-                        When you click <strong>"Save & Prepare"</strong>, the system samples real values from your table's 
-                        key column (auto-detected) and stores them in a <em>value pool</em>. During benchmark execution, 
-                        the <code class="bg-gray-100 px-1 rounded">?</code> parameters are bound from this pool, ensuring 
+                        When you click <strong>"Update Table Metadata"</strong>, the system samples real values from your table's 
+                        key column (auto-detected) and stores them for the benchmark. During execution, 
+                        the <code class="bg-gray-100 px-1 rounded">?</code> parameters are bound from these sampled values, ensuring 
                         queries hit actual rows in your table.
                     </p>
                 </div>
@@ -1096,8 +1120,8 @@ WHERE o.ORDER_KEY = ?</pre>
                 <div>
                     <h4 class="font-semibold text-gray-900 mb-1">Query Types</h4>
                     <ul class="list-disc list-inside text-gray-700 space-y-1">
-                        <li><strong>Point Lookup:</strong> Single-row fetch by key (uses KEY pool)</li>
-                        <li><strong>Range Scan:</strong> Multi-row fetch by range (uses KEY or RANGE pool)</li>
+                        <li><strong>Point Lookup:</strong> Single-row fetch by key (uses sampled key values)</li>
+                        <li><strong>Range Scan:</strong> Multi-row fetch by range (uses sampled key or time values)</li>
                         <li><strong>Insert:</strong> New row with generated values</li>
                         <li><strong>Update:</strong> Modify existing row by key</li>
                     </ul>
@@ -1145,7 +1169,7 @@ function testConfiguration() {
                 max_connections: null,
             },
             guardrails: {
-                enabled: true,
+                enabled: false,
                 max_cpu_percent: 80,
                 max_memory_percent: 85,
             },
@@ -1154,8 +1178,8 @@ function testConfiguration() {
             start_concurrency: 5,
             concurrency_increment: 10,
             step_duration_seconds: 30,
-            qps_stability_pct: 5.0,
-            latency_stability_pct: 20.0,
+            qps_stability_pct: 40.0,
+            latency_stability_pct: 100.0,
             max_error_rate_pct: 1.0,
             // Canonical storage model: templates persist CUSTOM SQL + weights.
             // "Mix preset" is a UI helper that only adjusts weights.
@@ -1237,6 +1261,7 @@ function testConfiguration() {
         },
         aiSqlAdjustLoading: false,
         saveAndPrepareLoading: false,
+        updateMetadataLoading: false,
         prepareTemplateLoading: false,
         copyTemplateLoading: false,
         deleteTemplateLoading: false,
@@ -2257,9 +2282,9 @@ function testConfiguration() {
         async loadWarehouses() {
             try {
                 const [warehousesResp, infoResp] = await Promise.all([
-                    // Include all warehouses so we can display (and warn about) templates
-                    // that were previously saved with the results warehouse.
-                    fetch('/api/warehouses/'),
+                    // Exclude results warehouse from selection - it's reserved for backend operations.
+                    // Warning logic below still handles templates previously saved with results warehouse.
+                    fetch('/api/warehouses/?exclude_results=true'),
                     fetch('/api/info'),
                 ]);
                 if (warehousesResp.ok) {
@@ -2753,20 +2778,20 @@ function testConfiguration() {
 
                     if (prepareAfterSave) {
                         // Run preparation immediately after save, and show results in-place.
-                        // Defer toast until value pools are complete.
+                        // Defer toast until metadata refresh is complete.
                         await this.prepareAiWorkload();
                         if (this.aiPrepError) {
-                            // Template saved, but value pool population failed.
+                            // Template saved, but metadata refresh failed.
                             window.toast.warning(
                                 (this.mode === 'edit' ? 'Template updated' : 'Template created') +
-                                    ', but value pool population failed: ' +
+                                    ', but table metadata refresh failed: ' +
                                     this.aiPrepError,
                             );
                         } else {
                             window.toast.success(
                                 this.mode === 'edit'
-                                    ? 'Template updated and value pools populated.'
-                                    : 'Template created and value pools populated.',
+                                    ? 'Template updated and table metadata refreshed.'
+                                    : 'Template created and table metadata collected.',
                             );
                         }
                     } else {
@@ -2879,6 +2904,45 @@ function testConfiguration() {
                 this.aiPrepError = e?.message || String(e);
             } finally {
                 this.aiPrepLoading = false;
+            }
+        },
+
+        async updateTableMetadata() {
+            if (!this.loadedTemplate || !this.loadedTemplate.template_id) {
+                window.toast.warning('No template loaded.');
+                return;
+            }
+            if (this.updateMetadataLoading) return;
+
+            this.updateMetadataLoading = true;
+            this.aiPrepError = null;
+            try {
+                const resp = await fetch(
+                    `/api/templates/${encodeURIComponent(this.loadedTemplate.template_id)}/ai/prepare`,
+                    { method: 'POST' }
+                );
+                const payload = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    const detail = payload?.detail;
+                    const errorMsg = typeof detail === 'string' 
+                        ? detail 
+                        : (detail?.message || detail?.detail || JSON.stringify(detail) || 'Failed to update metadata');
+                    throw new Error(errorMsg);
+                }
+                
+                // Update local config with new ai_workload data
+                if (payload.ai_workload) {
+                    this.config.ai_workload = payload.ai_workload;
+                }
+                // Reload the template to get fresh data
+                await this.loadTemplate(this.loadedTemplate.template_id);
+                window.toast.success('Table metadata updated successfully.');
+            } catch (e) {
+                console.error('Failed to update table metadata:', e);
+                this.aiPrepError = e.message || String(e);
+                window.toast.error(`Failed to update table metadata: ${e.message || e}`);
+            } finally {
+                this.updateMetadataLoading = false;
             }
         },
 
@@ -3137,8 +3201,8 @@ function testConfiguration() {
                     start_concurrency: 5,
                     concurrency_increment: 10,
                     step_duration_seconds: 30,
-                    qps_stability_pct: 5.0,
-                    latency_stability_pct: 20.0,
+                    qps_stability_pct: 40.0,
+                    latency_stability_pct: 100.0,
                     max_error_rate_pct: 1.0,
                     workload_type: 'CUSTOM',
                     mix_preset: 'MIXED',

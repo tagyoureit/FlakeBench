@@ -180,10 +180,7 @@ window.DashboardMixins.dataLoading = {
       if (activePhases.includes(phaseUpper) && (this.mode === "history" || !wsOpen)) {
         this.loadWarehouseDetails();
       }
-      // History view: load aggregated error summary (Snowflake query history + local errors).
-      if (this.mode === "history") {
-        this.loadErrorSummary();
-      }
+      // Note: loadErrorSummary() is now called from init() in parallel with other loads
 
       const sfAvail = !!data.sf_latency_available;
       if (!this.latencyViewUserSelected) {
@@ -231,23 +228,19 @@ window.DashboardMixins.dataLoading = {
           : 0;
         this.metrics.total_errors = data.failed_operations || 0;
         
-        // Load historical metrics for completed tests to populate charts
-        await this.loadHistoricalMetrics();
-        await this.loadNodeMetrics();
+        // For history mode, these loads are already initiated from init() in parallel
+        // Only trigger them here for live mode tests that complete
+        if (this.mode !== "history") {
+          // Load historical metrics for completed tests to populate charts
+          // Run these in parallel since they're independent
+          const parallelLoads = [
+            this.loadHistoricalMetrics(),
+            this.loadNodeMetrics(),
+          ];
 
-      // On history view, load per-second warehouse series once post-processing is complete.
-      // Warehouse timeseries (MCW chart) is available during PROCESSING phase and doesn't
-      // require full enrichment to complete - it uses V_WAREHOUSE_TIMESERIES which is
-      // populated independently.
-      if (this.mode === "history" && this.isFinalMetricsReady()) {
-        this.resetWarehouseTimeseriesRetry();
-        await this.loadWarehouseTimeseries();
-      }
-
-      // Load overhead timeseries independently (doesn't require full enrichment complete)
-      if (this.mode === "history" && this.isFinalMetricsReady()) {
-        await this.loadOverheadTimeseries();
-      }
+          // Wait for all parallel loads to complete
+          await Promise.all(parallelLoads);
+        }
       }
     } catch (e) {
       console.error("Failed to load test info:", e);

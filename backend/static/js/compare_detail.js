@@ -97,22 +97,21 @@ function compareDetail() {
    *
    * @param {Array} snapshots
    * @param {string} yKey
-   * @param {boolean} showWarmup - whether to include warmup data
-   * @param {number|null} warmupEnd - warmup end elapsed seconds (to offset x when hiding warmup)
+   * @param {object} options
+   * @param {boolean} options.showWarmup - whether to include warmup data
+   * @param {number} options.alignmentOffset - x-axis shift applied to the series
    * @returns {Array<{x:number,y:number}>}
    */
-  const toElapsedPoints = (snapshots, yKey, showWarmup = true, warmupEnd = null) => {
+  const toElapsedPoints = (snapshots, yKey, options = {}) => {
+    const showWarmup = options.showWarmup !== false;
+    const alignmentOffset = Number(options.alignmentOffset || 0);
     const rows = Array.isArray(snapshots) ? snapshots : [];
     const out = [];
     for (const s of rows) {
       if (!s) continue;
       // Filter out warmup data if showWarmup is false
       if (!showWarmup && s.warmup) continue;
-      let x = Number(s.elapsed_seconds || 0);
-      // Offset x by warmup end when hiding warmup
-      if (!showWarmup && warmupEnd != null) {
-        x = x - warmupEnd;
-      }
+      const x = Number(s.elapsed_seconds || 0) + alignmentOffset;
       const y = Number(s[yKey] || 0);
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       out.push({ x, y });
@@ -232,6 +231,7 @@ function compareDetail() {
     warmupEndA: null,
     warmupEndB: null,
     showWarmup: false,
+    alignmentMode: "wall_clock",
 
     // AI Comparison Analysis state
     aiCompareAnalysis: null,
@@ -298,6 +298,7 @@ function compareDetail() {
       const showWarmup = this.showWarmup;
       const warmupEndA = this.warmupEndA;
       const warmupEndB = this.warmupEndB;
+      const alignment = this.getAlignmentConfig(warmupEndA, warmupEndB);
 
       // Build warmup annotations when showing warmup
       const warmupAnnotations = [];
@@ -305,24 +306,30 @@ function compareDetail() {
         if (warmupEndA != null && warmupEndA > 0) {
           warmupAnnotations.push({
             key: "warmupA",
-            x: warmupEndA,
-            label: "Primary Warmup End",
+            x: warmupEndA + alignment.offsetA,
+            label: "Primary Measurement Start",
             color: "rgba(59, 130, 246, 0.8)",
           });
         }
         if (warmupEndB != null && warmupEndB > 0) {
           warmupAnnotations.push({
             key: "warmupB",
-            x: warmupEndB,
-            label: "Secondary Warmup End",
+            x: warmupEndB + alignment.offsetB,
+            label: "Secondary Measurement Start",
             color: "rgba(156, 163, 175, 0.8)",
           });
         }
       }
 
       // Throughput (QPS)
-      const opsA = toElapsedPoints(this.metricsA, "ops_per_sec", showWarmup, warmupEndA);
-      const opsB = toElapsedPoints(this.metricsB, "ops_per_sec", showWarmup, warmupEndB);
+      const opsA = toElapsedPoints(this.metricsA, "ops_per_sec", {
+        showWarmup,
+        alignmentOffset: alignment.offsetA,
+      });
+      const opsB = toElapsedPoints(this.metricsB, "ops_per_sec", {
+        showWarmup,
+        alignmentOffset: alignment.offsetB,
+      });
       renderLineChart(
         "compareThroughputChart",
         [
@@ -343,12 +350,30 @@ function compareDetail() {
       );
 
       // Latency (P50/P95/P99)
-      const p50A = toElapsedPoints(this.metricsA, "p50_latency", showWarmup, warmupEndA);
-      const p95A = toElapsedPoints(this.metricsA, "p95_latency", showWarmup, warmupEndA);
-      const p99A = toElapsedPoints(this.metricsA, "p99_latency", showWarmup, warmupEndA);
-      const p50B = toElapsedPoints(this.metricsB, "p50_latency", showWarmup, warmupEndB);
-      const p95B = toElapsedPoints(this.metricsB, "p95_latency", showWarmup, warmupEndB);
-      const p99B = toElapsedPoints(this.metricsB, "p99_latency", showWarmup, warmupEndB);
+      const p50A = toElapsedPoints(this.metricsA, "p50_latency", {
+        showWarmup,
+        alignmentOffset: alignment.offsetA,
+      });
+      const p95A = toElapsedPoints(this.metricsA, "p95_latency", {
+        showWarmup,
+        alignmentOffset: alignment.offsetA,
+      });
+      const p99A = toElapsedPoints(this.metricsA, "p99_latency", {
+        showWarmup,
+        alignmentOffset: alignment.offsetA,
+      });
+      const p50B = toElapsedPoints(this.metricsB, "p50_latency", {
+        showWarmup,
+        alignmentOffset: alignment.offsetB,
+      });
+      const p95B = toElapsedPoints(this.metricsB, "p95_latency", {
+        showWarmup,
+        alignmentOffset: alignment.offsetB,
+      });
+      const p99B = toElapsedPoints(this.metricsB, "p99_latency", {
+        showWarmup,
+        alignmentOffset: alignment.offsetB,
+      });
 
       renderLineChart(
         "compareLatencyChart",
@@ -400,8 +425,14 @@ function compareDetail() {
 
       const keyA = isPgA ? "active_connections" : "sf_running";
       const keyB = isPgB ? "active_connections" : "sf_running";
-      const ptsA = toElapsedPoints(this.metricsA, keyA, showWarmup, warmupEndA);
-      const ptsB = toElapsedPoints(this.metricsB, keyB, showWarmup, warmupEndB);
+      const ptsA = toElapsedPoints(this.metricsA, keyA, {
+        showWarmup,
+        alignmentOffset: alignment.offsetA,
+      });
+      const ptsB = toElapsedPoints(this.metricsB, keyB, {
+        showWarmup,
+        alignmentOffset: alignment.offsetB,
+      });
       renderLineChart(
         "compareConcurrencyChart",
         [
@@ -428,6 +459,95 @@ function compareDetail() {
       if (this.errorTimelineA || this.errorTimelineB) {
         this.renderErrorTimelineChart();
       }
+    },
+
+    toggleAlignmentMode() {
+      this.alignmentMode =
+        this.alignmentMode === "warmup_end" ? "wall_clock" : "warmup_end";
+      this.renderCharts();
+      if (this.errorTimelineA || this.errorTimelineB) {
+        this.renderErrorTimelineChart();
+      }
+    },
+
+    getAlignmentLabel() {
+      return this.alignmentMode === "warmup_end"
+        ? "Align: Warmup End"
+        : "Align: Wall Clock";
+    },
+
+    getAlignmentIndicatorLabel() {
+      return this.alignmentMode === "warmup_end"
+        ? "Warmup-end aligned"
+        : "Wall-clock aligned";
+    },
+
+    getAlignmentConfig(warmupEndA, warmupEndB) {
+      if (this.alignmentMode !== "warmup_end") {
+        return { offsetA: 0, offsetB: 0 };
+      }
+      const a =
+        warmupEndA != null && Number.isFinite(Number(warmupEndA))
+          ? Number(warmupEndA)
+          : null;
+      const b =
+        warmupEndB != null && Number.isFinite(Number(warmupEndB))
+          ? Number(warmupEndB)
+          : null;
+      if (a == null || b == null) {
+        return { offsetA: 0, offsetB: 0 };
+      }
+      const target = Math.max(a, b);
+      return { offsetA: target - a, offsetB: target - b };
+    },
+
+    getAlignmentDebug() {
+      const warmupA =
+        this.warmupEndA != null && Number.isFinite(Number(this.warmupEndA))
+          ? Number(this.warmupEndA)
+          : null;
+      const warmupB =
+        this.warmupEndB != null && Number.isFinite(Number(this.warmupEndB))
+          ? Number(this.warmupEndB)
+          : null;
+      const alignment = this.getAlignmentConfig(warmupA, warmupB);
+      const maxElapsedA = Math.max(
+        0,
+        ...((this.metricsA || []).map((m) => Number(m && m.elapsed_seconds ? m.elapsed_seconds : 0))),
+      );
+      const maxElapsedB = Math.max(
+        0,
+        ...((this.metricsB || []).map((m) => Number(m && m.elapsed_seconds ? m.elapsed_seconds : 0))),
+      );
+      return {
+        mode: this.alignmentMode,
+        showWarmup: this.showWarmup,
+        warmupA,
+        warmupB,
+        offsetA: alignment.offsetA,
+        offsetB: alignment.offsetB,
+        maxElapsedA,
+        maxElapsedB,
+        projectedMaxA: maxElapsedA + alignment.offsetA,
+        projectedMaxB: maxElapsedB + alignment.offsetB,
+      };
+    },
+
+    getDebugLineToggles() {
+      const d = this.getAlignmentDebug();
+      return `toggles: warmup=${d.showWarmup ? "on" : "off"} align=${d.mode}`;
+    },
+
+    getDebugLinePrimary() {
+      const d = this.getAlignmentDebug();
+      const warmup = d.warmupA == null ? "null" : `${d.warmupA.toFixed(3)}s`;
+      return `primary: warmup=${warmup} offset=${d.offsetA.toFixed(3)}s max=${d.maxElapsedA.toFixed(1)}s projected=${d.projectedMaxA.toFixed(1)}s`;
+    },
+
+    getDebugLineSecondary() {
+      const d = this.getAlignmentDebug();
+      const warmup = d.warmupB == null ? "null" : `${d.warmupB.toFixed(3)}s`;
+      return `secondary: warmup=${warmup} offset=${d.offsetB.toFixed(3)}s max=${d.maxElapsedB.toFixed(1)}s projected=${d.projectedMaxB.toFixed(1)}s`;
     },
 
     // -------------------------------------------------------------------------
@@ -568,6 +688,7 @@ function compareDetail() {
       const warmupEndB = errB && errB.warmup_end_elapsed_seconds != null
         ? Number(errB.warmup_end_elapsed_seconds)
         : null;
+      const alignment = this.getAlignmentConfig(warmupEndA, warmupEndB);
 
       // Build warmup annotations when showing warmup
       const warmupAnnotations = [];
@@ -575,39 +696,36 @@ function compareDetail() {
         if (warmupEndA != null && warmupEndA > 0) {
           warmupAnnotations.push({
             key: "warmupA",
-            x: warmupEndA,
-            label: "Primary Warmup End",
+            x: warmupEndA + alignment.offsetA,
+            label: "Primary Measurement Start",
             color: "rgba(59, 130, 246, 0.8)",
           });
         }
         if (warmupEndB != null && warmupEndB > 0) {
           warmupAnnotations.push({
             key: "warmupB",
-            x: warmupEndB,
-            label: "Secondary Warmup End",
+            x: warmupEndB + alignment.offsetB,
+            label: "Secondary Measurement Start",
             color: "rgba(156, 163, 175, 0.8)",
           });
         }
       }
 
       // Convert error timeline points to chart data
-      const toErrorPoints = (timeline, showWarmup, warmupEnd) => {
+      const toErrorPoints = (timeline, showWarmup, alignmentOffset) => {
         if (!timeline || !timeline.points) return [];
         const out = [];
         for (const p of timeline.points) {
           if (!showWarmup && p.warmup) continue;
-          let x = Number(p.elapsed_seconds || 0);
-          if (!showWarmup && warmupEnd != null) {
-            x = x - warmupEnd;
-          }
+          const x = Number(p.elapsed_seconds || 0) + Number(alignmentOffset || 0);
           const y = Number(p.error_rate_pct || 0);
           out.push({ x, y });
         }
         return out;
       };
 
-      const ptsA = toErrorPoints(errA, showWarmup, warmupEndA);
-      const ptsB = toErrorPoints(errB, showWarmup, warmupEndB);
+      const ptsA = toErrorPoints(errA, showWarmup, alignment.offsetA);
+      const ptsB = toErrorPoints(errB, showWarmup, alignment.offsetB);
 
       renderLineChart(
         "compareErrorTimelineChart",
@@ -703,6 +821,21 @@ function compareDetail() {
     },
 
     /**
+     * Format compact number (like 1.2k, 5M).
+     */
+    formatCompact(val) {
+      const n = typeof val === "number" ? val : Number(val);
+      if (!Number.isFinite(n)) return "0";
+      const abs = Math.abs(n);
+      const fmt = (x, suffix) => `${x.toFixed(2)}${suffix}`;
+      if (abs >= 1e12) return fmt(n / 1e12, "T");
+      if (abs >= 1e9) return fmt(n / 1e9, "B");
+      if (abs >= 1e6) return fmt(n / 1e6, "M");
+      if (abs >= 1e3) return fmt(n / 1e3, "k");
+      return n.toFixed(2);
+    },
+
+    /**
      * Format ops/s with 2 decimal places.
      */
     formatOps(val) {
@@ -778,7 +911,8 @@ function compareDetail() {
     // Suggested Comparisons (Phase 4)
     // -------------------------------------------------------------------------
 
-    suggestedComparisons: [],
+    suggestedBaselineComparisons: [],
+    suggestedSimilarComparisons: [],
     suggestedComparisonsLoading: false,
     suggestedComparisonsError: null,
     suggestedComparisonsLoaded: false,
@@ -794,15 +928,52 @@ function compareDetail() {
         // Load suggestions for the primary test
         const primaryId = this.ids[0];
         const ctx = await fetchJson(
-          `/api/tests/${encodeURIComponent(primaryId)}/compare-context?baseline_count=5&comparable_limit=5&min_similarity=0.55`
+          `/api/tests/${encodeURIComponent(primaryId)}/compare-context?baseline_count=5&comparable_limit=5&min_similarity=0.40`
         );
 
-        if (ctx && !ctx.error && ctx.comparable_candidates) {
-          // Filter out the secondary test if it's already in the comparison
+        if (ctx && !ctx.error) {
+          // Keep baseline and similar suggestions distinct for clearer user intent.
+          const maxSuggestionCards = 6;
+          const targetPerGroup = 3;
           const secondaryId = this.ids.length > 1 ? this.ids[1] : null;
-          this.suggestedComparisons = (ctx.comparable_candidates || []).filter(
-            (c) => c.test_id !== secondaryId
-          );
+          const baselineAll = (ctx.comparable_candidates || [])
+            .filter((c) => c.test_id !== secondaryId)
+            .sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
+
+          const similarAll = (ctx.similar_candidates || [])
+            .filter((c) => c.test_id !== secondaryId)
+            .sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
+
+          // Max 6 total cards. Prefer a balanced 3/3 split when both groups exist.
+          if (baselineAll.length > 0 && similarAll.length > 0) {
+            let baselineTake = Math.min(targetPerGroup, baselineAll.length);
+            let similarTake = Math.min(targetPerGroup, similarAll.length);
+            let used = baselineTake + similarTake;
+
+            if (used < maxSuggestionCards) {
+              let remaining = maxSuggestionCards - used;
+              const baselineLeft = baselineAll.length - baselineTake;
+              const similarLeft = similarAll.length - similarTake;
+
+              if (baselineLeft >= similarLeft) {
+                const addBaseline = Math.min(remaining, baselineLeft);
+                baselineTake += addBaseline;
+                remaining -= addBaseline;
+                similarTake += Math.min(remaining, similarLeft);
+              } else {
+                const addSimilar = Math.min(remaining, similarLeft);
+                similarTake += addSimilar;
+                remaining -= addSimilar;
+                baselineTake += Math.min(remaining, baselineLeft);
+              }
+            }
+
+            this.suggestedBaselineComparisons = baselineAll.slice(0, baselineTake);
+            this.suggestedSimilarComparisons = similarAll.slice(0, similarTake);
+          } else {
+            this.suggestedBaselineComparisons = baselineAll.slice(0, maxSuggestionCards);
+            this.suggestedSimilarComparisons = similarAll.slice(0, maxSuggestionCards);
+          }
         }
         this.suggestedComparisonsLoaded = true;
       } catch (e) {
@@ -810,40 +981,6 @@ function compareDetail() {
         this.suggestedComparisonsError = e && e.message ? e.message : String(e);
       } finally {
         this.suggestedComparisonsLoading = false;
-      }
-    },
-
-    /**
-     * Auto-select the best baseline for the primary test.
-     * Redirects to a new comparison with the top suggestion.
-     */
-    async autoSelectBaseline() {
-      if (!this.ids || this.ids.length < 1) return;
-
-      const primaryId = this.ids[0];
-      
-      try {
-        const ctx = await fetchJson(
-          `/api/tests/${encodeURIComponent(primaryId)}/compare-context?baseline_count=5&comparable_limit=1&min_similarity=0.55`
-        );
-
-        if (ctx && !ctx.error && ctx.vs_previous?.test_id) {
-          // Use the previous test (most recent matching baseline)
-          window.location.href = `/history/compare?ids=${encodeURIComponent(primaryId)},${encodeURIComponent(ctx.vs_previous.test_id)}`;
-        } else if (ctx && ctx.comparable_candidates && ctx.comparable_candidates.length > 0) {
-          // Fall back to top comparable candidate
-          const bestMatch = ctx.comparable_candidates[0];
-          window.location.href = `/history/compare?ids=${encodeURIComponent(primaryId)},${encodeURIComponent(bestMatch.test_id)}`;
-        } else {
-          if (window.toast && typeof window.toast.error === "function") {
-            window.toast.error("No suitable baseline found for this test.");
-          }
-        }
-      } catch (e) {
-        console.error("Auto-select baseline failed:", e);
-        if (window.toast && typeof window.toast.error === "function") {
-          window.toast.error(`Failed to find baseline: ${e.message || e}`);
-        }
       }
     },
 
@@ -862,6 +999,56 @@ function compareDetail() {
     formatSimilarity(score) {
       if (score == null || !Number.isFinite(score)) return "N/A";
       return `${(score * 100).toFixed(0)}%`;
+    },
+
+    formatSuggestionDate(iso) {
+      if (!iso) return "Unknown date";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "Unknown date";
+      return d.toLocaleString();
+    },
+
+    formatRelativeAge(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      const diffMs = Date.now() - d.getTime();
+      const minute = 60 * 1000;
+      const hour = 60 * minute;
+      const day = 24 * hour;
+      if (diffMs < hour) return `${Math.max(1, Math.round(diffMs / minute))}m ago`;
+      if (diffMs < day) return `${Math.round(diffMs / hour)}h ago`;
+      return `${Math.round(diffMs / day)}d ago`;
+    },
+
+    calcSuggestionDeltaPct(primaryValue, candidateValue) {
+      const p = Number(primaryValue);
+      const c = Number(candidateValue);
+      if (!Number.isFinite(p) || !Number.isFinite(c) || p === 0) return null;
+      return ((c - p) / Math.abs(p)) * 100;
+    },
+
+    formatSuggestionDelta(deltaPct, lowerIsBetter = false) {
+      if (deltaPct == null || !Number.isFinite(deltaPct)) {
+        return { text: "N/A", className: "text-gray-500" };
+      }
+      const sign = deltaPct >= 0 ? "+" : "";
+      const isGood = lowerIsBetter ? deltaPct < 0 : deltaPct > 0;
+      return {
+        text: `${sign}${deltaPct.toFixed(1)}%`,
+        className: isGood ? "text-green-600" : "text-red-600",
+      };
+    },
+
+    getSuggestionIntent(suggestion, idx, source) {
+      const conf = String(suggestion?.confidence || "").toUpperCase();
+      if (source === "baseline") {
+        if (idx === 0 && conf === "HIGH") return "Best regression anchor";
+        if (idx === 0) return "Primary baseline candidate";
+        return "Alternative baseline";
+      }
+      if (idx === 0 && conf === "HIGH") return "Best cross-template analog";
+      return "Cross-template alternative";
     },
 
     // -------------------------------------------------------------------------

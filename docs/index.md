@@ -14,6 +14,7 @@ see `SKILL.md`.
 - `ui-architecture.md` — UI contracts and dashboard behavior
 - `scaling.md` — scaling model, guardrails, and sharding
 - `specifications.md` — schemas, payloads, and implementation details
+- `stored-procedures-architecture.md` — stored procedures and semantic view architecture
 
 ## Implementation Plan
 
