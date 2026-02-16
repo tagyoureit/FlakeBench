@@ -2,6 +2,27 @@
 
 How to generate meaningful parameter variety for OLAP workloads.
 
+## When Are Column Profiles Calculated?
+
+**Same timing as OLTP pools: During template preparation** (`prepare_ai_template()`).
+
+When the user clicks "Prepare" in the UI, we:
+1. Profile columns referenced in parameter specs (**NEW** for OLAP)
+2. Sample KEY values for point lookups (existing OLTP)
+3. Sample RANGE values for time scans (existing OLTP)
+
+**Key difference from OLTP pools:**
+
+| Aspect | OLTP Pools | OLAP Profiles |
+|--------|-----------|---------------|
+| What's stored | Every sampled value (5K-1M rows) | Just metadata (~1 row per column) |
+| Storage size | Large | Tiny |
+| Generation | Cycle through pre-sampled values | Generate on-the-fly from metadata |
+| Variety | Limited to pool size | Effectively unlimited (combinatorial) |
+
+**Storage:** Extend `TEMPLATE_VALUE_POOLS` table with `POOL_KIND = 'COLUMN_PROFILE'` 
+or create new `TEMPLATE_COLUMN_PROFILES` table.
+
 ## OLTP vs OLAP Parameter Binding
 
 | Aspect | OLTP (Point Lookup) | OLAP (Aggregation) |

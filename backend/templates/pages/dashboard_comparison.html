@@ -225,5 +225,41 @@
             </a>
         </div>
     </div>
+
+    <!-- Scatter Drill-Through Chooser -->
+    <div
+        x-show="scatterSelectionModalOpen"
+        @keydown.escape.window="closeScatterSelection()"
+        @click.self="closeScatterSelection()"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+        x-transition.opacity
+    >
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-2xl">
+            <div class="flex items-center justify-between border-b px-4 py-3">
+                <h3 class="font-semibold text-gray-900" x-text="scatterSelectionTitle"></h3>
+                <button class="text-gray-500 hover:text-gray-800" @click="closeScatterSelection()" aria-label="Close chooser">&times;</button>
+            </div>
+
+            <div class="px-4 py-3 text-sm text-gray-600 border-b">
+                Multiple points were hit. Choose the benchmark run to open.
+                Hold <span class="font-mono text-xs">Cmd/Ctrl</span> while clicking a point to open directly in a new tab.
+            </div>
+
+            <div class="max-h-80 overflow-y-auto divide-y">
+                <template x-for="item in scatterSelectionItems" :key="item.id">
+                    <div class="flex items-center justify-between gap-3 px-4 py-3">
+                        <button class="text-left flex-1 min-w-0" @click="openScatterRun(item.testId)">
+                            <div class="font-medium text-gray-900 truncate" x-text="item.category + ' - ' + item.testId"></div>
+                            <div class="text-xs text-gray-600" x-text="formatScatterSelectionMetric(item)"></div>
+                            <div class="text-xs text-gray-500" x-text="formatScatterStartTime(item.startedAt)"></div>
+                        </button>
+                        <button class="btn btn-secondary btn-sm shrink-0" @click="openScatterRun(item.testId, true)">
+                            New Tab
+                        </button>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </div>
 </div>
 {% endblock %}

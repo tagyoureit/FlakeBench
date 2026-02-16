@@ -16,6 +16,10 @@ function tableTypeComparison() {
         qpsChartType: 'bar',
         latencyChartType: 'bar',
         scatterData: { qps: null, latency: null },
+        scatterSelectionModalOpen: false,
+        scatterSelectionTitle: '',
+        scatterSelectionMetricLabel: '',
+        scatterSelectionItems: [],
         _cleanupHandler: null,
         _destroyed: false,
         _renderingCharts: false,
@@ -53,6 +57,7 @@ function tableTypeComparison() {
             if (this._cleanupHandler) {
                 document.body.removeEventListener('htmx:beforeSwap', this._cleanupHandler);
             }
+            this.closeScatterSelection();
         },
 
         async loadData() {
@@ -268,9 +273,25 @@ function tableTypeComparison() {
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'xy',
+                        intersect: false,
+                    },
+                    onHover: (event, activeElements) => {
+                        const target = event?.native?.target;
+                        if (target) {
+                            target.style.cursor = activeElements.length ? 'pointer' : 'default';
+                        }
+                    },
+                    onClick: (event, _elements, chart) => {
+                        this.handleScatterChartClick(chart, event, yAxisLabel);
+                    },
                     plugins: {
                         legend: { display: false },
                         tooltip: {
+                            mode: 'nearest',
+                            intersect: false,
                             callbacks: {
                                 label: (context) => {
                                     const pt = context.raw;
@@ -306,6 +327,103 @@ function tableTypeComparison() {
                     }
                 }
             });
+        },
+
+        handleScatterChartClick(chart, event, yAxisLabel) {
+            if (!chart || !event) return;
+            const hitPoints = this.getScatterHitPoints(chart, event, yAxisLabel);
+            if (!hitPoints.length) return;
+
+            const openInNewTab = Boolean(event?.native?.metaKey || event?.native?.ctrlKey);
+            if (hitPoints.length === 1) {
+                this.openScatterRun(hitPoints[0].testId, openInNewTab);
+                return;
+            }
+
+            this.showScatterSelection(hitPoints, yAxisLabel);
+        },
+
+        getScatterHitPoints(chart, event, yAxisLabel) {
+            const intersecting = chart.getElementsAtEventForMode(
+                event,
+                'point',
+                { intersect: true },
+                true
+            );
+
+            let hitElements = intersecting;
+            if (!hitElements.length) {
+                hitElements = chart.getElementsAtEventForMode(
+                    event,
+                    'nearest',
+                    { intersect: false, axis: 'xy' },
+                    true
+                );
+            }
+
+            const deduped = new Map();
+            hitElements.forEach((hit) => {
+                const dataset = chart.data?.datasets?.[hit.datasetIndex];
+                const point = dataset?.data?.[hit.index];
+                if (!point || !point.test_id) return;
+
+                const testId = String(point.test_id);
+                if (deduped.has(testId)) return;
+
+                const numericValue = Number(point.y);
+                deduped.set(testId, {
+                    id: `${testId}-${hit.datasetIndex}-${hit.index}`,
+                    testId,
+                    category: String(point.category || dataset.label || 'UNKNOWN'),
+                    metricValue: Number.isFinite(numericValue) ? numericValue : null,
+                    metricLabel: yAxisLabel,
+                    startedAt: point.start_time || null,
+                });
+            });
+
+            return Array.from(deduped.values());
+        },
+
+        showScatterSelection(items, metricLabel) {
+            this.scatterSelectionItems = items;
+            this.scatterSelectionMetricLabel = metricLabel || 'Metric';
+            this.scatterSelectionTitle = `Select benchmark run (${items.length})`;
+            this.scatterSelectionModalOpen = true;
+        },
+
+        closeScatterSelection() {
+            this.scatterSelectionModalOpen = false;
+            this.scatterSelectionItems = [];
+            this.scatterSelectionTitle = '';
+            this.scatterSelectionMetricLabel = '';
+        },
+
+        openScatterRun(testId, openInNewTab = false) {
+            if (!testId) return;
+            const url = `/dashboard/history/${encodeURIComponent(testId)}`;
+            this.closeScatterSelection();
+            if (openInNewTab) {
+                window.open(url, '_blank', 'noopener');
+                return;
+            }
+            window.location.href = url;
+        },
+
+        formatScatterSelectionMetric(item) {
+            if (!item || item.metricValue === null || item.metricValue === undefined) {
+                return `${this.scatterSelectionMetricLabel}: N/A`;
+            }
+            if (this.scatterSelectionMetricLabel.includes('Latency')) {
+                return `${this.scatterSelectionMetricLabel}: ${this.formatLatency(item.metricValue)}`;
+            }
+            return `${this.scatterSelectionMetricLabel}: ${this.formatNumber(item.metricValue, 1)}`;
+        },
+
+        formatScatterStartTime(startedAt) {
+            if (!startedAt) return 'Start: Unknown';
+            const parsed = new Date(startedAt);
+            if (Number.isNaN(parsed.getTime())) return `Start: ${startedAt}`;
+            return `Start: ${parsed.toLocaleString()}`;
         },
 
         getChartColor(tableType) {
