@@ -16,6 +16,7 @@ jobs:
 
       - name: Push to personal repo
         run: |
-          git config --global url."https://${{ secrets.PERSONAL_GITHUB_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global credential.helper store
+          echo "https://tagyoureit:${{ secrets.PERSONAL_GITHUB_PAT }}@github.com" > ~/.git-credentials
           git remote add personal https://github.com/tagyoureit/FlakeBench.git
           git push personal main --force --tags
