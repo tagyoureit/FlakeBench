@@ -19,9 +19,9 @@ Table design recommendations for meaningful columnar vs row-store comparisons.
 Tests columnar projection efficiency - Snowflake scans only needed columns.
 
 ```sql
-CREATE OR REPLACE TABLE analytics_fact_wide (
+CREATE TABLE IF NOT EXISTS analytics_fact_wide (
     -- Keys
-    fact_id NUMBER PRIMARY KEY,
+    fact_id NUMBER,
     date_key NUMBER,
     product_key NUMBER,
     customer_key NUMBER,
@@ -77,7 +77,7 @@ CLUSTER BY (created_at, region);
 ```sql
 -- Date dimension
 CREATE TABLE dim_date (
-    date_key NUMBER PRIMARY KEY,
+    date_key NUMBER,
     full_date DATE,
     calendar_year NUMBER,
     calendar_quarter NUMBER,
@@ -92,7 +92,7 @@ CREATE TABLE dim_date (
 
 -- Product dimension
 CREATE TABLE dim_product (
-    product_key NUMBER PRIMARY KEY,
+    product_key NUMBER,
     product_id VARCHAR(50),
     product_name VARCHAR(200),
     product_category VARCHAR(50),
@@ -104,7 +104,7 @@ CREATE TABLE dim_product (
 
 -- Customer dimension
 CREATE TABLE dim_customer (
-    customer_key NUMBER PRIMARY KEY,
+    customer_key NUMBER,
     customer_id VARCHAR(50),
     customer_name VARCHAR(200),
     customer_segment VARCHAR(50),
@@ -116,7 +116,7 @@ CREATE TABLE dim_customer (
 
 -- Geography dimension
 CREATE TABLE dim_geography (
-    geo_key NUMBER PRIMARY KEY,
+    geo_key NUMBER,
     region VARCHAR(50),
     country VARCHAR(50),
     state VARCHAR(50),
@@ -131,7 +131,7 @@ CREATE TABLE dim_geography (
 
 ```sql
 CREATE TABLE user_events (
-    event_id NUMBER PRIMARY KEY,
+    event_id NUMBER,
     user_id NUMBER,            -- High cardinality: millions of unique values
     session_id VARCHAR(50),
     event_type VARCHAR(50),
@@ -144,6 +144,9 @@ CREATE TABLE user_events (
 )
 CLUSTER BY (event_date, event_type);
 ```
+
+Note: for standard benchmark tables, treat keys as logical modeling fields.
+Enforced key constraints are only required for hybrid-table test cases.
 
 **Target:** 10M+ unique user_ids for meaningful HLL testing.
 
@@ -175,6 +178,24 @@ For meaningful benchmarks, ensure:
 2. **Skewed categorical data** - Some regions/products have more data (realistic)
 3. **Null handling** - Include NULL values in optional columns
 4. **Outliers** - Include extreme values for robust testing
+
+## Data Realism Test Matrix
+
+Add explicit realism scenarios so performance conclusions generalize:
+
+| Scenario | Data setup | What it validates |
+|----------|------------|-------------------|
+| Skewed dimensions | 80/20 heavy-hitter categories | Hot partition behavior, join skew tolerance |
+| NULL-heavy dimensions | 30%-70% NULL in optional dims | NULL group/filter semantics and planner behavior |
+| Late-arriving facts | event_time older than ingest_time by 1-7 days | Event-time window correctness and freshness handling |
+| Selectivity sweep | same query at 0.1%, 1%, 10%, 50% filter selectivity | Scaling shape and pruning effectiveness |
+| Seasonal bursts | periodic spikes and sparse windows | Throughput stability under non-uniform distributions |
+
+Recommended execution pattern:
+
+1. Run each configured analytical query template (`GENERIC_SQL` entries, with labels if used) against `BASELINE` data.
+2. Re-run against each realism scenario with identical methodology controls.
+3. Compare latency, throughput, scanned bytes, and correctness outcomes.
 
 ```sql
 -- Example: Generate synthetic data with realistic distribution

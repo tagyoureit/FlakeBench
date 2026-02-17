@@ -8,6 +8,70 @@
 
 {% block content %}
 <div x-data="testConfiguration()">
+    <!-- Sticky Template Banner (when editing or viewing a template) -->
+    <div x-show="loadedTemplate && !isReadOnly && !hasResults" x-cloak class="floating-toolbar" style="margin-left: 0; margin-right: 0; padding-left: 1rem; padding-right: 1rem;">
+        <div class="flex items-center gap-3 flex-1">
+            <span class="text-green-600 font-semibold" x-text="config.template_name?.endsWith('(Copy)') ? 'New Template from:' : 'Editing:'"></span>
+            <span class="font-medium" x-text="config.template_name?.endsWith('(Copy)') ? config.template_name?.replace(/ \(Copy\)$/, '') : config.template_name"></span>
+        </div>
+        <div class="flex items-center gap-2">
+            <button 
+                type="button" 
+                class="btn btn-primary btn-sm" 
+                :disabled="isTemplateActionInProgress()"
+                @click="saveAndPrepare()"
+            >
+                <span class="loading-spinner" x-show="saveAndPrepareLoading || isSaving"></span>
+                <span x-text="(saveAndPrepareLoading || isSaving) ? 'Saving…' : 'Save'"></span>
+            </button>
+            <a href="/analysis/templates" class="btn btn-secondary btn-sm" hx-get="/analysis/templates" hx-target="#main-content" hx-push-url="true">
+                ← Back
+            </a>
+        </div>
+    </div>
+
+    <!-- Sticky Template Banner (when viewing a template with results) -->
+    <div x-show="loadedTemplate && isReadOnly" x-cloak class="floating-toolbar" style="margin-left: 0; margin-right: 0; padding-left: 1rem; padding-right: 1rem;">
+        <div class="flex items-center gap-3 flex-1">
+            <span class="text-blue-600 font-semibold">Viewing Template:</span>
+            <span class="font-medium" x-text="loadedTemplate?.template_name"></span>
+            <span x-show="hasResults" class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                <span x-text="runsTotal || loadedTemplate?.usage_count || 0"></span> run(s)
+            </span>
+        </div>
+        <div class="flex items-center gap-2">
+            <button 
+                type="button" 
+                class="btn btn-primary btn-sm" 
+                :disabled="isTemplateActionInProgress()"
+                @click="prepareTemplate()"
+            >
+                <span class="loading-spinner" x-show="prepareTemplateLoading"></span>
+                <span x-text="prepareTemplateLoading ? 'Loading…' : 'Run'"></span>
+            </button>
+            <button 
+                type="button" 
+                class="btn btn-secondary btn-sm" 
+                :disabled="isTemplateActionInProgress() || updateMetadataLoading"
+                @click="updateTableMetadata()"
+            >
+                <span class="loading-spinner" x-show="updateMetadataLoading"></span>
+                <span x-text="updateMetadataLoading ? 'Updating…' : 'Update Metadata'"></span>
+            </button>
+            <button 
+                type="button" 
+                class="btn btn-secondary btn-sm" 
+                :disabled="isTemplateActionInProgress()"
+                @click="copyTemplate"
+            >
+                Copy
+            </button>
+            <a href="/analysis/templates" class="btn btn-secondary btn-sm" hx-get="/analysis/templates" hx-target="#main-content" hx-push-url="true">
+                ← Back
+            </a>
+        </div>
+    </div>
+
     <!-- Initial load state (prevents "defaults then fill in later" flicker) -->
     <div x-show="isInitializing" class="card">
         <div class="flex items-center gap-3">
@@ -36,11 +100,8 @@
         </div>
         
         <div x-show="loadedTemplate && !hasResults && !isReadOnly" class="alert alert-success mt-4">
-            <strong>Editing Template:</strong> <span x-text="loadedTemplate?.template_name"></span>
-        </div>
-
-        <div x-show="loadedTemplate && isReadOnly" class="alert alert-info mt-4">
-            <strong>Viewing Template:</strong> <span x-text="loadedTemplate?.template_name"></span>
+            <strong x-text="loadedTemplate?.template_name?.endsWith('(Copy)') ? 'New Template from:' : 'Editing Template:'"></strong>
+            <span x-text="loadedTemplate?.template_name?.endsWith('(Copy)') ? loadedTemplate?.template_name?.replace(/ \(Copy\)$/, '') : loadedTemplate?.template_name"></span>
         </div>
         
         <div x-show="hasResults" class="alert alert-warning mt-4">
@@ -57,6 +118,183 @@
             <strong>⚠️ Execution warehouse cannot be your results warehouse</strong><br>
             This template is currently set to run on <code x-text="config.warehouse_name"></code>, which matches your results warehouse (<code x-text="resultsWarehouse"></code>).
             Please choose a different warehouse before saving or running.
+        </div>
+    </div>
+
+    <!-- Template Analytics Section (shown when template has runs) -->
+    <div x-show="hasResults && analyticsLoaded" class="mb-6">
+        <!-- KPI Cards -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 my-4">
+            <!-- QPS Stats -->
+            <div class="card text-center">
+                <h4 class="text-sm text-gray-500 mb-1">QPS</h4>
+                <div class="text-2xl font-bold text-blue-600" x-text="formatNumber(analyticsStats?.qps_stats?.avg, 1)"></div>
+                <div class="text-xs text-gray-400">
+                    Range: <span x-text="formatNumber(analyticsStats?.qps_stats?.min, 0)"></span> - 
+                    <span x-text="formatNumber(analyticsStats?.qps_stats?.max, 0)"></span>
+                </div>
+                <div class="text-xs text-gray-400" x-show="analyticsStats?.qps_stats?.cv">
+                    CV: <span x-text="formatPercent(analyticsStats?.qps_stats?.cv)"></span>
+                </div>
+            </div>
+            
+            <!-- P95 Stats -->
+            <div class="card text-center">
+                <h4 class="text-sm text-gray-500 mb-1">P95 Latency</h4>
+                <div class="text-2xl font-bold text-orange-600" x-text="formatLatency(analyticsStats?.p95_stats?.avg)"></div>
+                <div class="text-xs text-gray-400">
+                    Range: <span x-text="formatLatency(analyticsStats?.p95_stats?.min)"></span> - 
+                    <span x-text="formatLatency(analyticsStats?.p95_stats?.max)"></span>
+                </div>
+            </div>
+            
+            <!-- Cost Stats -->
+            <div class="card text-center">
+                <h4 class="text-sm text-gray-500 mb-1">Cost/1K Ops</h4>
+                <div class="text-2xl font-bold text-green-600" x-text="analyticsStats?.cost_stats?.cost_per_1k_ops_usd ? ('$' + formatNumber(analyticsStats?.cost_stats?.cost_per_1k_ops_usd, 4)) : 'N/A'"></div>
+                <div class="text-xs text-gray-400">
+                    Total: $<span x-text="formatNumber(analyticsStats?.cost_stats?.total_cost_usd, 2)"></span>
+                </div>
+            </div>
+            
+            <!-- Stability -->
+            <div class="card text-center">
+                <h4 class="text-sm text-gray-500 mb-1">Stability</h4>
+                <div class="text-2xl font-bold" :class="getStabilityTextClass(analyticsStats?.stability?.badge)"
+                     x-text="getStabilityLabel(analyticsStats?.stability?.badge)"></div>
+                <div class="text-xs text-gray-400" x-show="analyticsStats?.stability?.trend_direction">
+                    Trend: <span x-text="analyticsStats?.stability?.trend_direction"></span>
+                    (<span x-text="formatPercent(Math.abs(analyticsStats?.stability?.trend_pct || 0) / 100)"></span>)
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 my-4">
+            <!-- Distribution Histogram -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="card-title card-title--compact">P95 Distribution</h3>
+                    <select class="form-select form-select-sm" x-model="distributionMetric" @change="loadDistribution()">
+                        <option value="p95_latency_ms">P95 Latency</option>
+                        <option value="qps">QPS</option>
+                        <option value="p50_latency_ms">P50 Latency</option>
+                        <option value="p99_latency_ms">P99 Latency</option>
+                    </select>
+                </div>
+                <div class="relative" style="height: 250px;">
+                    <canvas id="distribution-chart"></canvas>
+                </div>
+            </div>
+            
+            <!-- Scatter Plot -->
+            <div class="card">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="card-title card-title--compact">Performance Scatter</h3>
+                    <div class="flex gap-2">
+                        <select class="form-select form-select-sm" x-model="scatterX" @change="loadScatter()">
+                            <option value="duration_seconds">Duration</option>
+                            <option value="total_ops">Total Ops</option>
+                            <option value="credits">Credits</option>
+                            <option value="qps">QPS</option>
+                            <option value="p50">P50</option>
+                            <option value="p95">P95</option>
+                            <option value="p99">P99</option>
+                            <option value="error_rate">Error Rate</option>
+                        </select>
+                        <span class="text-gray-500">vs</span>
+                        <select class="form-select form-select-sm" x-model="scatterY" @change="loadScatter()">
+                            <option value="qps">QPS</option>
+                            <option value="p50">P50</option>
+                            <option value="p95">P95</option>
+                            <option value="p99">P99</option>
+                            <option value="error_rate">Error Rate</option>
+                            <option value="duration_seconds">Duration</option>
+                            <option value="total_ops">Total Ops</option>
+                            <option value="credits">Credits</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="relative" style="height: 250px;">
+                    <canvas id="scatter-chart"></canvas>
+                </div>
+                <div x-show="scatterCorrelation !== null" class="text-center text-sm text-gray-500 mt-2">
+                    Correlation: <span x-text="scatterCorrelation?.toFixed(3)"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Historical Runs Table -->
+        <div class="card my-4">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="card-title card-title--compact">Historical Runs</h3>
+                <span class="text-sm text-gray-500" x-text="'Total: ' + (runsTotal || 0) + ' runs'"></span>
+            </div>
+            
+            <div class="overflow-x-auto">
+                <table class="table table-compact w-full">
+                    <thead>
+                        <tr>
+                            <th class="cursor-pointer" @click="sortRuns('start_time')">
+                                Date <span x-show="runsSortBy === 'start_time'" x-text="runsSortOrder === 'desc' ? '↓' : '↑'"></span>
+                            </th>
+                            <th>Duration</th>
+                            <th>Concurrency</th>
+                            <th class="cursor-pointer" @click="sortRuns('qps')">
+                                QPS <span x-show="runsSortBy === 'qps'" x-text="runsSortOrder === 'desc' ? '↓' : '↑'"></span>
+                            </th>
+                            <th class="cursor-pointer" @click="sortRuns('p95')">
+                                P95 <span x-show="runsSortBy === 'p95'" x-text="runsSortOrder === 'desc' ? '↓' : '↑'"></span>
+                            </th>
+                            <th>P99</th>
+                            <th>Error Rate</th>
+                            <th>Cost/1K</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="run in analyticsRuns" :key="run.test_id">
+                            <tr :class="run.is_outlier ? 'bg-yellow-50' : ''">
+                                <td x-text="formatDateTime(run.start_time)"></td>
+                                <td x-text="formatDuration(run.duration_seconds)"></td>
+                                <td x-text="run.concurrent_connections || '-'"></td>
+                                <td class="font-semibold" x-text="formatNumber(run.qps, 1)"></td>
+                                <td x-text="formatLatency(run.p95_ms)"></td>
+                                <td x-text="formatLatency(run.p99_ms)"></td>
+                                <td :class="run.error_rate > 0.01 ? 'text-red-600' : ''" 
+                                    x-text="formatPercent(run.error_rate)"></td>
+                                <td x-text="run.cost_per_1k_ops_usd ? ('$' + formatNumber(run.cost_per_1k_ops_usd, 4)) : '-'"></td>
+                                <td>
+                                    <a :href="'/dashboard/' + run.test_id" 
+                                       class="text-blue-600 hover:underline text-sm"
+                                       hx-get.attr="'/dashboard/' + run.test_id"
+                                       hx-target="#main-content" 
+                                       hx-push-url="true">
+                                        View
+                                    </a>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- Pagination -->
+            <div x-show="runsTotal > runsPageSize" class="flex items-center justify-between mt-4 pt-4 border-t">
+                <button class="btn btn-secondary btn-sm" 
+                        @click="prevRunsPage()" 
+                        :disabled="runsPage <= 1">
+                    ← Previous
+                </button>
+                <span class="text-sm text-gray-500">
+                    Page <span x-text="runsPage"></span> of <span x-text="Math.ceil(runsTotal / runsPageSize)"></span>
+                </span>
+                <button class="btn btn-secondary btn-sm" 
+                        @click="nextRunsPage()" 
+                        :disabled="runsPage >= Math.ceil(runsTotal / runsPageSize)">
+                    Next →
+                </button>
+            </div>
         </div>
     </div>
 
@@ -357,7 +595,7 @@
             <div class="alert alert-info mt-3">
                 <strong>Total mix must equal 100%.</strong>
                 Current total:
-                <code x-text="mixTotal() + '%'"></code>
+                <code x-text="mixTotal().toFixed(2) + '%'"></code>
             </div>
 
             <div class="overflow-x-auto mt-3">
@@ -376,7 +614,7 @@
                         <tr>
                             <td class="p-2 border-b border-gray-200 font-medium">Point Lookup</td>
                             <td class="p-2 text-right border-b border-gray-200">
-                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_point_lookup_pct" min="0" max="100">
+                                <input type="number" class="form-input text-right" style="width: 5rem;" x-model.number="config.custom_point_lookup_pct" @blur="normalizeMixPct('custom_point_lookup_pct')" min="0" max="100" step="0.01">
                             </td>
                             <td class="p-2 text-right border-b border-gray-200">
                                 <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_point_lookup_p95_latency_ms" min="-1">
@@ -405,7 +643,7 @@
                         <tr>
                             <td class="p-2 border-b border-gray-200 font-medium">Range Scan</td>
                             <td class="p-2 text-right border-b border-gray-200">
-                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_range_scan_pct" min="0" max="100">
+                                <input type="number" class="form-input text-right" style="width: 5rem;" x-model.number="config.custom_range_scan_pct" @blur="normalizeMixPct('custom_range_scan_pct')" min="0" max="100" step="0.01">
                             </td>
                             <td class="p-2 text-right border-b border-gray-200">
                                 <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_range_scan_p95_latency_ms" min="-1">
@@ -437,7 +675,7 @@
                                 <span x-show="isInteractiveTable(config.table_type)" class="text-xs text-red-600 block">(N/A)</span>
                             </td>
                             <td class="p-2 text-right border-b border-gray-200">
-                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_insert_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
+                                <input type="number" class="form-input text-right" style="width: 5rem;" x-model.number="config.custom_insert_pct" @blur="normalizeMixPct('custom_insert_pct')" min="0" max="100" step="0.01" :disabled="isInteractiveTable(config.table_type)">
                             </td>
                             <td class="p-2 text-right border-b border-gray-200">
                                 <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_insert_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
@@ -472,7 +710,7 @@
                                 <span x-show="isInteractiveTable(config.table_type)" class="text-xs text-red-600 block">(N/A)</span>
                             </td>
                             <td class="p-2 text-right">
-                                <input type="number" class="form-input text-right" style="width: 4.5rem;" x-model.number="config.custom_update_pct" min="0" max="100" :disabled="isInteractiveTable(config.table_type)">
+                                <input type="number" class="form-input text-right" style="width: 5rem;" x-model.number="config.custom_update_pct" @blur="normalizeMixPct('custom_update_pct')" min="0" max="100" step="0.01" :disabled="isInteractiveTable(config.table_type)">
                             </td>
                             <td class="p-2 text-right">
                                 <input type="number" class="form-input text-right max-w-40" x-model.number="config.target_update_p95_latency_ms" min="-1" :disabled="isInteractiveTable(config.table_type)">
@@ -503,6 +741,58 @@
                         </tr>
                     </tbody>
                 </table>
+            </div>
+
+            <div class="mt-4 p-3 border border-gray-200 rounded bg-slate-50">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="font-medium">Generic SQL Entries (`GENERIC_SQL`)</div>
+                    <button type="button" class="btn btn-secondary btn-sm" @click="addGenericQuery()">
+                        + Add Generic SQL
+                    </button>
+                </div>
+                <p class="text-xs text-gray-600 mt-1">
+                    Add any number of arbitrary SQL entries and mix them with shortcut queries.
+                    Each entry requires an operation type and weight.
+                </p>
+
+                <template x-if="!Array.isArray(config.generic_queries) || config.generic_queries.length === 0">
+                    <div class="text-sm text-gray-500 mt-3 italic">No generic SQL entries configured.</div>
+                </template>
+
+                <template x-for="(q, idx) in config.generic_queries" :key="q.id || idx">
+                    <div class="mt-3 p-3 border border-gray-200 rounded bg-white">
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-2">
+                            <div>
+                                <label class="form-label text-xs">Entry ID</label>
+                                <input type="text" class="form-input text-sm" x-model="q.id" @input="config.mix_preset = 'CUSTOM'" placeholder="GENERIC_SQL_1">
+                            </div>
+                            <div>
+                                <label class="form-label text-xs">Label (optional)</label>
+                                <input type="text" class="form-input text-sm" x-model="q.label" @input="config.mix_preset = 'CUSTOM'" placeholder="monthly_rollup">
+                            </div>
+                            <div>
+                                <label class="form-label text-xs">Operation Type</label>
+                                <select class="form-select text-sm" x-model="q.operation_type" @change="config.mix_preset = 'CUSTOM'">
+                                    <option value="READ">READ</option>
+                                    <option value="WRITE">WRITE</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="form-label text-xs">Mix %</label>
+                                <input type="number" class="form-input text-sm text-right" x-model.number="q.weight_pct" @blur="q.weight_pct = parseFloat((Number(q.weight_pct) || 0).toFixed(2))" @input="config.mix_preset = 'CUSTOM'" min="0" max="100" step="0.01">
+                            </div>
+                        </div>
+                        <div class="mt-2">
+                            <label class="form-label text-xs">SQL</label>
+                            <textarea class="form-textarea font-mono text-xs" rows="4" x-model="q.sql" @input="config.mix_preset = 'CUSTOM'" placeholder="SELECT ... FROM {table} WHERE ..."></textarea>
+                        </div>
+                        <div class="mt-2 flex justify-end">
+                            <button type="button" class="btn btn-secondary btn-sm" @click="removeGenericQuery(idx)">
+                                Remove
+                            </button>
+                        </div>
+                    </div>
+                </template>
             </div>
 
             <small class="form-text mt-2">
@@ -879,57 +1169,19 @@
             </div>
         </div>
 
-        <div class="btn-group" x-show="!isReadOnly" x-data="{ saveMenuOpen: false }">
-            <!-- Split button: Smart defaults based on pool state -->
-            <div class="split-btn-container">
-                <button
-                    type="button"
-                    class="btn btn-primary split-btn-main"
-                    :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading || (mode === 'edit' && !isDirty())"
-                    @click="(hasExistingPools() && !arePoolsStale()) ? submitTest() : saveAndPrepare()"
-                    :title="(hasExistingPools() && !arePoolsStale()) 
-                        ? 'Saves template settings without refreshing table metadata' 
-                        : 'Saves template and samples key values from table. This provides realistic parameter values and avoids expensive table profiling on each run.'"
-                >
-                    <span class="loading-spinner" x-show="saveAndPrepareLoading || isSaving"></span>
-                    <span x-text="(saveAndPrepareLoading || isSaving) 
-                        ? (mode === 'edit' ? 'Updating…' : 'Saving…') 
-                        : (mode === 'edit' ? 'Update' : 'Save')"></span>
-                </button>
-                <button
-                    type="button"
-                    class="btn btn-primary split-btn-toggle"
-                    :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading || (mode === 'edit' && !isDirty())"
-                    @click="saveMenuOpen = !saveMenuOpen"
-                    @click.away="saveMenuOpen = false"
-                    aria-haspopup="true"
-                    :aria-expanded="saveMenuOpen"
-                >
-                    <svg class="split-btn-caret" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />
-                    </svg>
-                </button>
-                <div class="split-btn-menu" x-show="saveMenuOpen" x-transition>
-                    <button
-                        type="button"
-                        class="split-btn-menu-item"
-                        @click="saveAndPrepare(); saveMenuOpen = false"
-                        :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading || (mode === 'edit' && !isDirty())"
-                    >
-                        <span class="split-btn-menu-label" x-text="mode === 'edit' ? 'Update & Refresh Metadata' : 'Save & Refresh Metadata'"></span>
-                        <span class="split-btn-menu-desc">Samples key values from table for realistic benchmark parameters</span>
-                    </button>
-                    <button
-                        type="button"
-                        class="split-btn-menu-item"
-                        @click="submitTest(); saveMenuOpen = false"
-                        :disabled="isSaving || (mode === 'edit' && !isDirty())"
-                    >
-                        <span class="split-btn-menu-label" x-text="mode === 'edit' ? 'Update Only' : 'Save Only'"></span>
-                        <span class="split-btn-menu-desc">Quick save without refreshing metadata — useful when iterating on settings</span>
-                    </button>
-                </div>
-            </div>
+        <div class="btn-group" x-show="!isReadOnly">
+            <button
+                type="button"
+                class="btn btn-primary"
+                :disabled="isSaving || aiPrepLoading || saveAndPrepareLoading"
+                @click="saveAndPrepare()"
+                title="Saves template and refreshes table metadata for realistic benchmark parameters"
+            >
+                <span class="loading-spinner" x-show="saveAndPrepareLoading || isSaving"></span>
+                <span x-text="(saveAndPrepareLoading || isSaving) 
+                    ? (mode === 'edit' ? 'Updating…' : 'Saving…') 
+                    : (mode === 'edit' ? 'Update' : 'Save')"></span>
+            </button>
             <button
                 type="button"
                 class="btn btn-primary"
@@ -1006,9 +1258,19 @@
                 <div class="mt-1" x-show="config.ai_workload?.domain_label">
                     <strong>Domain:</strong> <code x-text="config.ai_workload?.domain_label || ''"></code>
                 </div>
-                <div class="mt-2" x-show="config.ai_workload?.pools">
-                    <strong>Pools:</strong>
-                    <pre class="bg-gray-800 text-gray-100 p-3 rounded text-xs overflow-x-auto mt-1"><code x-text="JSON.stringify(config.ai_workload?.pools || {}, null, 2)"></code></pre>
+                <div class="mt-2" x-show="config.ai_workload?.pools && Object.keys(config.ai_workload?.pools || {}).length > 0">
+                    <strong>Value Pools:</strong>
+                    <div class="mt-1 space-y-1">
+                        <template x-for="[colName, info] in Object.entries(config.ai_workload?.pools || {})" :key="colName">
+                            <div class="flex items-center gap-2 text-sm">
+                                <code class="bg-gray-100 px-1 rounded" x-text="colName"></code>
+                                <span class="text-gray-500">·</span>
+                                <span x-text="(info?.count || 0).toLocaleString() + ' values'"></span>
+                                <span class="text-gray-400 text-xs" x-show="info?.kind">(<span x-text="info?.kind"></span>)</span>
+                                <span class="text-gray-400 text-xs" x-show="info?.refreshed_at" x-text="'Updated ' + new Date(info?.refreshed_at).toLocaleDateString()"></span>
+                            </div>
+                        </template>
+                    </div>
                 </div>
                 <div class="mt-2" x-show="config.ai_workload?.ai_notes">
                     <strong>AI Notes:</strong>
@@ -1029,6 +1291,15 @@
             >
                 <span class="loading-spinner" x-show="prepareTemplateLoading"></span>
                 <span x-text="prepareTemplateLoading ? 'Loading…' : 'Run'"></span>
+            </button>
+            <button 
+                type="button" 
+                class="btn btn-secondary" 
+                :disabled="isTemplateActionInProgress() || updateMetadataLoading"
+                @click="updateTableMetadata()"
+            >
+                <span class="loading-spinner" x-show="updateMetadataLoading"></span>
+                <span x-text="updateMetadataLoading ? 'Updating…' : 'Update Table Metadata'"></span>
             </button>
             <button 
                 type="button" 
@@ -1189,17 +1460,15 @@ function testConfiguration() {
             warmup: 30,
             use_cached_result: true,
             use_pgbouncer: false,  // PgBouncer may not be available on all instances
-            custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
-            custom_range_scan_query:
-                'SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100',
-            custom_insert_query:
-                'INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
-            custom_update_query:
-                'UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?',
+            custom_point_lookup_query: 'Use AI Adjust or enter sql manually.',
+            custom_range_scan_query: 'Use AI Adjust or enter sql manually.',
+            custom_insert_query: 'Use AI Adjust or enter sql manually.',
+            custom_update_query: 'Use AI Adjust or enter sql manually.',
             custom_point_lookup_pct: 25,
             custom_range_scan_pct: 25,
             custom_insert_pct: 35,
             custom_update_pct: 15,
+            generic_queries: [],
             // Per-query-type targets (SLOs). Use -1 to disable a target.
             target_point_lookup_p95_latency_ms: -1,
             target_range_scan_p95_latency_ms: -1,
@@ -1265,6 +1534,23 @@ function testConfiguration() {
         prepareTemplateLoading: false,
         copyTemplateLoading: false,
         deleteTemplateLoading: false,
+        
+        // Analytics state (for templates with runs)
+        analyticsLoaded: false,
+        analyticsStats: null,
+        analyticsRuns: [],
+        runsTotal: 0,
+        runsPage: 1,
+        runsPageSize: 20,
+        runsSortBy: 'start_time',
+        runsSortOrder: 'desc',
+        distributionMetric: 'p95_latency_ms',
+        distributionChart: null,
+        scatterX: 'duration_seconds',
+        scatterY: 'qps',
+        scatterChart: null,
+        scatterCorrelation: null,
+        
         savedConfigSnapshot: null,
 
         isDirty() {
@@ -1303,6 +1589,7 @@ function testConfiguration() {
                 custom_range_scan_query: c.custom_range_scan_query,
                 custom_insert_query: c.custom_insert_query,
                 custom_update_query: c.custom_update_query,
+                generic_queries: JSON.stringify(c.generic_queries || []),
                 use_cached_result: c.use_cached_result,
                 use_pgbouncer: c.use_pgbouncer,
                 scaling: JSON.stringify(c.scaling || {}),
@@ -1386,12 +1673,19 @@ function testConfiguration() {
         },
 
         mixTotal() {
-            return (
+            const shortcutTotal = (
                 Number(this.config.custom_point_lookup_pct || 0) +
                 Number(this.config.custom_range_scan_pct || 0) +
                 Number(this.config.custom_insert_pct || 0) +
                 Number(this.config.custom_update_pct || 0)
             );
+            const genericQueries = Array.isArray(this.config.generic_queries)
+                ? this.config.generic_queries
+                : [];
+            const genericTotal = genericQueries.reduce((acc, q) => {
+                return acc + Number((q && q.weight_pct) || 0);
+            }, 0);
+            return Math.round((shortcutTotal + genericTotal) * 100) / 100;
         },
 
         editingSql: null, // tracks which SQL field is being edited: 'point_lookup', 'range_scan', 'insert', 'update', or null
@@ -1406,6 +1700,310 @@ function testConfiguration() {
             if (!s) return '(empty)';
             return s;
         },
+
+        makeDefaultGenericQuery(index = null) {
+            const suffix = index != null ? Number(index) + 1 : Date.now();
+            return {
+                id: `GENERIC_SQL_${suffix}`,
+                query_kind: 'GENERIC_SQL',
+                operation_type: 'READ',
+                label: '',
+                weight_pct: 0,
+                sql: '',
+                parameters: [],
+            };
+        },
+
+        normalizeGenericQuery(raw, idx) {
+            const row = raw && typeof raw === 'object' ? { ...raw } : {};
+            const idRaw = String(row.id || `GENERIC_SQL_${Number(idx) + 1}`).trim();
+            const opRaw = String(row.operation_type || '').trim().toUpperCase();
+            const op = opRaw === 'WRITE' ? 'WRITE' : 'READ';
+            let weight = Number(row.weight_pct || 0);
+            if (!Number.isFinite(weight)) weight = 0;
+            weight = Math.round(Math.max(0, Math.min(100, weight)) * 100) / 100;
+            return {
+                ...row,
+                id: idRaw || `GENERIC_SQL_${Number(idx) + 1}`,
+                query_kind: 'GENERIC_SQL',
+                operation_type: op,
+                label: String(row.label || '').trim(),
+                weight_pct: weight,
+                sql: String(row.sql || row.query || row.query_text || '').trim(),
+                parameters: Array.isArray(row.parameters) ? row.parameters : [],
+            };
+        },
+
+        normalizeGenericQueries() {
+            if (!Array.isArray(this.config.generic_queries)) {
+                this.config.generic_queries = [];
+                return;
+            }
+            this.config.generic_queries = this.config.generic_queries.map((q, idx) =>
+                this.normalizeGenericQuery(q, idx),
+            );
+        },
+
+        addGenericQuery() {
+            this.normalizeGenericQueries();
+            this.config.generic_queries.push(
+                this.makeDefaultGenericQuery(this.config.generic_queries.length),
+            );
+            this.config.mix_preset = 'CUSTOM';
+        },
+
+        removeGenericQuery(idx) {
+            this.normalizeGenericQueries();
+            if (!Array.isArray(this.config.generic_queries)) return;
+            const i = Number(idx);
+            if (!Number.isInteger(i) || i < 0 || i >= this.config.generic_queries.length) return;
+            this.config.generic_queries.splice(i, 1);
+            this.config.mix_preset = 'CUSTOM';
+        },
+
+        // ===== Analytics Methods =====
+        async loadTemplateAnalytics(templateId) {
+            try {
+                // Load stats, runs, and charts in parallel
+                const [statsRes, runsRes] = await Promise.all([
+                    fetch(`/api/dashboard/templates/${templateId}`),
+                    fetch(`/api/dashboard/templates/${templateId}/runs?limit=${this.runsPageSize}&offset=0&sort_by=${this.runsSortBy}&sort_order=${this.runsSortOrder}`)
+                ]);
+                
+                if (statsRes.ok) {
+                    this.analyticsStats = await statsRes.json();
+                }
+                
+                if (runsRes.ok) {
+                    const runsData = await runsRes.json();
+                    this.analyticsRuns = runsData.runs || [];
+                    this.runsTotal = runsData.total_count || 0;
+                }
+                
+                this.analyticsLoaded = true;
+                
+                // Load charts after DOM update
+                this.$nextTick(() => {
+                    this.loadDistribution();
+                    this.loadScatter();
+                });
+            } catch (err) {
+                console.error('Failed to load template analytics:', err);
+            }
+        },
+
+        async loadRuns() {
+            if (!this.loadedTemplate?.template_id) return;
+            
+            const params = new URLSearchParams({
+                limit: this.runsPageSize,
+                offset: (this.runsPage - 1) * this.runsPageSize,
+                sort_by: this.runsSortBy,
+                sort_order: this.runsSortOrder
+            });
+            
+            try {
+                const res = await fetch(`/api/dashboard/templates/${this.loadedTemplate.template_id}/runs?${params}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    this.analyticsRuns = data.runs || [];
+                    this.runsTotal = data.total_count || 0;
+                }
+            } catch (err) {
+                console.error('Failed to load runs:', err);
+            }
+        },
+
+        sortRuns(field) {
+            if (this.runsSortBy === field) {
+                this.runsSortOrder = this.runsSortOrder === 'desc' ? 'asc' : 'desc';
+            } else {
+                this.runsSortBy = field;
+                this.runsSortOrder = 'desc';
+            }
+            this.runsPage = 1;
+            this.loadRuns();
+        },
+
+        prevRunsPage() {
+            if (this.runsPage > 1) {
+                this.runsPage--;
+                this.loadRuns();
+            }
+        },
+
+        nextRunsPage() {
+            if (this.runsPage < Math.ceil(this.runsTotal / this.runsPageSize)) {
+                this.runsPage++;
+                this.loadRuns();
+            }
+        },
+
+        async loadDistribution() {
+            if (!this.loadedTemplate?.template_id) return;
+            
+            try {
+                const res = await fetch(`/api/dashboard/templates/${this.loadedTemplate.template_id}/distribution?metric=${this.distributionMetric}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    this.renderDistributionChart(data);
+                }
+            } catch (err) {
+                console.error('Failed to load distribution:', err);
+            }
+        },
+
+        renderDistributionChart(data) {
+            const ctx = document.getElementById('distribution-chart');
+            if (!ctx) return;
+            
+            if (this.distributionChart) {
+                this.distributionChart.destroy();
+            }
+            
+            // Create bin labels
+            const labels = [];
+            for (let i = 0; i < data.counts.length; i++) {
+                if (i < data.bins.length - 1) {
+                    labels.push(`${data.bins[i].toFixed(0)}-${data.bins[i+1].toFixed(0)}`);
+                }
+            }
+            
+            this.distributionChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Count',
+                        data: data.counts,
+                        backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                        borderColor: 'rgb(59, 130, 246)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        y: { beginAtZero: true, title: { display: true, text: 'Count' } }
+                    }
+                }
+            });
+        },
+
+        async loadScatter() {
+            if (!this.loadedTemplate?.template_id) return;
+            
+            try {
+                const res = await fetch(`/api/dashboard/templates/${this.loadedTemplate.template_id}/scatter?x_metric=${this.scatterX}&y_metric=${this.scatterY}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    this.scatterCorrelation = data.correlation;
+                    this.renderScatterChart(data);
+                }
+            } catch (err) {
+                console.error('Failed to load scatter:', err);
+            }
+        },
+
+        renderScatterChart(data) {
+            const ctx = document.getElementById('scatter-chart');
+            if (!ctx) return;
+            
+            if (this.scatterChart) {
+                this.scatterChart.destroy();
+            }
+            
+            const points = data.data.map(p => ({ x: p.x, y: p.y }));
+            
+            this.scatterChart = new Chart(ctx, {
+                type: 'scatter',
+                data: {
+                    datasets: [{
+                        label: `${data.y_label} vs ${data.x_label}`,
+                        data: points,
+                        backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                        borderColor: 'rgb(59, 130, 246)',
+                        pointRadius: 6,
+                        pointHoverRadius: 8
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: { title: { display: true, text: data.x_label } },
+                        y: { title: { display: true, text: data.y_label } }
+                    }
+                }
+            });
+        },
+
+        // Analytics formatting helpers
+        formatNumber(val, decimals = 0) {
+            if (val === null || val === undefined) return 'N/A';
+            return Number(val).toLocaleString(undefined, { 
+                minimumFractionDigits: decimals, 
+                maximumFractionDigits: decimals 
+            });
+        },
+
+        normalizeMixPct(field) {
+            const val = Number(this.config[field]);
+            this.config[field] = Number.isFinite(val) ? parseFloat(val.toFixed(2)) : 0;
+        },
+
+        formatLatency(val) {
+            if (val === null || val === undefined) return 'N/A';
+            if (val < 1) return val.toFixed(2) + 'ms';
+            if (val < 1000) return val.toFixed(1) + 'ms';
+            return (val / 1000).toFixed(2) + 's';
+        },
+
+        formatPercent(val) {
+            if (val === null || val === undefined) return 'N/A';
+            return (val * 100).toFixed(2) + '%';
+        },
+
+        formatDateTime(val) {
+            if (!val) return 'N/A';
+            return new Date(val).toLocaleString();
+        },
+
+        formatDuration(seconds) {
+            if (!seconds) return '-';
+            if (seconds < 60) return seconds.toFixed(0) + 's';
+            if (seconds < 3600) return (seconds / 60).toFixed(1) + 'm';
+            return (seconds / 3600).toFixed(1) + 'h';
+        },
+
+        getStabilityTextClass(badge) {
+            const classes = {
+                'very_stable': 'text-emerald-600',
+                'stable': 'text-blue-600',
+                'moderate': 'text-amber-600',
+                'volatile': 'text-red-600',
+            };
+            return classes[badge] || 'text-gray-600';
+        },
+
+        getStabilityLabel(badge) {
+            const labels = {
+                'very_stable': 'Very Stable',
+                'stable': 'Stable',
+                'moderate': 'Moderate',
+                'volatile': 'Volatile',
+                'unknown': 'Unknown'
+            };
+            return labels[badge] || badge || 'Unknown';
+        },
+        // ===== End Analytics Methods =====
 
         applyMixPreset(preset) {
             const p = String(preset || '').trim().toUpperCase();
@@ -1429,6 +2027,12 @@ function testConfiguration() {
                 this.config.mix_preset = 'CUSTOM';
                 return;
             }
+            // Presets apply to shortcut weights; reset GENERIC_SQL weights.
+            this.normalizeGenericQueries();
+            this.config.generic_queries = this.config.generic_queries.map((q, idx) => ({
+                ...this.normalizeGenericQuery(q, idx),
+                weight_pct: 0,
+            }));
             this.config.custom_point_lookup_pct = w.custom_point_lookup_pct;
             this.config.custom_range_scan_pct = w.custom_range_scan_pct;
             this.config.custom_insert_pct = w.custom_insert_pct;
@@ -1437,6 +2041,14 @@ function testConfiguration() {
         },
 
         syncMixPresetFromWeights() {
+            const hasWeightedGeneric = Array.isArray(this.config.generic_queries)
+                && this.config.generic_queries.some(
+                    (q) => Number((q && q.weight_pct) || 0) > 0,
+                );
+            if (hasWeightedGeneric) {
+                this.config.mix_preset = 'CUSTOM';
+                return;
+            }
             const presets = {
                 READ_ONLY: { custom_point_lookup_pct: 50, custom_range_scan_pct: 50, custom_insert_pct: 0, custom_update_pct: 0 },
                 WRITE_ONLY: { custom_point_lookup_pct: 0, custom_range_scan_pct: 0, custom_insert_pct: 70, custom_update_pct: 30 },
@@ -1519,20 +2131,12 @@ function testConfiguration() {
                 this.config.guardrails.max_memory_percent = 85;
             }
 
-            const isPg = this.isPostgresFamilyTableType(this.config.table_type);
-            const defaults = isPg
-                ? {
-                    custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = $1',
-                    custom_range_scan_query: 'SELECT * FROM {table} WHERE id BETWEEN $1 AND $2 LIMIT 100',
-                    custom_insert_query: 'INSERT INTO {table} (id, data, timestamp) VALUES ($1, $2, $3)',
-                    custom_update_query: 'UPDATE {table} SET data = $1, timestamp = $2 WHERE id = $3',
-                }
-                : {
-                    custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
-                    custom_range_scan_query: 'SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 LIMIT 100',
-                    custom_insert_query: 'INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
-                    custom_update_query: 'UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?',
-                };
+            const defaults = {
+                custom_point_lookup_query: 'Use AI Adjust or enter sql manually.',
+                custom_range_scan_query: 'Use AI Adjust or enter sql manually.',
+                custom_insert_query: 'Use AI Adjust or enter sql manually.',
+                custom_update_query: 'Use AI Adjust or enter sql manually.',
+            };
 
             // Backfill SQL strings if missing.
             for (const k of ['custom_point_lookup_query', 'custom_range_scan_query', 'custom_insert_query', 'custom_update_query']) {
@@ -1546,6 +2150,15 @@ function testConfiguration() {
             for (const k of pctKeys) {
                 const n = Number(this.config[k]);
                 this.config[k] = Number.isFinite(n) ? n : 0;
+            }
+            this.normalizeGenericQueries();
+            if (this.isInteractiveTable(this.config.table_type)) {
+                for (const q of this.config.generic_queries) {
+                    const op = String(q?.operation_type || '').trim().toUpperCase();
+                    if (op === 'WRITE') {
+                        q.weight_pct = 0;
+                    }
+                }
             }
             if (this.mixTotal() === 0) {
                 this.applyMixPreset('MIXED');
@@ -1621,6 +2234,13 @@ function testConfiguration() {
                 this.config.custom_update_pct = 0;
                 this.config.custom_insert_query = '';
                 this.config.custom_update_query = '';
+                this.normalizeGenericQueries();
+                for (const q of this.config.generic_queries) {
+                    const op = String(q?.operation_type || '').trim().toUpperCase();
+                    if (op === 'WRITE') {
+                        q.weight_pct = 0;
+                    }
+                }
                 this.applyMixPreset('READ_ONLY');
             }
 
@@ -2177,6 +2797,11 @@ function testConfiguration() {
                         }
                         this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
                         this.aiPrepError = null;
+                        
+                        // Load analytics if template has runs
+                        if (this.hasResults) {
+                            this.loadTemplateAnalytics(this.loadedTemplate.template_id);
+                        }
                     } else {
                         const payload = await resp.json().catch(() => ({}));
                         const detail = payload && payload.detail ? payload.detail : null;
@@ -2425,9 +3050,9 @@ function testConfiguration() {
             this.ensureCanonicalWorkloadConfig();
 
             const total = this.mixTotal();
-            if (total !== 100) {
+            if (Math.abs(total - 100) > 0.001) {
                 window.toast.warning(
-                    `Mix percentages must sum to 100 (currently ${total}).`,
+                    `Mix percentages must sum to 100.00 (currently ${total.toFixed(2)}).`,
                 );
                 return;
             }
@@ -2444,6 +3069,42 @@ function testConfiguration() {
                 const sql = String(this.config[sqlK] || '').trim();
                 if (pct > 0 && !sql) {
                     window.toast.warning(`${label}: SQL is required when weight % > 0.`);
+                    return;
+                }
+            }
+
+            // Validate GENERIC_SQL entries.
+            this.normalizeGenericQueries();
+            const seenGenericIds = new Set();
+            for (let i = 0; i < this.config.generic_queries.length; i++) {
+                const q = this.config.generic_queries[i] || {};
+                const id = String(q.id || '').trim();
+                const op = String(q.operation_type || '').trim().toUpperCase();
+                const weight = Number(q.weight_pct || 0);
+                const sql = String(q.sql || '').trim();
+                if (!id) {
+                    window.toast.warning(`Generic SQL #${i + 1}: id is required.`);
+                    return;
+                }
+                if (seenGenericIds.has(id)) {
+                    window.toast.warning(`Generic SQL id '${id}' is duplicated.`);
+                    return;
+                }
+                seenGenericIds.add(id);
+                if (!['READ', 'WRITE'].includes(op)) {
+                    window.toast.warning(`Generic SQL '${id}': operation_type must be READ or WRITE.`);
+                    return;
+                }
+                if (!Number.isFinite(weight) || weight < 0 || weight > 100) {
+                    window.toast.warning(`Generic SQL '${id}': weight_pct must be between 0.00 and 100.00.`);
+                    return;
+                }
+                if (weight > 0 && !sql) {
+                    window.toast.warning(`Generic SQL '${id}': SQL is required when weight % > 0.`);
+                    return;
+                }
+                if (this.isInteractiveTable(this.config.table_type) && op === 'WRITE' && weight > 0) {
+                    window.toast.warning(`Generic SQL '${id}': WRITE operations are not supported for interactive tables.`);
                     return;
                 }
             }
@@ -2782,11 +3443,17 @@ function testConfiguration() {
                         await this.prepareAiWorkload();
                         if (this.aiPrepError) {
                             // Template saved, but metadata refresh failed.
-                            window.toast.warning(
-                                (this.mode === 'edit' ? 'Template updated' : 'Template created') +
-                                    ', but table metadata refresh failed: ' +
-                                    this.aiPrepError,
-                            );
+                            const savedMsg = this.mode === 'edit' ? 'Template updated' : 'Template created';
+                            const isValidationError = this.aiPrepError.includes('validation failed');
+                            if (isValidationError) {
+                                window.toast.error(savedMsg + ', but SQL validation failed. Check your GENERIC_SQL queries.');
+                                // Also show the detailed error
+                                window.toast.warning(this.aiPrepError, { timeoutMs: 10000 });
+                            } else {
+                                window.toast.warning(
+                                    savedMsg + ', but table metadata refresh failed: ' + this.aiPrepError,
+                                );
+                            }
                         } else {
                             window.toast.success(
                                 this.mode === 'edit'
@@ -2849,8 +3516,13 @@ function testConfiguration() {
                 this.ensureCanonicalWorkloadConfig();
                 this.config.template_name = template.template_name;
                 this.config.description = template.description;
-                this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
-                this.aiPrepError = null;
+                        this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
+                        this.aiPrepError = null;
+                        
+                        // Load analytics if template has runs
+                        if (this.hasResults) {
+                            this.loadTemplateAnalytics(templateId);
+                        }
             } catch (e) {
                 console.warn('Failed to reload template:', e);
             }
@@ -2935,7 +3607,7 @@ function testConfiguration() {
                     this.config.ai_workload = payload.ai_workload;
                 }
                 // Reload the template to get fresh data
-                await this.loadTemplate(this.loadedTemplate.template_id);
+                await this.reloadTemplate();
                 window.toast.success('Table metadata updated successfully.');
             } catch (e) {
                 console.error('Failed to update table metadata:', e);
@@ -2954,16 +3626,19 @@ function testConfiguration() {
             if (this.prepareTemplateLoading) return;
 
             if (this.isDirty()) {
-                const proceed = await window.toast.confirm(
-                    'You have unsaved changes that will be lost if you run now.',
+                const choice = await window.toast.confirm(
+                    'You have unsaved changes. Save before running?',
                     {
-                        confirmText: 'Run (discard changes)',
-                        cancelText: 'Cancel',
-                        confirmVariant: 'warning',
+                        confirmText: 'Save & Run',
+                        cancelText: 'Run Without Saving',
+                        confirmVariant: 'primary',
                         timeoutMs: 15000,
                     }
                 );
-                if (!proceed) return;
+                if (choice) {
+                    await this._saveTemplate({ prepareAfterSave: true });
+                    this.snapshotConfig();
+                }
             }
 
             const tableType = String(this.config.table_type || '').toUpperCase();
@@ -3208,13 +3883,10 @@ function testConfiguration() {
                     mix_preset: 'MIXED',
                     think_time: 0,
                     warmup: 30,
-                    custom_point_lookup_query: 'SELECT * FROM {table} WHERE id = ?',
-                    custom_range_scan_query:
-                        'SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100 ORDER BY id LIMIT 100',
-                    custom_insert_query:
-                        'INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
-                    custom_update_query:
-                        'UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?',
+                    custom_point_lookup_query: 'Use AI Adjust or enter sql manually.',
+                    custom_range_scan_query: 'Use AI Adjust or enter sql manually.',
+                    custom_insert_query: 'Use AI Adjust or enter sql manually.',
+                    custom_update_query: 'Use AI Adjust or enter sql manually.',
                     custom_point_lookup_pct: 25,
                     custom_range_scan_pct: 25,
                     custom_insert_pct: 35,

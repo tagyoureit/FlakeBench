@@ -21,41 +21,83 @@ but doesn't showcase Snowflake's columnar strengths.
 
 ## Solution Overview
 
-Add **analytical workload types** that demonstrate columnar storage advantages:
+Add analytical coverage with a **UI-based configuration experience** and a
+**simplified runtime query model**:
 
-| Workload Type | Description | Why Columnar Wins |
-|---------------|-------------|-------------------|
-| `AGGREGATION` | GROUP BY with SUM/COUNT/AVG | Scans only aggregated columns |
-| `WINDOWED` | Window functions (ROW_NUMBER, SUM OVER) | Efficient partition processing |
-| `ANALYTICAL_JOIN` | Star-schema fact-dimension joins | Broadcast joins, predicate pushdown |
-| `WIDE_SCAN` | Scanning many columns | Columnar projection, compression |
-| `APPROX_DISTINCT` | HyperLogLog cardinality | ~100x faster than exact COUNT |
+| Query Kind | Role | Why it exists |
+|------------|------|---------------|
+| `POINT_LOOKUP` | OLTP shortcut | Existing fast path and baseline comparability |
+| `RANGE_SCAN` | OLTP shortcut | Existing range-read baseline |
+| `INSERT` | OLTP shortcut | Existing write shortcut |
+| `UPDATE` | OLTP shortcut | Existing write shortcut |
+| `GENERIC_SQL` | Arbitrary SQL (READ or WRITE) | Covers analytical SQL patterns without adding more runtime enums |
 
-### Key Design: Explicit Parameter Specifications
+`GENERIC_SQL` can represent analytical patterns such as aggregation, windowing,
+joins, rollups/cubes, and approximate cardinality directly in SQL text. Those
+are SQL patterns, not dedicated runtime kinds.
 
-Unlike OLTP queries (where params are inferred from query_kind), analytical queries use
-**explicit parameter specs** to enable:
+### Key Design: SQL-First with AI Assistance
 
-- Multiple parameters per query (date range + dimension filters)
-- Arbitrary granularity (hour/day/week/month/year)
-- Combinatorial variety (e.g., 4 granularities × 365 dates × 5 regions = 7,300 unique combinations)
-- Dependent parameters (end_date derived from start_date)
+Users configure analytical queries through a UI workflow:
 
-```yaml
-# Example: Explicit parameter specification
-parameters:
-  - name: "granularity"
-    type: "choice"
-    values: ["day", "week", "month"]
-  - name: "start_date"
-    type: "date"
-    strategy: "random_in_range"
-    column: "order_date"
-  - name: "region"
-    type: "categorical"
-    strategy: "sample_from_table"
-    column: "region"
 ```
+1. Select tables     → User picks tables to include (supports multi-table JOINs)
+2. Describe intent   → Natural language: "Analyze sales by region and time"
+3. AI generates SQL  → SQL with ? placeholders, user can edit/regenerate
+4. Map parameters    → For each ?, select table.column and generation strategy
+5. Prepare           → System profiles only the referenced columns
+```
+
+**Why SQL-first:**
+- Supports multi-table JOINs naturally (dimensions + fact tables)
+- Profiles only columns actually used
+- User has full context when mapping parameters
+
+### API and Storage Decisions (Locked)
+
+- **No endpoint aliases:** use one canonical API contract and avoid duplicate route surfaces for the same behavior.
+- **Catalog-first discovery:** table and schema metadata stay under existing `catalog` endpoints.
+- **Template-scoped actions:** SQL generation, SQL validation, and column profiling stay under template/AI workflow endpoints.
+- **Hybrid OLAP metrics storage:** keep stable first-class result columns for dashboards/SLOs, and store kind-specific/extensible metrics in a `VARIANT` payload.
+
+### Inherited Benchmark Controls (Locked by Existing Runner)
+
+This expansion inherits benchmark controls that already exist in the baseline app
+and template model. They are not redesigned here, but are now explicitly part of
+the OLAP contract:
+
+- Cache policy controls (result cache behavior, reuse controls)
+- Warmup and measurement phase controls (cold/warm execution modes)
+- Repeat/trial controls (multiple runs with fixed/randomized seeds)
+- Existing load modes and scheduler behavior (CONCURRENCY, QPS, FIND_MAX_CONCURRENCY)
+
+Implementation note: this plan only adds OLAP-specific semantics on top of those
+controls, and does not replace baseline runner behavior.
+
+### Parameter Generation Strategies
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| `choice` | Pick from explicit list | Granularity (day/week/month) |
+| `random_in_range` | Random in column min/max | Date filters |
+| `sample_from_table` | Random from distinct values | Categorical dimensions |
+| `weighted_sample` | Frequency-weighted random | Realistic distributions |
+| `offset_from_previous` | Relative to prior param | Date range end |
+| `sample_list` | Multiple values for IN clause | Multi-select filters |
+
+**Combinatorial variety:** Multiple parameters create thousands of unique queries
+(e.g., 4 granularities × 365 dates × 6 offsets × 5 regions = 43,800 combinations)
+
+### Mix Precision Contract
+
+Workload mixing remains percentage-based, but with two-decimal precision:
+
+- `weight_pct` supports `0.00` to `100.00`
+- Total weight across all configured queries must equal `100.00`
+- Precision is `0.01%` (basis-point style scheduling)
+
+This supports very skewed mixes such as roughly `10000:1` read:write while still
+using percentage-based config.
 
 ## Expected Outcomes
 
@@ -68,32 +110,91 @@ parameters:
 | File | Content |
 |------|---------|
 | `01-query-patterns.md` | SQL patterns that favor columnar storage |
-| `02-architecture-changes.md` | High-level architecture with explicit parameter specs |
-| `03-new-query-kinds.md` | Detailed executor implementation |
-| `04-value-pools.md` | Parameter generation strategies & ColumnProfile |
-| `05-yaml-config.md` | Template configuration with explicit parameters |
+| `02-architecture-changes.md` | Architecture with UI flow and components |
+| `03-new-query-kinds.md` | Query kind constants and executor changes |
+| `04-value-pools.md` | Parameter generation and column profiling |
+| `05-ui-config.md` | **UI workflow and component specifications** |
 | `06-schema-requirements.md` | Table design for benchmarks |
-| `07-metrics-tracking.md` | Analytics-specific metrics |
-| `08-implementation-steps.md` | 4-phase execution plan (~5 days) |
+| `07-metrics-tracking.md` | Metrics, **history storage, and comparison** |
+| `08-implementation-steps.md` | 8-phase implementation plan |
+| `09-methodology-and-realism.md` | Correctness gate, methodology contract, realism matrix |
 
 ## Success Criteria
 
-- [ ] Explicit parameter specification system implemented (ParameterSpec, ColumnProfile, ParameterGenerator)
-- [ ] 5+ new query kinds implemented (AGGREGATION, WINDOWED, etc.)
-- [ ] YAML templates support explicit parameter specs for combinatorial variety
-- [ ] Metrics track rows/sec, bytes/sec for analytical workloads
-- [ ] Demo scenario shows 10x+ Snowflake advantage over Postgres
+- [ ] UI-based analytical query builder (no manual YAML)
+- [ ] AI-assisted SQL generation from natural language
+- [ ] Multi-table JOIN support with column profiling
+- [ ] Runtime query model supports shortcuts + `GENERIC_SQL` with explicit `operation_type`
+- [ ] Multiple `GENERIC_SQL` entries can be mixed with OLTP shortcuts in one test
+- [ ] Combinatorial parameter variety (1000s of unique queries)
+- [ ] **Compatible with all load modes (CONCURRENCY, QPS, FIND_MAX_CONCURRENCY)**
+- [ ] **History storage with hybrid OLAP metrics (core columns + VARIANT details)**
+- [ ] **Shallow and deep comparison for OLAP queries**
+- [ ] **Pre-flight correctness gate for OLAP templates (including approximate-cardinality tolerance checks)**
+- [ ] **Methodology metadata recorded for repeatability and confidence analysis**
+- [ ] **Realism profiles supported (baseline, skew, NULL-heavy, late-arriving, selectivity bands)**
+- [ ] Demonstrated and explainable performance deltas between engines under defined scenarios
 - [ ] Backward compatible with existing OLTP templates
 
 ## Risks and Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Column profiling slow | Cache profiles during setup, not per-query |
-| Too many distinct values | Cap sample_values at configurable limit |
-| Dependent param cycles | Validate DAG at parse time |
-| Legacy compatibility | Implicit specs for existing query kinds |
-| Long query times | Appropriate SLO definitions for OLAP |
+| AI generates invalid SQL | Validate syntax before accepting, allow manual edit |
+| Multi-table profiling slow | Profile only referenced columns |
+| Complex UI | Progressive disclosure, sensible defaults |
+| Legacy compatibility | Existing templates work unchanged |
+| Invalid benchmark conclusions due to methodology drift | Persist inherited run controls + trial metadata in every test result |
+| Fast but incorrect analytical query templates | Add pre-flight correctness gate before performance runs |
+
+## Future Enhancements
+
+The following capabilities are **out of scope** for the initial implementation but
+should be considered for future iterations:
+
+### Additional Query Patterns
+
+| Pattern | Description | Use Case |
+|---------|-------------|----------|
+| `SESSIONIZATION` | User session windowing with gap detection | Funnel analysis, user journey analytics |
+| `FUNNEL_ANALYSIS` | Sequential event matching (A → B → C) | Conversion tracking, drop-off analysis |
+| `APPROX_PERCENTILE` | HyperLogLog-style approximate quantiles | P95/P99 latency from event streams |
+| `VARIANT_QUERY` | Semi-structured JSON path extraction | Event payload filtering, feature flag queries |
+| `LATERAL_FLATTEN` | Nested array expansion | JSON array analytics |
+
+### Throughput-Based SLOs
+
+The current SLO system evaluates **latency thresholds** (p95_ms, p99_ms). Future
+enhancement could add **throughput-based SLOs** for analytical workloads:
+
+```python
+# Example: not yet implemented
+"GENERIC_SQL:aggregation": {
+    "p95_ms": 5000,
+    "min_rows_per_sec": 100000,   # Throughput floor
+    "min_bytes_per_sec": 10_000_000,  # I/O throughput floor
+}
+```
+
+This would allow FIND_MAX_CONCURRENCY to stop scaling when throughput degrades,
+not just when latency exceeds thresholds.
+
+### Row-Limit Based Load Control
+
+The current load system uses **percentage-based** query distribution with 2-decimal
+precision (e.g., 70.00% POINT_LOOKUP, 29.99% GENERIC_SQL(READ), 0.01% UPDATE).
+Future enhancement could add **row-limit** or
+**operation-count** controls:
+
+```yaml
+# Example: not yet implemented
+load_control:
+  mode: ROW_LIMIT
+  aggregation_max_rows_per_minute: 10_000_000
+  point_lookup_target_ops_per_second: 500
+```
+
+This would enable more precise resource budgeting for mixed HTAP workloads.
 
 ## Related Documentation
 

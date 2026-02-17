@@ -40,6 +40,75 @@ def get_prefix() -> str:
 # DATA EXTRACTION HELPERS
 # =============================================================================
 
+# Per-kind latency columns fetched alongside aggregate metrics.
+# Order matters — positional mapping starts at index 18 (after TEST_NAME).
+_PER_KIND_COLUMNS = [
+    "POINT_LOOKUP_P50_LATENCY_MS",
+    "POINT_LOOKUP_P95_LATENCY_MS",
+    "POINT_LOOKUP_P99_LATENCY_MS",
+    "RANGE_SCAN_P50_LATENCY_MS",
+    "RANGE_SCAN_P95_LATENCY_MS",
+    "RANGE_SCAN_P99_LATENCY_MS",
+    "INSERT_P50_LATENCY_MS",
+    "INSERT_P95_LATENCY_MS",
+    "INSERT_P99_LATENCY_MS",
+    "UPDATE_P50_LATENCY_MS",
+    "UPDATE_P95_LATENCY_MS",
+    "UPDATE_P99_LATENCY_MS",
+    "GENERIC_SQL_P50_LATENCY_MS",
+    "GENERIC_SQL_P95_LATENCY_MS",
+    "GENERIC_SQL_P99_LATENCY_MS",
+]
+
+_PER_KIND_SELECT = ",\n        ".join(_PER_KIND_COLUMNS)
+
+
+def _row_to_dict(row: tuple) -> dict[str, Any]:
+    """Convert a positional result row to a named dict.
+
+    Assumes the standard SELECT order used by fetch_current_test,
+    fetch_baseline_candidates, and fetch_comparable_candidates.
+    """
+    d = {
+        "test_id": row[0],
+        "run_id": row[1],
+        "test_config": row[2] if isinstance(row[2], dict) else {},
+        "table_type": row[3],
+        "warehouse_size": row[4],
+        "status": row[5],
+        "duration_seconds": row[6],
+        "concurrent_connections": row[7],
+        "qps": row[8],
+        "p50_latency_ms": row[9],
+        "p95_latency_ms": row[10],
+        "p99_latency_ms": row[11],
+        "error_rate": row[12],
+        "read_operations": row[13],
+        "total_operations": row[14],
+        "start_time": row[15],
+        "find_max_result": row[16] if len(row) > 16 else None,
+        "test_name": row[17] if len(row) > 17 else None,
+    }
+    # Map per-kind columns starting at index 18
+    for i, col in enumerate(_PER_KIND_COLUMNS):
+        idx = 18 + i
+        d[col.lower()] = row[idx] if len(row) > idx else None
+    return d
+
+
+def _enrich_row_dict(row_dict: dict[str, Any]) -> dict[str, Any]:
+    """Apply common post-processing to a row dict (name override, FIND_MAX parsing)."""
+    if row_dict["test_name"]:
+        row_dict["test_config"]["template_name"] = row_dict["test_name"]
+
+    find_max_result = row_dict.get("find_max_result")
+    if find_max_result and isinstance(find_max_result, dict):
+        step_history = find_max_result.get("step_history", [])
+        fm_derived = derive_find_max_best_stable(step_history)
+        row_dict.update(fm_derived)
+
+    return row_dict
+
 def extract_test_features(row: dict[str, Any]) -> dict[str, Any]:
     """
     Extract comparison-relevant features from a test result row.
@@ -109,6 +178,22 @@ def extract_test_features(row: dict[str, Any]) -> dict[str, Any]:
         "total_steps": row.get("total_steps"),
         # Quality metrics
         "steady_state_quality": row.get("steady_state_quality"),
+        # Per-kind latency metrics
+        "point_lookup_p50_latency_ms": row.get("point_lookup_p50_latency_ms"),
+        "point_lookup_p95_latency_ms": row.get("point_lookup_p95_latency_ms"),
+        "point_lookup_p99_latency_ms": row.get("point_lookup_p99_latency_ms"),
+        "range_scan_p50_latency_ms": row.get("range_scan_p50_latency_ms"),
+        "range_scan_p95_latency_ms": row.get("range_scan_p95_latency_ms"),
+        "range_scan_p99_latency_ms": row.get("range_scan_p99_latency_ms"),
+        "insert_p50_latency_ms": row.get("insert_p50_latency_ms"),
+        "insert_p95_latency_ms": row.get("insert_p95_latency_ms"),
+        "insert_p99_latency_ms": row.get("insert_p99_latency_ms"),
+        "update_p50_latency_ms": row.get("update_p50_latency_ms"),
+        "update_p95_latency_ms": row.get("update_p95_latency_ms"),
+        "update_p99_latency_ms": row.get("update_p99_latency_ms"),
+        "generic_sql_p50_latency_ms": row.get("generic_sql_p50_latency_ms"),
+        "generic_sql_p95_latency_ms": row.get("generic_sql_p95_latency_ms"),
+        "generic_sql_p99_latency_ms": row.get("generic_sql_p99_latency_ms"),
         # Timestamps
         "start_time": row.get("start_time"),
         "test_date": row.get("start_time"),
@@ -242,6 +327,21 @@ async def fetch_baseline_candidates(
         t.START_TIME,
         t.FIND_MAX_RESULT,
         t.TEST_NAME,
+        t.POINT_LOOKUP_P50_LATENCY_MS,
+        t.POINT_LOOKUP_P95_LATENCY_MS,
+        t.POINT_LOOKUP_P99_LATENCY_MS,
+        t.RANGE_SCAN_P50_LATENCY_MS,
+        t.RANGE_SCAN_P95_LATENCY_MS,
+        t.RANGE_SCAN_P99_LATENCY_MS,
+        t.INSERT_P50_LATENCY_MS,
+        t.INSERT_P95_LATENCY_MS,
+        t.INSERT_P99_LATENCY_MS,
+        t.UPDATE_P50_LATENCY_MS,
+        t.UPDATE_P95_LATENCY_MS,
+        t.UPDATE_P99_LATENCY_MS,
+        t.GENERIC_SQL_P50_LATENCY_MS,
+        t.GENERIC_SQL_P95_LATENCY_MS,
+        t.GENERIC_SQL_P99_LATENCY_MS,
         ROW_NUMBER() OVER (ORDER BY t.START_TIME DESC) AS recency_rank
     FROM {prefix}.TEST_RESULTS t
     JOIN current_test c ON
@@ -266,40 +366,10 @@ async def fetch_baseline_candidates(
 
     results = []
     for row in rows:
-        # Convert row tuple to dict (assuming column order matches SELECT)
-        row_dict = {
-            "test_id": row[0],
-            "run_id": row[1],
-            "test_config": row[2] if isinstance(row[2], dict) else {},
-            "table_type": row[3],
-            "warehouse_size": row[4],
-            "status": row[5],
-            "duration_seconds": row[6],
-            "concurrent_connections": row[7],
-            "qps": row[8],
-            "p50_latency_ms": row[9],
-            "p95_latency_ms": row[10],
-            "p99_latency_ms": row[11],
-            "error_rate": row[12],
-            "read_operations": row[13],
-            "total_operations": row[14],
-            "start_time": row[15],
-            "find_max_result": row[16] if len(row) > 16 else None,
-            "test_name": row[17] if len(row) > 17 else None,
-            "recency_rank": row[18] if len(row) > 18 else None,
-        }
-
-        # Override test_config name if column name exists
-        if row_dict["test_name"]:
-            row_dict["test_config"]["template_name"] = row_dict["test_name"]
-
-        # Parse FIND_MAX result if present
-        find_max_result = row_dict.get("find_max_result")
-        if find_max_result and isinstance(find_max_result, dict):
-            step_history = find_max_result.get("step_history", [])
-            fm_derived = derive_find_max_best_stable(step_history)
-            row_dict.update(fm_derived)
-
+        row_dict = _row_to_dict(row)
+        # recency_rank is the last column (after per-kind columns)
+        row_dict["recency_rank"] = row[-1] if len(row) > len(_PER_KIND_COLUMNS) + 18 else None
+        row_dict = _enrich_row_dict(row_dict)
         results.append(extract_test_features(row_dict))
 
     return results
@@ -367,7 +437,8 @@ async def fetch_comparable_candidates(
         TOTAL_OPERATIONS,
         START_TIME,
         FIND_MAX_RESULT,
-        TEST_NAME
+        TEST_NAME,
+        {_PER_KIND_SELECT}
     FROM {prefix}.TEST_RESULTS
     WHERE TABLE_TYPE = ?
       AND TEST_ID != ?
@@ -389,27 +460,7 @@ async def fetch_comparable_candidates(
     current_fingerprint = current_test.get("sql_fingerprint")
     
     for row in rows:
-        # Parse row to dict
-        row_dict = {
-            "test_id": row[0],
-            "run_id": row[1],
-            "test_config": row[2] if isinstance(row[2], dict) else {},
-            "table_type": row[3],
-            "warehouse_size": row[4],
-            "status": row[5],
-            "duration_seconds": row[6],
-            "concurrent_connections": row[7],
-            "qps": row[8],
-            "p50_latency_ms": row[9],
-            "p95_latency_ms": row[10],
-            "p99_latency_ms": row[11],
-            "error_rate": row[12],
-            "read_operations": row[13],
-            "total_operations": row[14],
-            "start_time": row[15],
-            "find_max_result": row[16] if len(row) > 16 else None,
-            "test_name": row[17] if len(row) > 17 else None,
-        }
+        row_dict = _row_to_dict(row)
         
         # Override test_config name if column name exists
         if row_dict["test_name"]:
@@ -467,7 +518,8 @@ async def fetch_current_test(pool: Any, test_id: str) -> dict[str, Any] | None:
         TOTAL_OPERATIONS,
         START_TIME,
         FIND_MAX_RESULT,
-        TEST_NAME
+        TEST_NAME,
+        {_PER_KIND_SELECT}
     FROM {prefix}.TEST_RESULTS
     WHERE TEST_ID = ?
     """
@@ -477,38 +529,7 @@ async def fetch_current_test(pool: Any, test_id: str) -> dict[str, Any] | None:
     if not rows:
         return None
 
-    row = rows[0]
-    row_dict = {
-        "test_id": row[0],
-        "run_id": row[1],
-        "test_config": row[2] if isinstance(row[2], dict) else {},
-        "table_type": row[3],
-        "warehouse_size": row[4],
-        "status": row[5],
-        "duration_seconds": row[6],
-        "concurrent_connections": row[7],
-        "qps": row[8],
-        "p50_latency_ms": row[9],
-        "p95_latency_ms": row[10],
-        "p99_latency_ms": row[11],
-        "error_rate": row[12],
-        "read_operations": row[13],
-        "total_operations": row[14],
-        "start_time": row[15],
-        "find_max_result": row[16] if len(row) > 16 else None,
-        "test_name": row[17] if len(row) > 17 else None,
-    }
-
-    # Override test_config name if column name exists
-    if row_dict["test_name"]:
-        row_dict["test_config"]["template_name"] = row_dict["test_name"]
-
-    # Parse FIND_MAX result if present
-    find_max_result = row_dict.get("find_max_result")
-    if find_max_result and isinstance(find_max_result, dict):
-        step_history = find_max_result.get("step_history", [])
-        fm_derived = derive_find_max_best_stable(step_history)
-        row_dict.update(fm_derived)
+    row_dict = _enrich_row_dict(_row_to_dict(rows[0]))
 
     return extract_test_features(row_dict)
 
@@ -611,6 +632,19 @@ def calculate_rolling_statistics(
         "error_rate_pct": percentile(error_values, 50),
     }
 
+    # Per-kind P95 medians (only include kinds with data)
+    _per_kind_p95_keys = [
+        "point_lookup_p95_latency_ms",
+        "range_scan_p95_latency_ms",
+        "insert_p95_latency_ms",
+        "update_p95_latency_ms",
+        "generic_sql_p95_latency_ms",
+    ]
+    for key in _per_kind_p95_keys:
+        vals = sorted([b[key] for b in used if b.get(key) is not None])
+        if vals:
+            rolling_median[key] = percentile(vals, 50)
+
     # Calculate confidence bands (P10-P90)
     confidence_band = {
         "qps_p10": percentile(qps_values, 10),
@@ -676,6 +710,27 @@ def calculate_deltas(
         "error_rate_delta_pct": safe_delta_pct(
             current.get("error_rate"), baseline.get("error_rate")
         ),
+        # Per-kind P95 deltas
+        "point_lookup_p95_delta_pct": safe_delta_pct(
+            current.get("point_lookup_p95_latency_ms"),
+            baseline.get("point_lookup_p95_latency_ms"),
+        ),
+        "range_scan_p95_delta_pct": safe_delta_pct(
+            current.get("range_scan_p95_latency_ms"),
+            baseline.get("range_scan_p95_latency_ms"),
+        ),
+        "insert_p95_delta_pct": safe_delta_pct(
+            current.get("insert_p95_latency_ms"),
+            baseline.get("insert_p95_latency_ms"),
+        ),
+        "update_p95_delta_pct": safe_delta_pct(
+            current.get("update_p95_latency_ms"),
+            baseline.get("update_p95_latency_ms"),
+        ),
+        "generic_sql_p95_delta_pct": safe_delta_pct(
+            current.get("generic_sql_p95_latency_ms"),
+            baseline.get("generic_sql_p95_latency_ms"),
+        ),
     }
 
 
@@ -716,6 +771,22 @@ def determine_verdict(deltas: dict[str, Any]) -> dict[str, Any]:
         classifications["p99"] = classify_change("p99_latency", p99_delta)
         if classifications["p99"] != "NEUTRAL":
             reasons.append(f"P99 latency {p99_delta:+.1f}% ({classifications['p99']})")
+
+    # Per-kind P95 deltas (only classify if data exists)
+    _per_kind_labels = {
+        "point_lookup_p95_delta_pct": "Point Lookup P95",
+        "range_scan_p95_delta_pct": "Range Scan P95",
+        "insert_p95_delta_pct": "Insert P95",
+        "update_p95_delta_pct": "Update P95",
+        "generic_sql_p95_delta_pct": "Generic SQL P95",
+    }
+    for key, label in _per_kind_labels.items():
+        delta = deltas.get(key)
+        if delta is not None:
+            cls = classify_change("p95_latency", delta)
+            classifications[key] = cls
+            if cls != "NEUTRAL":
+                reasons.append(f"{label} {delta:+.1f}% ({cls})")
 
     # Determine overall verdict
     values = list(classifications.values())
@@ -823,21 +894,27 @@ async def build_compare_context(
     # Build vs_median comparison
     vs_median = None
     if baseline_stats["available"]:
-        median_deltas = calculate_deltas(
-            current,
-            {
-                "qps": baseline_stats["rolling_median"].get("qps"),
-                "p50_latency_ms": baseline_stats["rolling_median"].get("p50_latency_ms"),
-                "p95_latency_ms": baseline_stats["rolling_median"].get("p95_latency_ms"),
-                "p99_latency_ms": baseline_stats["rolling_median"].get("p99_latency_ms"),
-                "error_rate": baseline_stats["rolling_median"].get("error_rate_pct"),
-            },
-        )
+        rm = baseline_stats["rolling_median"]
+        median_baseline = {
+            "qps": rm.get("qps"),
+            "p50_latency_ms": rm.get("p50_latency_ms"),
+            "p95_latency_ms": rm.get("p95_latency_ms"),
+            "p99_latency_ms": rm.get("p99_latency_ms"),
+            "error_rate": rm.get("error_rate_pct"),
+            # Per-kind medians (only present if baselines had data)
+            "point_lookup_p95_latency_ms": rm.get("point_lookup_p95_latency_ms"),
+            "range_scan_p95_latency_ms": rm.get("range_scan_p95_latency_ms"),
+            "insert_p95_latency_ms": rm.get("insert_p95_latency_ms"),
+            "update_p95_latency_ms": rm.get("update_p95_latency_ms"),
+            "generic_sql_p95_latency_ms": rm.get("generic_sql_p95_latency_ms"),
+        }
+        median_deltas = calculate_deltas(current, median_baseline)
         verdict_result = determine_verdict(median_deltas)
 
         vs_median = {
             "qps_delta_pct": median_deltas.get("qps_delta_pct"),
             "p95_delta_pct": median_deltas.get("p95_delta_pct"),
+            "generic_sql_p95_delta_pct": median_deltas.get("generic_sql_p95_delta_pct"),
             **verdict_result,
         }
 
@@ -914,6 +991,11 @@ async def build_compare_context(
                     "qps": candidate.get("qps"),
                     "p95_latency_ms": candidate.get("p95_latency_ms"),
                     "error_rate_pct": candidate.get("error_rate"),
+                    "point_lookup_p95_latency_ms": candidate.get("point_lookup_p95_latency_ms"),
+                    "range_scan_p95_latency_ms": candidate.get("range_scan_p95_latency_ms"),
+                    "insert_p95_latency_ms": candidate.get("insert_p95_latency_ms"),
+                    "update_p95_latency_ms": candidate.get("update_p95_latency_ms"),
+                    "generic_sql_p95_latency_ms": candidate.get("generic_sql_p95_latency_ms"),
                 },
                 "is_same_template": strict_mode
             })

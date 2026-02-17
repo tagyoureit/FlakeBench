@@ -131,6 +131,24 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     update_min_latency_ms FLOAT,
     update_max_latency_ms FLOAT,
 
+    generic_sql_p50_latency_ms FLOAT,
+    generic_sql_p95_latency_ms FLOAT,
+    generic_sql_p99_latency_ms FLOAT,
+    generic_sql_min_latency_ms FLOAT,
+    generic_sql_max_latency_ms FLOAT,
+
+    -- GENERIC_SQL throughput metrics (derived from QUERY_EXECUTIONS)
+    generic_sql_rows_per_sec FLOAT,
+    generic_sql_bytes_scanned_per_sec FLOAT,
+
+    -- Aggregate OLAP metrics (across all GENERIC_SQL queries in this test)
+    olap_total_operations INTEGER DEFAULT 0,
+    olap_total_rows_processed BIGINT DEFAULT 0,
+    olap_total_bytes_scanned BIGINT DEFAULT 0,
+
+    -- Extensible per-kind OLAP metrics payload (sub-kind breakdowns, etc.)
+    olap_metrics VARIANT,
+
     -- Overhead summaries (derived)
     app_overhead_p50_ms FLOAT,
     app_overhead_p95_ms FLOAT,
@@ -196,7 +214,19 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     -- Postgres capabilities captured at test start
     pg_stat_statements_available BOOLEAN,     -- Was extension available?
     pg_track_io_timing BOOLEAN,               -- Was I/O timing enabled?
-    pg_version VARCHAR(50)                    -- Postgres version string
+    pg_version VARCHAR(50),                    -- Postgres version string
+
+    -- ==========================================================================
+    -- Methodology metadata (benchmark reproducibility)
+    -- ==========================================================================
+    
+    -- Cache warmup temperature: 0.0 = cold (no warmup), 1.0 = fully warmed
+    run_temperature FLOAT,
+    -- Trial index within a multi-trial run (1-based); NULL for single-trial runs
+    trial_index INTEGER,
+    -- Named realism profile controlling cache/warmup/timing behavior
+    -- Values: BASELINE (default), COLD_START, WARM_CACHE, PRODUCTION_LIKE, etc.
+    realism_profile VARCHAR(50)
 );
 
 -- =============================================================================
@@ -349,7 +379,13 @@ CREATE OR ALTER TABLE QUERY_EXECUTIONS (
 
     -- Warehouse / caching details
     sf_cluster_number INTEGER,
-    sf_pct_scanned_from_cache FLOAT
+    sf_pct_scanned_from_cache FLOAT,
+
+    -- Query profile metrics (from QUERY_HISTORY enrichment)
+    sf_partitions_scanned BIGINT,
+    sf_partitions_total BIGINT,
+    sf_bytes_spilled_local BIGINT,
+    sf_bytes_spilled_remote BIGINT
 );
 
 -- Clustering key for efficient filtering by TEST_ID (used by /worker-metrics, /statistics, /ai-analysis endpoints)

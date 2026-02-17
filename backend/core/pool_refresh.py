@@ -5,7 +5,9 @@ Refreshes KEY pools by re-sampling from the table after writes have occurred.
 Called during PROCESSING phase to avoid adding visible latency to the user.
 """
 
+import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -150,25 +152,51 @@ async def refresh_key_pool_after_writes(
         )
         keys_sampled = count_rows[0][0] if count_rows else 0
 
-        # Update template config to point to new pool_id
-        # We update the ai_workload.pool_id in TEST_TEMPLATES.CONFIG
+        # Update template config to point to new pool_id and update pools metadata
+        # We update ai_workload.pool_id and ai_workload.pools[key_col] in TEST_TEMPLATES.CONFIG
+        now_iso = datetime.now(UTC).isoformat()
+        key_col_upper = key_col.upper()
+        pool_meta = {"count": keys_sampled, "kind": "KEY", "refreshed_at": now_iso}
         await pool.execute_query(
             f"""
             UPDATE {prefix}.TEST_TEMPLATES
             SET CONFIG = OBJECT_INSERT(
-                CONFIG,
+                OBJECT_INSERT(
+                    CONFIG,
+                    'ai_workload',
+                    OBJECT_INSERT(
+                        CONFIG:ai_workload,
+                        'pool_id',
+                        ?
+                    ),
+                    TRUE
+                ),
                 'ai_workload',
                 OBJECT_INSERT(
-                    CONFIG:ai_workload,
-                    'pool_id',
-                    ?
+                    OBJECT_INSERT(
+                        CONFIG,
+                        'ai_workload',
+                        OBJECT_INSERT(
+                            CONFIG:ai_workload,
+                            'pool_id',
+                            ?
+                        ),
+                        TRUE
+                    ):ai_workload,
+                    'pools',
+                    OBJECT_INSERT(
+                        COALESCE(CONFIG:ai_workload:pools, OBJECT_CONSTRUCT()),
+                        ?,
+                        PARSE_JSON(?)
+                    ),
+                    TRUE
                 ),
                 TRUE
             ),
             UPDATED_AT = CURRENT_TIMESTAMP()
             WHERE TEMPLATE_ID = ?
             """,
-            params=[new_pool_id, template_id],
+            params=[new_pool_id, new_pool_id, key_col_upper, json.dumps(pool_meta), template_id],
         )
 
         logger.info(
@@ -212,8 +240,13 @@ def test_had_writes(scenario_config: dict[str, Any]) -> bool:
                     weight = float(raw_weight)
                 except (TypeError, ValueError):
                     weight = 0.0
-                normalized_weight = weight / 100.0 if weight > 1.0 else weight
-                if kind in ("INSERT", "UPDATE", "DELETE") and normalized_weight > 0:
+                # weight_pct is stored as percentage points (0.00-100.00).
+                normalized_weight = max(0.0, min(weight / 100.0, 1.0))
+                operation_type = str(q.get("operation_type") or "").upper()
+                is_write = kind in ("INSERT", "UPDATE", "DELETE") or (
+                    kind == "GENERIC_SQL" and operation_type == "WRITE"
+                )
+                if is_write and normalized_weight > 0:
                     return True
 
     # Check for insert/update ratio in AI workload

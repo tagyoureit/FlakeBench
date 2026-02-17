@@ -1,5 +1,8 @@
 """
 Dashboard Aggregations - Query builders for dynamic tables.
+
+These queries use the full-fidelity schema from sql/schema/dashboard_tables.sql.
+Deploy the SQL schema to get all columns available.
 """
 
 from typing import Optional
@@ -11,7 +14,10 @@ from datetime import date
 # =============================================================================
 
 def get_table_type_summary_query() -> str:
-    """Query to fetch table type summary from dynamic table."""
+    """Query to fetch table type summary from dynamic table.
+    
+    Uses full schema from DT_TABLE_TYPE_SUMMARY with all latency percentile stats.
+    """
     return """
     SELECT
         TABLE_TYPE,
@@ -21,17 +27,23 @@ def get_table_type_summary_query() -> str:
         MIN_QPS,
         MAX_QPS,
         MEDIAN_QPS,
+        P95_QPS,
         STDDEV_QPS,
         AVG_P50_MS,
+        MIN_P50_MS,
+        MAX_P50_MS,
         MEDIAN_P50_MS,
         AVG_P95_MS,
         MIN_P95_MS,
         MAX_P95_MS,
         MEDIAN_P95_MS,
         AVG_P99_MS,
+        MIN_P99_MS,
+        MAX_P99_MS,
         MEDIAN_P99_MS,
         AVG_ERROR_RATE,
         MAX_ERROR_RATE,
+        TOTAL_FAILED_OPS,
         TOTAL_CREDITS,
         AVG_CREDITS_PER_TEST,
         CREDITS_PER_1K_OPS,
@@ -95,7 +107,10 @@ def get_template_list_query(
 
 
 def get_template_statistics_query(template_id: str) -> tuple[str, dict]:
-    """Query to fetch detailed template statistics."""
+    """Query to fetch detailed template statistics.
+    
+    Uses full schema from DT_TEMPLATE_STATISTICS with all latency percentile stats.
+    """
     
     query = """
     SELECT
@@ -114,21 +129,21 @@ def get_template_statistics_query(template_id: str) -> tuple[str, dict]:
         MAX_QPS,
         MEDIAN_QPS,
         
-        -- p50 stats
+        -- p50 stats (full)
         AVG_P50_MS,
         STDDEV_P50_MS,
         MIN_P50_MS,
         MAX_P50_MS,
         MEDIAN_P50_MS,
         
-        -- p95 stats
+        -- p95 stats (full)
         AVG_P95_MS,
         STDDEV_P95_MS,
         MIN_P95_MS,
         MAX_P95_MS,
         MEDIAN_P95_MS,
         
-        -- p99 stats
+        -- p99 stats (full)
         AVG_P99_MS,
         STDDEV_P99_MS,
         MIN_P99_MS,
@@ -151,7 +166,7 @@ def get_template_statistics_query(template_id: str) -> tuple[str, dict]:
         FIRST_RUN,
         LAST_RUN,
         
-        -- Stability
+        -- Stability metrics
         CV_QPS,
         CV_P95,
         QPS_TREND_PCT,
@@ -171,7 +186,10 @@ def get_template_runs_query(
     sort_by: str = "start_time",
     sort_order: str = "desc"
 ) -> tuple[str, dict]:
-    """Query to fetch all runs for a template."""
+    """Query to fetch all runs for a template.
+    
+    Uses V_TEMPLATE_RUNS view which includes estimated_credits and credits_per_1k_ops.
+    """
     
     # Validate sort order
     order = "DESC" if sort_order.lower() == "desc" else "ASC"
@@ -196,7 +214,7 @@ def get_template_runs_query(
         P95_LATENCY_MS,
         P99_LATENCY_MS,
         ERROR_RATE,
-        WAREHOUSE_CREDITS_USED,
+        ESTIMATED_CREDITS,
         CREDITS_PER_1K_OPS,
         LOAD_MODE,
         RECENCY_RANK
@@ -253,7 +271,10 @@ def get_template_scatter_query(
     x_metric: str = "duration_seconds",
     y_metric: str = "qps"
 ) -> tuple[str, dict]:
-    """Query to fetch scatter plot data."""
+    """Query to fetch scatter plot data.
+    
+    Uses V_TEMPLATE_RUNS which has estimated_credits and credits_per_1k_ops.
+    """
     
     # Validate and map metrics
     metric_columns = {
@@ -269,7 +290,8 @@ def get_template_scatter_query(
         "concurrency": "CONCURRENT_CONNECTIONS",
         "concurrent_connections": "CONCURRENT_CONNECTIONS",
         "error_rate": "ERROR_RATE",
-        "credits": "WAREHOUSE_CREDITS_USED",
+        "credits": "ESTIMATED_CREDITS",
+        "estimated_credits": "ESTIMATED_CREDITS",
         "cost": "CREDITS_PER_1K_OPS",
         "credits_per_1k_ops": "CREDITS_PER_1K_OPS",
     }
@@ -326,10 +348,12 @@ def get_daily_cost_query(
         WAREHOUSE_SIZE,
         TEST_COUNT,
         TOTAL_CREDITS,
+        AVG_CREDITS_PER_TEST,
         TOTAL_OPERATIONS,
         CREDITS_PER_1K_OPS,
         AVG_QPS,
-        AVG_P95_MS
+        AVG_P95_MS,
+        TOTAL_TEST_DURATION_SECONDS
     FROM DT_DAILY_COST_ROLLUP
     {where_clause}
     ORDER BY RUN_DATE DESC, TABLE_TYPE
@@ -339,7 +363,10 @@ def get_daily_cost_query(
 
 
 def get_template_time_series_query(template_id: str) -> tuple[str, dict]:
-    """Query to fetch time series data for trend analysis."""
+    """Query to fetch time series data for trend analysis.
+    
+    Uses V_TEMPLATE_RUNS which has credits_per_1k_ops pre-calculated.
+    """
     
     query = """
     SELECT

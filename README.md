@@ -1,73 +1,81 @@
-# Unistore Benchmark
+# FlakeBench
 
 > **Performance benchmarking tool for Snowflake and Postgres databases**
-> "3DMark for databases" - Test Standard Tables, Hybrid Tables, Interactive
-> Tables, and Postgres
+> "3DMark for databases" — Test Standard Tables, Hybrid Tables, Interactive
+> Tables, Dynamic Tables, and Postgres
 
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11+-green)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-## 🎯 Overview
+## Overview
 
-Unistore Benchmark is a comprehensive performance testing tool designed to
-benchmark and compare different Snowflake table types (Standard, Hybrid,
-Interactive) and Postgres databases. It provides real-time metrics visualization,
-configurable test scenarios, and side-by-side comparison of up to 5 test results.
+FlakeBench is a performance testing tool for benchmarking and comparing
+Snowflake table types and Postgres databases. It provides real-time metrics
+visualization, configurable test templates, and side-by-side comparison of
+results.
 
-### Key Features
+**Supported table types:**
 
-- ⚡ **Real-time Dashboard** - Live metrics updates every 1 second via WebSocket
-- 🔧 **Configurable Tests** - Select existing tables/views, pick warehouses, and
-  tune workload parameters
-- 📊 **Performance Metrics** - Operations/sec, latency percentiles (p50, p95,
-  p99), throughput
-- 🔄 **Comparison View** - Side-by-side comparison of up to 5 test configurations
-- 📚 **Test Templates** - Pre-built scenarios including R180 POC template
-- 💾 **Results Storage** - All test results stored in Snowflake for historical analysis
-- 🖥️ **Mac Desktop App** - Standalone application, no Python installation required
+- **Standard** — Traditional Snowflake tables
+- **Hybrid** — Unistore hybrid tables
+- **Interactive** — Interactive (HTAP) tables
+- **Dynamic** — Dynamic tables with auto-refresh
+- **Postgres** — PostgreSQL (including Snowflake via Postgres wire protocol)
 
-## 🏗️ Architecture
+## Key Features
+
+- **Real-time dashboard** — Live metrics updates every 1 second via WebSocket
+- **Configurable templates** — Select tables/views, pick warehouses, tune
+  workload parameters; templates stored in Snowflake
+- **Comparison view** — Side-by-side comparison of up to 5 test results with
+  CSV export
+- **AI SQL generation** — Auto-generate canonical queries (point lookup, range
+  scan, insert, update) matched to your table type and backend
+- **Cost analysis** — Estimated credit consumption and cost efficiency metrics
+  per test run
+- **Connection management** — Store and manage multiple database connections
+  with AES-256-GCM encrypted credentials
+- **Test templates** — Pre-built YAML scenarios (OLTP, OLAP, mixed workload,
+  high concurrency, R180 POC) plus DB-stored templates created via the UI
+
+## Architecture
 
 **Tech Stack:**
-- **Backend:** FastAPI (async Python web framework)
+
+- **Backend:** FastAPI (async Python)
 - **Frontend:** HTMX + Alpine.js (server-driven UI with client-side reactivity)
 - **Styling:** Tailwind CSS
 - **Charts:** Chart.js
 - **Database:** Snowflake (primary), Postgres (optional)
 
-**Why this stack?**
-- No build step required (no npm, no webpack)
-- Lightweight (~30KB total JS)
-- Perfect for real-time WebSocket updates
-- Easy to package as Mac desktop app
+**Why this stack?** No build step required (no npm, no webpack). Lightweight
+(~30KB total JS). Well-suited for real-time WebSocket-driven updates.
 
-## 📋 Prerequisites
+## Prerequisites
 
 - Python 3.11 or higher
-- [uv](https://github.com/astral-sh/uv) - Fast Python package manager
+- [uv](https://github.com/astral-sh/uv) — Fast Python package manager
 - Snowflake account with appropriate permissions
 - (Optional) Postgres database for cross-database comparison
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Clone and Setup
+### 1. Clone and install
 
 ```bash
-# Clone the repository
 git clone <repository-url>
-cd unistore_performance_analysis
+cd FlakeBench
 
-# Install dependencies with uv
+# Install dependencies
 uv sync
 
 # Create environment file from template
 cp env.example .env
 ```
 
-### 2. Configure Environment
+### 2. Configure environment
 
-Edit `.env` and add your Snowflake credentials:
+Edit `.env` and set your Snowflake bootstrap credentials:
 
 ```bash
 SNOWFLAKE_ACCOUNT=your_account.region
@@ -75,69 +83,150 @@ SNOWFLAKE_USER=your_username
 SNOWFLAKE_PASSWORD=your_password
 SNOWFLAKE_WAREHOUSE=COMPUTE_WH
 SNOWFLAKE_DATABASE=FLAKEBENCH
+SNOWFLAKE_SCHEMA=PUBLIC
 SNOWFLAKE_ROLE=ACCOUNTADMIN
 ```
 
-### 3. Initialize Database Schema
+These credentials are used for the control plane (results storage, schema
+management, connection table). Benchmark target connections are configured via
+the Settings page.
+
+### 3. Initialize database schema
 
 ```bash
-# Run schema setup script
 uv run python -m backend.setup_schema
 ```
 
-### 4. Start the Application
+### 4. Start the application
 
 ```bash
 # Development mode (with auto-reload)
-uv run uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 --log-config logging_config.yaml
+uv run uvicorn backend.main:app --reload [--host 127.0.0.1 --port 8000]
 
 # Production mode
-uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000 --log-config logging_config.yaml
+uv run uvicorn backend.main:app [--host 0.0.0.0 --port 8000]
 ```
 
-### 5. Open Your Browser
+### 5. Open your browser
 
 Navigate to: <http://localhost:8000>
 
-## 📖 Usage Guide
+### 6. Verify it works
+
+```bash
+curl http://localhost:8000/health
+```
+
+## Configuration
+
+### Environment Variables (`.env`)
+
+**Required** — Snowflake bootstrap connection:
+
+| Variable | Description |
+|---|---|
+| `SNOWFLAKE_ACCOUNT` | Account identifier (e.g., `xy12345.us-east-1`) |
+| `SNOWFLAKE_USER` | Username |
+| `SNOWFLAKE_PASSWORD` | Password |
+| `SNOWFLAKE_WAREHOUSE` | Warehouse for control-plane queries |
+| `SNOWFLAKE_DATABASE` | Database for results storage (default: `FLAKEBENCH`) |
+| `SNOWFLAKE_SCHEMA` | Schema (default: `PUBLIC`) |
+| `SNOWFLAKE_ROLE` | Role |
+
+**Security:**
+
+| Variable | Description |
+|---|---|
+| `FLAKEBENCH_CREDENTIAL_KEY` | 32-character key for AES-256-GCM encryption of stored credentials |
+
+| Scenario | Behavior |
+|---|---|
+| No key set | Uses default key, shows warning in UI |
+| Key set | Uses your key, no warning |
+| Key changed after credentials stored | Existing credentials become unreadable — re-enter them |
+
+For production, always set `FLAKEBENCH_CREDENTIAL_KEY` to a unique 32-character
+value.
+
+**Optional** — Connection pool and executor tuning:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SNOWFLAKE_POOL_SIZE` | 5 | Control-plane connection pool size |
+| `SNOWFLAKE_MAX_OVERFLOW` | 10 | Max overflow connections |
+| `SNOWFLAKE_POOL_MAX_PARALLEL_CREATES` | 8 | Max concurrent `connect()` calls for benchmark pools |
+| `SNOWFLAKE_RESULTS_EXECUTOR_MAX_WORKERS` | 16 | Thread pool for results persistence |
+| `SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS` | 256 | Default cap for per-node benchmark threads |
+| `WS_PING_INTERVAL` | 30 | WebSocket ping interval (seconds) |
+| `POSTGRES_CONNECT_ON_STARTUP` | false | Initialize Postgres pool at startup |
+
+See `env.example` for the full list including timeouts, live metrics, and app
+settings.
+
+### Connection Management
+
+FlakeBench supports two methods for database authentication:
+
+**1. Environment variables (`.env`):**
+- Used by the control plane (results storage, schema management)
+- Fallback for templates without a stored connection
+
+**2. Stored connections (Settings → Connections):**
+- Managed via the UI with credentials encrypted in Snowflake (AES-256-GCM)
+- Select per-template on the Configure page
+- Supports multiple connections to different accounts/databases
+
+Connections store only authentication details (account, user, password, role).
+Database, schema, and warehouse are configured per-template.
+
+**To add a connection:**
+1. Go to **Settings** → **Connections**
+2. Click **Add Connection**
+3. Enter connection details: name, type (SNOWFLAKE or POSTGRES), account/host,
+   role, and credentials
+4. Credentials are encrypted at rest
+
+### Postgres Startup Behavior
+
+Postgres is optional. By default, the app does **not** connect to Postgres at
+startup. Set `POSTGRES_CONNECT_ON_STARTUP=true` to initialize the Postgres pool
+during FastAPI startup.
+
+## Usage Guide
 
 ### Creating a Test
 
 1. Click **"New Test"** in the navigation
-2. Select table type (Standard/Hybrid/Interactive/Postgres)
-3. **Select a Connection** (optional):
-   - Choose a stored connection from the dropdown, OR
-   - Leave blank to use credentials from `.env` (backward compatible)
+2. Select table type (Standard / Hybrid / Interactive / Dynamic / Postgres)
+3. **Select a connection** (optional) — choose a stored connection or leave
+   blank to use `.env` credentials
 4. Configure settings:
    - **Table:** Choose an existing database/schema/table (or view) from dropdowns
    - **Warehouse:** Size, multi-cluster, scaling policy
-   - **Test Parameters:** Duration + load mode (fixed workers or auto-scale target)
-   - **Queries, Mix, and Targets:** Templates store all SQL (4 canonical queries)
-     and the per-query mix % + SLO targets (P95/P99 latency + error%).
+   - **Test parameters:** Duration + load mode (fixed workers or auto-scale target)
+   - **Queries, mix, and targets:** Templates store all SQL (4 canonical queries)
+     and the per-query mix % + SLO targets (P95/P99 latency + error%)
      - **Mix preset:** Quickly adjusts weights (does not change SQL)
      - **Generate SQL for This Table Type:** Auto-fills the 4 canonical queries
        (point lookup / range scan / insert / update) to match the selected table
-       and backend (Snowflake vs Postgres-family).
-     - Preview-only: **no DB writes happen until you save the template**
-     - If a usable key/time column can't be detected, the affected SQL will be
-       blank and its % set to 0 (toast will be yellow with details)
+       and backend (Snowflake vs Postgres)
+     - Preview-only — no DB writes happen until you save the template
 5. Click **"Start Test"**
 
-**Note:** Views are supported for benchmarking, but they are read-only. Use
-`READ_ONLY` workloads when selecting a view.
+Views are supported for benchmarking but are read-only. Use `READ_ONLY`
+workloads when selecting a view.
 
 After saving a template, you can optionally run **"Prepare AI Workload (Pools +
-Metadata)"** (or use **"Save & Prepare"**) to persist large value pools for
-high-concurrency runs (stored in `TEMPLATE_VALUE_POOLS`) and avoid generating
-values at runtime.
+Metadata)"** to persist large value pools for high-concurrency runs (stored in
+`TEMPLATE_VALUE_POOLS`) and avoid generating values at runtime.
 
-### Viewing Real-Time Results
+### Real-Time Dashboard
 
 The dashboard updates every 1 second with:
 - Operations per second (read/write/query)
 - Latency percentiles (p50, p95, p99, max)
 - Throughput (rows/sec, MB/sec)
-- Error rates
+- Error rates and error types
 - Live charts
 
 ### Comparing Tests
@@ -145,16 +234,7 @@ The dashboard updates every 1 second with:
 1. Navigate to **"Compare"**
 2. Search and select up to 5 completed tests
 3. View side-by-side metrics comparison
-4. Export comparison as PDF/CSV
-
-### Using Templates
-
-Pre-built templates available:
-- **R180 POC** - Event processing with hybrid staging and standard archive
-- **OLTP Simple** - Basic transactional workload
-- **OLAP Analytics** - Complex analytical queries
-- **Mixed Workload** - Concurrent reads and writes
-- **High Concurrency** - Stress test for throughput
+4. Export comparison as CSV
 
 ### Smoke Check (4 Variations)
 
@@ -212,130 +292,43 @@ Long smoke test:
 task test:variations:smoke:long
 ```
 
-## 🎨 Project Structure
+## Project Structure
 
 ```text
-unistore_performance_analysis/
+FlakeBench/
 ├── backend/
-│   ├── api/routes/          # REST and WebSocket routes
-│   ├── core/                # Test execution engine
-│   │   ├── table_managers/  # Table type implementations
-│   │   └── workload_generators/  # Workload generation
-│   ├── connectors/          # Database connection pools
-│   ├── models/              # Pydantic data models
-│   ├── templates/           # Jinja2 HTML templates
-│   └── static/              # CSS, JS, images
+│   ├── api/                # REST and WebSocket routes
+│   ├── connectors/         # Database connection pools
+│   ├── core/               # Test execution engine, table managers, cost calculator
+│   ├── models/             # Pydantic data models
+│   ├── websocket/          # WebSocket streaming, metrics, helpers
+│   ├── templates/          # Jinja2 HTML templates
+│   └── static/             # CSS, JS, images
+├── config/
+│   └── test_scenarios/     # Pre-built YAML test scenario templates
+├── docs/                   # Project documentation (see docs/index.md)
+├── scripts/                # Utility scripts
 ├── sql/
-│   ├── schema/              # Results storage schema
-│   └── templates/           # Test scenario templates
-├── config/                  # Configuration files
-├── tests/                   # Test suite
-└── .plan/                   # Project planning documents
+│   └── schema/             # Results storage DDL
+├── tests/                  # Test suite
+└── env.example             # Environment variable template
 ```
 
-## 🔧 Configuration
-
-### Connection Management
-
-FlakeBench supports two methods for database authentication:
-
-**1. Environment Variables (`.env`):**
-- Used by the control plane (results storage, orchestrator)
-- Fallback for templates without a stored connection
-- Configure `SNOWFLAKE_*` and `POSTGRES_*` variables
-
-**2. Stored Connections (Settings → Connections):**
-- Managed via the UI with credentials encrypted in Snowflake (AES-256-GCM)
-- Select per-template on the Configure page
-- Supports multiple connections to different accounts/databases
-
-Connections store only authentication details (account, user, password, role).
-Database, schema, and warehouse are configured per-template.
-
-### Table Type Configurations
-
-**Standard & Hybrid (Snowflake):**
-- Select an existing table (or view)
-- The app introspects the object schema at runtime
-- No table/index/clustering DDL is created by the app
-
-**Interactive Tables:**
-- CLUSTER BY requirements
-- Interactive warehouse configuration
-- Cache warming strategies
-- 5-second query timeout handling
-
-**Postgres (including Snowflake via Postgres protocol):**
-- Select an existing schema + table/view
-- Database selection is fixed by the configured Postgres connection
-
-### Postgres Startup Behavior
-
-Postgres is optional. By default, the app does **not** try to connect to Postgres
-at startup.
-
-- **POSTGRES_CONNECT_ON_STARTUP**: Set to `true` to initialize the Postgres pool
-  during FastAPI startup (default: `false`).
-
-### Warehouse Configurations
-
-- Sizes: XSMALL, SMALL, MEDIUM, LARGE, XLARGE, 2XLARGE, 3XLARGE
-- Multi-cluster: Min/max cluster count
-- Scaling policy: Standard vs Economy
-- Auto-suspend settings
-
-### Test Scenarios
-
-Create custom scenarios in `config/test_scenarios/*.yaml`:
-
-```yaml
-name: "My Custom Test"
-description: "Test description"
-
-tables:
-  - name: my_table
-    type: hybrid
-    indexes:
-      - columns: [id]
-        primary: true
-      - columns: [timestamp, user_id]
-
-workload:
-  duration: 300
-  concurrency: 50
-  load_pattern: steady
-  
-  operations:
-    - type: read
-      queries: ["SELECT * FROM my_table WHERE id = ?"]
-      rate: 1000
-    - type: write
-      batch_size: 100
-      rate: 500
-```
-
-## 📊 Metrics Collected
+## Metrics Collected
 
 ### Performance Metrics
 
-- **Operations/Second:** Read, write, query throughput
-- **Latency:** p50, p95, p99, max response times
-- **Throughput:** Rows/sec, MB/sec
-- **Errors:** Error count, error rate, error types
+- **Operations/second** — Read, write, query throughput
+- **Latency** — p50, p95, p99, max response times
+- **Throughput** — Rows/sec, MB/sec
+- **Errors** — Error count, error rate, error types
 
-### Resource Metrics
+### Cost Metrics
 
-- **Warehouse Utilization:** CPU, memory, concurrency
-- **Connection Pool:** Active connections, pool saturation
-- **Cache Statistics:** Hit rates, evictions (when available)
+- **Credit consumption** — Warehouse compute credits used during test
+- **Cost efficiency** — Estimated cost per operation
 
-### Cost Metrics (when enabled)
-
-- **Credit Consumption:** Warehouse compute credits
-- **Storage Costs:** Data storage estimates
-- **Total Cost:** Estimated cost per test
-
-## 🧪 Testing
+## Testing
 
 ```bash
 # Run all tests
@@ -348,23 +341,7 @@ uv run pytest tests/test_connectors.py
 uv run pytest --cov=backend --cov-report=html
 ```
 
-## 📦 Building Mac Desktop App
-
-```bash
-# Install PyInstaller
-uv pip install pyinstaller
-
-# Build standalone app
-pyinstaller --onefile --windowed \
-  --name "Unistore Benchmark" \
-  --icon assets/icon.icns \
-  backend/main.py
-
-# App will be in dist/ folder
-open dist/Unistore\ Benchmark.app
-```
-
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Connection Issues
 
@@ -379,74 +356,103 @@ open dist/Unistore\ Benchmark.app
 - Increase `WS_PING_INTERVAL` in `.env`
 - Verify stable network connection
 
+### Port Already in Use
+
+```bash
+# Kill process on port 8000
+lsof -ti:8000 | xargs kill -9
+
+# Or use a different port
+uv run uvicorn backend.main:app --port 8001
+```
+
+### Import Errors
+
+```bash
+# Make sure you're in the project root
+cd /path/to/FlakeBench
+
+# Reinstall dependencies
+uv sync
+```
+
+### Configuration Not Loading
+
+```bash
+# Check that .env file exists
+ls -la .env
+
+# Verify environment variables
+uv run python -c "from backend.config import settings; print(settings.APP_HOST)"
+```
+
 ### Performance Issues
 
 **Dashboard slow to update:**
-- Reduce `METRICS_INTERVAL_SECONDS` (but increases DB load)
 - Check browser console for errors
 - Verify WebSocket connection is stable
 
 **High concurrency stalls at start (connection spin-up):**
-- The benchmark creates a **dedicated per-test Snowflake pool** sized to the
-  requested concurrency.
+- The benchmark creates a dedicated per-test Snowflake pool sized to the
+  requested concurrency
 - If startup is slow, reduce `SNOWFLAKE_POOL_MAX_PARALLEL_CREATES` to avoid
-  overwhelming the client with too many concurrent `connect()` calls.
+  overwhelming the client with too many concurrent `connect()` calls
 - Ensure results persistence has its own threads via
-  `SNOWFLAKE_RESULTS_EXECUTOR_MAX_WORKERS`.
+  `SNOWFLAKE_RESULTS_EXECUTOR_MAX_WORKERS`
 
 **Tests timeout:**
 - Increase warehouse size
 - Reduce concurrency level
 - Check for long-running queries
 - Verify adequate connection pool size / executor capacity:
-  - `SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS` is a default safety cap for
-    per-node benchmark threads (adjust as needed for your hardware)
+  `SNOWFLAKE_BENCHMARK_EXECUTOR_MAX_WORKERS` is a default safety cap for
+  per-node benchmark threads (adjust as needed for your hardware)
 
 **Need to simulate thousands of users:**
 - See `docs/scaling.md` for the current concurrency model and the recommended
-  multi-process/multi-node approach.
+  multi-process/multi-node approach
 
-## 📚 Additional Resources
+## Available Endpoints
 
-- [Project Plan](.plan/project-plan.md) - Detailed development roadmap
-- [API Documentation](docs/api.md) - REST and WebSocket API reference
-- [Test Scenarios Guide](docs/scenarios.md) - Creating custom test scenarios
-- [Performance Tuning](docs/performance.md) - Optimization tips
-- [Scaling & Concurrency Model](docs/scaling.md) - How to run high concurrency
-  and when to scale out
+| Endpoint | Description |
+|---|---|
+| `http://localhost:8000` | Home page |
+| `http://localhost:8000/health` | Health check |
+| `http://localhost:8000/api/info` | API info |
+| `http://localhost:8000/api/docs` | Interactive Swagger UI |
+| `http://localhost:8000/api/redoc` | ReDoc API docs |
+| `http://localhost:8000/dashboard` | Real-time dashboard |
+| `http://localhost:8000/configure` | Test configuration |
+| `http://localhost:8000/comparison` | Results comparison |
+| `http://localhost:8000/history` | Test history |
+| `http://localhost:8000/templates` | Template management |
+| `http://localhost:8000/analysis` | Analysis view |
+| `http://localhost:8000/settings` | Settings and connections |
 
-### External Documentation
+## Development Workflow
 
-- [Snowflake Hybrid Tables Best Practices](https://docs.snowflake.com/en/user-guide/tables-hybrid-best-practices)
-- [Snowflake Interactive Tables](https://docs.snowflake.com/en/user-guide/interactive)
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [HTMX Documentation](https://htmx.org/docs/)
-- [Alpine.js Documentation](https://alpinejs.dev/)
+1. Make changes to backend code
+2. Server auto-reloads (if using `--reload` flag)
+3. Test changes at <http://localhost:8000>
+4. Check logs in terminal output
+5. Run tests with `uv run pytest`
 
-## 🤝 Contributing
+## Documentation
 
-Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for
-guidelines.
+- [Documentation Index](docs/index.md) — Entry point for all project docs
+- [Architecture Overview](docs/architecture-overview.md)
+- [Operations & Runbooks](docs/operations-and-runbooks.md)
+- [Scaling & Concurrency Model](docs/scaling.md)
+- [FlakeBench Docs Skill](docs/SKILL.md) — Agent-oriented docs index
 
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) for details
-
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Built with [FastAPI](https://fastapi.tiangolo.com/)
 - UI powered by [HTMX](https://htmx.org/) and [Alpine.js](https://alpinejs.dev/)
 - Charts by [Chart.js](https://www.chartjs.org/)
 - Package management by [uv](https://github.com/astral-sh/uv)
 
-## 📞 Support
-
-For issues, questions, or feature requests:
-- Open an issue on GitHub
-- Contact the development team
-
 ---
 
-**Status:** 🚧 Active Development  
-**Version:** 0.1.0  
-**Last Updated:** 2025-12-17
+**Status:** Active Development
+**Version:** 0.1.0

@@ -17,6 +17,8 @@ from .constants import (
     _CUSTOM_PCT_FIELDS,
     _DEFAULT_CUSTOM_QUERIES_SNOWFLAKE,
     _DEFAULT_CUSTOM_QUERIES_POSTGRES,
+    GENERIC_QUERIES_FIELD,
+    ALLOWED_QUERY_KINDS,
 )
 
 # Utility functions
@@ -57,6 +59,8 @@ __all__ = [
     "_CUSTOM_PCT_FIELDS",
     "_DEFAULT_CUSTOM_QUERIES_SNOWFLAKE",
     "_DEFAULT_CUSTOM_QUERIES_POSTGRES",
+    "GENERIC_QUERIES_FIELD",
+    "ALLOWED_QUERY_KINDS",
     # Utils
     "_upper_str",
     "_validate_ident",

@@ -511,6 +511,110 @@ async def list_objects(
     return out
 
 
+@router.get("/columns", response_model=list[dict[str, Any]])
+async def list_columns(
+    table_type: str = Query("standard"),
+    database: str = Query(..., description="Database name"),
+    schema: str = Query(..., description="Schema name"),
+    table: str = Query(..., description="Table or view name"),
+    connection_id: Optional[str] = Query(None),
+):
+    """
+    List columns for a table or view.
+
+    Returns column metadata:
+      { "name": "...", "data_type": "...", "ordinal_position": N, "is_nullable": "YES"|"NO" }
+
+    - Snowflake: queries INFORMATION_SCHEMA.COLUMNS.
+    - Postgres: queries information_schema.columns.
+    """
+
+    t = _table_type(table_type)
+
+    if _is_postgres_family(t):
+        db_name = str(database or "").strip()
+        schema_name = str(schema or "").strip()
+        table_name = str(table or "").strip()
+        if not db_name or not schema_name or not table_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="database, schema, and table are required",
+            )
+        if not connection_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="connection_id is required for Postgres",
+            )
+        try:
+            rows = await _postgres_fetch(
+                connection_id,
+                db_name,
+                """
+                    SELECT
+                        column_name,
+                        data_type,
+                        ordinal_position,
+                        is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = $1
+                      AND table_name = $2
+                    ORDER BY ordinal_position
+                """,
+                schema_name,
+                table_name,
+            )
+            return [
+                {
+                    "name": str(r["column_name"]),
+                    "data_type": str(r["data_type"]),
+                    "ordinal_position": int(r["ordinal_position"]),
+                    "is_nullable": str(r["is_nullable"]),
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            raise http_exception(
+                f"list columns for {db_name}.{schema_name}.{table_name}", e
+            )
+
+    try:
+        db = _validate_ident(database, label="database")
+        sch = _validate_ident(schema, label="schema")
+        tbl = _validate_ident(table, label="table")
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
+        ) from e
+
+    sf = snowflake_pool.get_default_pool()
+
+    try:
+        rows = await sf.execute_query(
+            f"""
+            SELECT
+                COLUMN_NAME,
+                DATA_TYPE,
+                ORDINAL_POSITION,
+                IS_NULLABLE
+            FROM {db}.INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = '{sch}'
+              AND TABLE_NAME = '{tbl}'
+            ORDER BY ORDINAL_POSITION
+            """
+        )
+        return [
+            {
+                "name": _upper_str(row[0]),
+                "data_type": str(row[1]).upper() if row[1] else "UNKNOWN",
+                "ordinal_position": int(row[2]) if row[2] else 0,
+                "is_nullable": str(row[3]).upper() if row[3] else "YES",
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        raise http_exception(f"list columns for {db}.{sch}.{tbl}", e)
+
+
 @router.get("/postgres/capabilities")
 async def get_postgres_capabilities(
     table_type: str = Query(..., description="POSTGRES"),

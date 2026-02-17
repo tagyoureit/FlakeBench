@@ -155,7 +155,7 @@
             </div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div>
                 <label class="form-label">Cost per Credit ($)</label>
                 <input 
@@ -168,6 +168,37 @@
                 >
                 <p class="text-xs text-gray-500 mt-1">
                     Default: $4.00 (Enterprise tier). Adjust based on your Snowflake contract.
+                </p>
+            </div>
+            
+            <div>
+                <label class="form-label">WH Hours/Day</label>
+                <input 
+                    type="number" 
+                    class="form-input"
+                    step="1"
+                    min="1"
+                    max="24"
+                    x-model.number="costSettings.hoursPerDayWarehouse"
+                    @change="saveCostSettings()"
+                >
+                <p class="text-xs text-gray-500 mt-1">
+                    Default: 8 hrs/day. Postgres/Interactive always use 24 hrs/day.
+                </p>
+            </div>
+            
+            <div>
+                <label class="form-label">Cloud Provider</label>
+                <select 
+                    class="form-input"
+                    x-model="costSettings.cloudProvider"
+                    @change="saveCostSettings()"
+                >
+                    <option value="AWS">AWS</option>
+                    <option value="Azure">Azure</option>
+                </select>
+                <p class="text-xs text-gray-500 mt-1">
+                    Postgres credit rates differ by cloud provider.
                 </p>
             </div>
             
@@ -185,14 +216,64 @@
         </div>
 
         <div class="mt-4 pt-4 border-t">
-            <h4 class="font-medium text-sm mb-2">Warehouse Credit Rates (Reference)</h4>
-            <div class="text-xs text-gray-600 grid grid-cols-3 md:grid-cols-6 gap-2">
-                <span>XSMALL: 1/hr</span>
-                <span>SMALL: 2/hr</span>
-                <span>MEDIUM: 4/hr</span>
-                <span>LARGE: 8/hr</span>
-                <span>XLARGE: 16/hr</span>
-                <span>2XLARGE: 32/hr</span>
+            <h4 class="font-medium text-sm mb-2">WH Credits/hr</h4>
+            <div class="text-xs text-gray-600 flex flex-wrap gap-x-10 gap-y-1">
+                <span>XS: 1</span>
+                <span>S: 2</span>
+                <span>M: 4</span>
+                <span>L: 8</span>
+                <span>XL: 16</span>
+                <span>2XL: 32</span>
+                <span>3XL: 64</span>
+                <span>4XL: 128</span>
+                <span>5XL: 256</span>
+                <span>6XL: 512</span>
+            </div>
+        </div>
+
+        <div class="mt-4 pt-4 border-t">
+            <h4 class="font-medium text-sm mb-2">Postgres Credit Rates (Reference) - <span x-text="costSettings.cloudProvider"></span></h4>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
+                <!-- Standard Family -->
+                <div>
+                    <h5 class="font-medium text-gray-700 mb-1">Standard Family</h5>
+                    <div class="text-gray-600 space-y-0.5">
+                        <div class="flex justify-between"><span>STANDARD_M:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.0356' : '0.0376'"></span></div>
+                        <div class="flex justify-between"><span>STANDARD_L:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.0712' : '0.0752'"></span></div>
+                        <div class="flex justify-between"><span>STANDARD_XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.1424' : '0.1504'"></span></div>
+                        <div class="flex justify-between"><span>STANDARD_2XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.2848' : '0.3008'"></span></div>
+                        <div class="flex justify-between"><span>STANDARD_4XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.5696' : '0.6016'"></span></div>
+                        <div class="flex justify-between"><span>STANDARD_8XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '1.1392' : '1.2032'"></span></div>
+                        <div class="flex justify-between"><span>STANDARD_12XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '1.7088' : '1.8048'"></span></div>
+                        <div class="flex justify-between"><span>STANDARD_24XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '3.4176' : '3.6096'"></span></div>
+                    </div>
+                </div>
+                <!-- High Memory Family -->
+                <div>
+                    <h5 class="font-medium text-gray-700 mb-1">High Memory Family</h5>
+                    <div class="text-gray-600 space-y-0.5">
+                        <div class="flex justify-between"><span>HIGHMEM_L:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.1024' : '0.1088'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.2048' : '0.2176'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_2XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.4096' : '0.4352'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_4XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.8192' : '0.8704'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_8XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '1.6384' : '1.7408'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_12XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '2.4576' : '2.6112'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_16XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '3.2768' : '3.4816'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_24XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '4.9152' : '5.2224'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_32XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '6.5536' : '6.9632'"></span></div>
+                        <div class="flex justify-between"><span>HIGHMEM_48XL:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '9.8304' : '10.4448'"></span></div>
+                    </div>
+                </div>
+                <!-- Burst Family -->
+                <div>
+                    <h5 class="font-medium text-gray-700 mb-1">Burst Family</h5>
+                    <div class="text-gray-600 space-y-0.5">
+                        <div class="flex justify-between"><span>BURST_XS:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.0068' : 'N/A'"></span></div>
+                        <div class="flex justify-between"><span>BURST_S:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.0136' : '0.0144'"></span></div>
+                        <div class="flex justify-between"><span>BURST_M:</span><span x-text="costSettings.cloudProvider === 'AWS' ? '0.0272' : '0.0288'"></span></div>
+                    </div>
+                    <p class="text-gray-400 mt-2 italic text-[10px]">Credits/hr shown (Standard tier). High Availability doubles these rates.</p>
+                </div>
             </div>
         </div>
     </div>

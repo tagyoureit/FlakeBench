@@ -148,6 +148,7 @@ window.DashboardMixins.historicalMetrics = {
     const sfReadData = [];
     const sfPlData = [];
     const sfRsData = [];
+    const sfGenData = [];
     const sfWriteData = [];
     const sfInsData = [];
     const sfUpdData = [];
@@ -156,6 +157,7 @@ window.DashboardMixins.historicalMetrics = {
     const opsReadData = [];
     const opsPlData = [];
     const opsRsData = [];
+    const opsGenData = [];
     const opsWriteData = [];
     const opsInsData = [];
     const opsUpdData = [];
@@ -190,6 +192,7 @@ window.DashboardMixins.historicalMetrics = {
       sfReadData.push(Number(snapshot.sf_running_read || 0));
       sfPlData.push(Number(snapshot.sf_running_point_lookup || 0));
       sfRsData.push(Number(snapshot.sf_running_range_scan || 0));
+      sfGenData.push(Number(snapshot.sf_running_generic_sql || 0));
       sfWriteData.push(Number(snapshot.sf_running_write || 0));
       sfInsData.push(Number(snapshot.sf_running_insert || 0));
       sfUpdData.push(Number(snapshot.sf_running_update || 0));
@@ -199,6 +202,7 @@ window.DashboardMixins.historicalMetrics = {
       opsReadData.push(Number(snapshot.app_read_ops_sec || 0));
       opsPlData.push(Number(snapshot.app_point_lookup_ops_sec || 0));
       opsRsData.push(Number(snapshot.app_range_scan_ops_sec || 0));
+      opsGenData.push(Number(snapshot.app_generic_ops_sec || 0));
       opsWriteData.push(Number(snapshot.app_write_ops_sec || 0));
       opsInsData.push(Number(snapshot.app_insert_ops_sec || 0));
       opsUpdData.push(Number(snapshot.app_update_ops_sec || 0));
@@ -415,16 +419,18 @@ window.DashboardMixins.historicalMetrics = {
       sfRunningChart.data.datasets[1].data = sfReadData;
       sfRunningChart.data.datasets[2].data = sfPlData;
       sfRunningChart.data.datasets[3].data = sfRsData;
-      sfRunningChart.data.datasets[4].data = sfWriteData;
-      sfRunningChart.data.datasets[5].data = sfInsData;
-      sfRunningChart.data.datasets[6].data = sfUpdData;
-      sfRunningChart.data.datasets[7].data = sfBlockedData;
+      sfRunningChart.data.datasets[4].data = sfGenData;
+      sfRunningChart.data.datasets[5].data = sfWriteData;
+      sfRunningChart.data.datasets[6].data = sfInsData;
+      sfRunningChart.data.datasets[7].data = sfUpdData;
+      sfRunningChart.data.datasets[8].data = sfBlockedData;
       
       // Check if breakdown data is available (any non-zero values in breakdown series)
       const hasBreakdownData = sfReadData.some(v => v > 0) || 
                                sfWriteData.some(v => v > 0) ||
                                sfPlData.some(v => v > 0) ||
                                sfRsData.some(v => v > 0) ||
+                               sfGenData.some(v => v > 0) ||
                                sfInsData.some(v => v > 0) ||
                                sfUpdData.some(v => v > 0);
       this._sfRunningHasBreakdown = hasBreakdownData;
@@ -436,21 +442,71 @@ window.DashboardMixins.historicalMetrics = {
 
     if (opsSecChart) {
       opsSecChart.data.labels = labels;
-      opsSecChart.data.datasets[0].data = opsTotalData;
-      opsSecChart.data.datasets[1].data = opsReadData;
-      opsSecChart.data.datasets[2].data = opsPlData;
-      opsSecChart.data.datasets[3].data = opsRsData;
-      opsSecChart.data.datasets[4].data = opsWriteData;
-      opsSecChart.data.datasets[5].data = opsInsData;
-      opsSecChart.data.datasets[6].data = opsUpdData;
+      const fixedDatasets = Array.isArray(opsSecChart.data.datasets)
+        ? opsSecChart.data.datasets.slice(0, 8)
+        : [];
+      if (fixedDatasets[0]) fixedDatasets[0].data = opsTotalData;
+      if (fixedDatasets[1]) fixedDatasets[1].data = opsReadData;
+      if (fixedDatasets[2]) fixedDatasets[2].data = opsPlData;
+      if (fixedDatasets[3]) fixedDatasets[3].data = opsRsData;
+      if (fixedDatasets[4]) fixedDatasets[4].data = opsGenData;
+      if (fixedDatasets[5]) fixedDatasets[5].data = opsWriteData;
+      if (fixedDatasets[6]) fixedDatasets[6].data = opsInsData;
+      if (fixedDatasets[7]) fixedDatasets[7].data = opsUpdData;
+
+      const genericLabelKeys = Array.from(
+        new Set(
+          snapshots.flatMap((snapshot) => {
+            const m = snapshot && typeof snapshot === "object"
+              ? snapshot.app_generic_label_ops_sec
+              : null;
+            return m && typeof m === "object" ? Object.keys(m) : [];
+          }),
+        ),
+      ).sort();
+      const byKindOps = this.opsSecBreakdown === "by_kind";
+      const genericLabelPalette = [
+        "rgb(30, 64, 175)",
+        "rgb(67, 56, 202)",
+        "rgb(91, 33, 182)",
+        "rgb(126, 34, 206)",
+        "rgb(190, 24, 93)",
+        "rgb(190, 18, 60)",
+        "rgb(15, 118, 110)",
+        "rgb(21, 128, 61)",
+      ];
+      const genericLabelDatasets = genericLabelKeys.map((key, idx) => {
+        const color = genericLabelPalette[idx % genericLabelPalette.length];
+        const series = snapshots.map((snapshot) => {
+          const m = snapshot && typeof snapshot === "object"
+            ? snapshot.app_generic_label_ops_sec
+            : null;
+          return Number(m && typeof m === "object" ? m[key] || 0 : 0);
+        });
+        return {
+          label: `Generic: ${key}`,
+          data: series,
+          borderColor: color,
+          backgroundColor: "transparent",
+          tension: 0.4,
+          borderWidth: 1.5,
+          borderDash: [4, 3],
+          hidden: !byKindOps,
+        };
+      });
+      opsSecChart.data.datasets = [...fixedDatasets, ...genericLabelDatasets];
       
       // Check if breakdown data is available (any non-zero values in breakdown series)
       const hasOpsBreakdownData = opsReadData.some(v => v > 0) || 
                                   opsWriteData.some(v => v > 0) ||
                                   opsPlData.some(v => v > 0) ||
                                   opsRsData.some(v => v > 0) ||
+                                  opsGenData.some(v => v > 0) ||
                                   opsInsData.some(v => v > 0) ||
-                                  opsUpdData.some(v => v > 0);
+                                  opsUpdData.some(v => v > 0) ||
+                                  genericLabelDatasets.some((ds) =>
+                                    Array.isArray(ds.data) && ds.data.some((v) => Number(v || 0) > 0),
+                                  );
       this._opsSecHasBreakdown = hasOpsBreakdownData;
       
       this.applyOpsSecBreakdownToChart({ skipUpdate: true });

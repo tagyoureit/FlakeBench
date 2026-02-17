@@ -4,7 +4,7 @@
 import asyncio
 import sys
 
-sys.path.insert(0, "/Users/rgoldin/Programming/unistore_performance_analysis")
+sys.path.insert(0, "/Users/rgoldin/Programming/FlakeBench")
 
 from backend.core.results_store import update_parent_run_aggregate
 

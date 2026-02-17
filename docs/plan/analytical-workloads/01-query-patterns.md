@@ -142,7 +142,7 @@ ORDER BY 1, 2;
 **Best for:** Fact-dimension analytics, data warehousing
 
 ```sql
--- Fact table joins with dimensions
+-- Fact table uses {table}, dimensions use fully-qualified names
 SELECT 
     d.calendar_year,
     d.calendar_quarter,
@@ -150,10 +150,10 @@ SELECT
     g.region,
     SUM(f.quantity) AS total_qty,
     SUM(f.revenue) AS total_revenue
-FROM {fact_table} f
-JOIN {dim_date} d ON f.date_key = d.date_key
-JOIN {dim_product} p ON f.product_key = p.product_key  
-JOIN {dim_geography} g ON f.geo_key = g.geo_key
+FROM {table} f
+JOIN DIM_DATE d ON f.date_key = d.date_key
+JOIN DIM_PRODUCT p ON f.product_key = p.product_key  
+JOIN DIM_GEOGRAPHY g ON f.geo_key = g.geo_key
 WHERE d.calendar_year = ?
 GROUP BY 1, 2, 3, 4;
 ```

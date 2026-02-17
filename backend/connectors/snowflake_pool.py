@@ -609,6 +609,11 @@ class SnowflakeConnectionPool:
         except (ReadTimeout, DatabaseError, OperationalError) as e:
             logger.error("Network error during query execution: %s", e)
             return [], {"error": str(e)}
+        except Exception as e:
+            # Catch any other exception types (e.g., ProgrammingError, InterfaceError)
+            # to ensure errors are always returned in the info dict for proper tracking.
+            logger.error("Unexpected error during query execution: %s", e)
+            return [], {"error": str(e)}
 
     async def update_query_tag(self, new_tag: str) -> int:
         """

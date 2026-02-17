@@ -159,9 +159,12 @@ class TestRegistry:
         workload_type = _workload_type(cfg.get("workload_type"))
         custom_queries: list[dict[str, Any]] | None = None
         if workload_type == WorkloadType.CUSTOM:
-            # Templates persist the canonical 4-query workload as explicit CUSTOM weights + SQL.
-            def _pct(key: str) -> int:
-                return int(cfg.get(key) or 0)
+            # Templates persist shortcut queries plus optional GENERIC_SQL entries.
+            def _pct(key: str) -> float:
+                try:
+                    return round(float(cfg.get(key) or 0.0), 2)
+                except Exception:
+                    return 0.0
 
             def _sql(key: str) -> str:
                 return str(cfg.get(key) or "").strip()
@@ -172,17 +175,13 @@ class TestRegistry:
                 "custom_insert_pct",
                 "custom_update_pct",
             )
-            total = sum(_pct(k) for k in pct_fields)
+            shortcut_total = round(sum(_pct(k) for k in pct_fields), 2)
             logger.info(
-                "Building custom_queries: workload_type=%s, pct_total=%d, pcts=%s",
+                "Building custom_queries: workload_type=%s, shortcut_total=%.2f, pcts=%s",
                 workload_type,
-                total,
+                shortcut_total,
                 {k: _pct(k) for k in pct_fields},
             )
-            if total != 100:
-                raise ValueError(
-                    f"Template CUSTOM percentages must sum to 100 (currently {total})."
-                )
 
             items = [
                 (
@@ -204,6 +203,70 @@ class TestRegistry:
                     raise ValueError(f"{sql_k} is required when {pct_k} > 0")
                 custom_queries.append(
                     {"query_kind": kind, "weight_pct": pct, "sql": sql}
+                )
+
+            # Optional arbitrary SQL entries.
+            generic_queries = cfg.get("generic_queries")
+            if generic_queries is None:
+                generic_queries = []
+            if not isinstance(generic_queries, list):
+                raise ValueError("generic_queries must be an array when provided")
+
+            generic_total = 0.0
+            for i, row in enumerate(generic_queries):
+                if not isinstance(row, dict):
+                    raise ValueError(
+                        f"generic_queries[{i}] must be an object (got {type(row).__name__})"
+                    )
+                kind = str(row.get("query_kind") or "GENERIC_SQL").strip().upper()
+                if kind != "GENERIC_SQL":
+                    raise ValueError(
+                        f"generic_queries[{i}].query_kind must be GENERIC_SQL"
+                    )
+                op = str(row.get("operation_type") or "").strip().upper()
+                if op not in {"READ", "WRITE"}:
+                    raise ValueError(
+                        f"generic_queries[{i}].operation_type must be READ or WRITE"
+                    )
+                try:
+                    weight = round(float(row.get("weight_pct") or 0.0), 2)
+                except Exception as e:
+                    raise ValueError(
+                        f"Invalid generic_queries[{i}].weight_pct: {row.get('weight_pct')!r}"
+                    ) from e
+                if weight < 0 or weight > 100:
+                    raise ValueError(
+                        f"generic_queries[{i}].weight_pct must be between 0.00 and 100.00"
+                    )
+                sql = str(
+                    row.get("sql") or row.get("query") or row.get("query_text") or ""
+                ).strip()
+                if weight > 0 and not sql:
+                    raise ValueError(
+                        f"generic_queries[{i}].sql is required when weight_pct > 0"
+                    )
+                if weight <= 0:
+                    continue
+
+                generic_total = round(generic_total + weight, 2)
+                custom_queries.append(
+                    {
+                        "id": str(row.get("id") or f"GENERIC_SQL_{i + 1}").strip(),
+                        "query_kind": "GENERIC_SQL",
+                        "operation_type": op,
+                        "label": str(row.get("label") or "").strip() or None,
+                        "weight_pct": weight,
+                        "sql": sql,
+                        "parameters": row.get("parameters")
+                        if isinstance(row.get("parameters"), list)
+                        else [],
+                    }
+                )
+
+            total = round(shortcut_total + generic_total, 2)
+            if total != 100.0:
+                raise ValueError(
+                    f"Template CUSTOM weights must sum to 100.00 (currently {total:.2f})."
                 )
 
         load_mode = (

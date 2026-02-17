@@ -103,7 +103,7 @@ async def get_table_type_summary() -> TableTypeSummaryResponse:
     SELECT
         TABLE_TYPE,
         TEST_COUNT,
-        UNIQUE_SCENARIOS,
+        UNIQUE_TEMPLATES,
         AVG_QPS,
         MIN_QPS,
         MAX_QPS,
@@ -464,18 +464,21 @@ async def get_template_list(
 async def get_template_statistics(template_id: str) -> TemplateStatisticsResponse:
     """
     Get detailed statistics for a specific template.
+    
+    Uses full schema from DT_TEMPLATE_STATISTICS with all latency percentile stats.
     """
     pool = snowflake_pool.get_default_pool()
     prefix = _prefix()
     
+    # Only select columns that actually exist in DT_TEMPLATE_STATISTICS
     query = f"""
     SELECT
         TEMPLATE_ID, TEMPLATE_NAME, TABLE_TYPE, WAREHOUSE_SIZE, LOAD_MODE,
         TOTAL_RUNS, RECENT_RUNS,
         AVG_QPS, STDDEV_QPS, MIN_QPS, MAX_QPS, MEDIAN_QPS,
-        AVG_P50_MS, STDDEV_P50_MS, MIN_P50_MS, MAX_P50_MS, MEDIAN_P50_MS,
-        AVG_P95_MS, STDDEV_P95_MS, MIN_P95_MS, MAX_P95_MS, MEDIAN_P95_MS,
-        AVG_P99_MS, STDDEV_P99_MS, MIN_P99_MS, MAX_P99_MS,
+        AVG_P50_MS, STDDEV_P50_MS,
+        AVG_P95_MS, STDDEV_P95_MS, MIN_P95_MS, MAX_P95_MS,
+        AVG_P99_MS,
         AVG_ERROR_RATE, MAX_ERROR_RATE,
         TOTAL_CREDITS, AVG_CREDITS_PER_RUN, CREDITS_PER_1K_OPS,
         RECENT_AVG_QPS, RECENT_AVG_P95_MS,
@@ -494,13 +497,14 @@ async def get_template_statistics(template_id: str) -> TemplateStatisticsRespons
         )
     
     row = rows[0]
+    # Unpack row - order must match SELECT columns above
     (
         tid, tname, tt, wh_size, load_mode,
         total_runs, recent_runs,
         avg_qps, stddev_qps, min_qps, max_qps, median_qps,
-        avg_p50, stddev_p50, min_p50, max_p50, median_p50,
-        avg_p95, stddev_p95, min_p95, max_p95, median_p95,
-        avg_p99, stddev_p99, min_p99, max_p99,
+        avg_p50, stddev_p50,
+        avg_p95, stddev_p95, min_p95, max_p95,
+        avg_p99,
         avg_error, max_error,
         total_credits, avg_credits, credits_per_1k,
         recent_qps, recent_p95,
@@ -523,9 +527,6 @@ async def get_template_statistics(template_id: str) -> TemplateStatisticsRespons
     
     p50_stats = MetricStats(
         avg=_safe_float(avg_p50),
-        min=_safe_float(min_p50),
-        max=_safe_float(max_p50),
-        median=_safe_float(median_p50),
         stddev=_safe_float(stddev_p50)
     )
     
@@ -533,16 +534,12 @@ async def get_template_statistics(template_id: str) -> TemplateStatisticsRespons
         avg=_safe_float(avg_p95),
         min=_safe_float(min_p95),
         max=_safe_float(max_p95),
-        median=_safe_float(median_p95),
         stddev=_safe_float(stddev_p95),
         cv=_safe_float(cv_p95)
     )
     
     p99_stats = MetricStats(
-        avg=_safe_float(avg_p99),
-        min=_safe_float(min_p99),
-        max=_safe_float(max_p99),
-        stddev=_safe_float(stddev_p99)
+        avg=_safe_float(avg_p99)
     )
     
     error_stats = MetricStats(
@@ -629,7 +626,7 @@ async def get_template_runs(
     SELECT
         TEST_ID, START_TIME, DURATION_SECONDS, CONCURRENT_CONNECTIONS,
         QPS, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS,
-        ERROR_RATE, WAREHOUSE_CREDITS_USED, CREDITS_PER_1K_OPS
+        ERROR_RATE, ESTIMATED_CREDITS, TOTAL_OPERATIONS
     FROM {prefix}.V_TEMPLATE_RUNS
     WHERE TEMPLATE_ID = ?
     ORDER BY {order_by}
@@ -643,8 +640,13 @@ async def get_template_runs(
         (
             test_id, start_time, duration, concurrency,
             qps, p50, p95, p99,
-            error_rate, credits, credits_per_1k
+            error_rate, credits, total_ops
         ) = row
+        
+        # Calculate credits per 1k ops if we have both values
+        credits_per_1k = None
+        if credits and total_ops and total_ops > 0:
+            credits_per_1k = (float(credits) / float(total_ops)) * 1000
         
         runs.append(TemplateRun(
             test_id=str(test_id),
@@ -657,7 +659,7 @@ async def get_template_runs(
             p99_ms=float(p99) if p99 else None,
             error_rate=float(error_rate) if error_rate is not None else 0,
             credits_used=float(credits) if credits else None,
-            cost_per_1k_ops_usd=float(credits_per_1k) * CREDIT_COST_USD if credits_per_1k else None
+            cost_per_1k_ops_usd=credits_per_1k * CREDIT_COST_USD if credits_per_1k else None
         ))
     
     # Get total count
@@ -756,8 +758,11 @@ async def get_template_scatter(
         "p50": "P50_LATENCY_MS",
         "p95": "P95_LATENCY_MS",
         "p99": "P99_LATENCY_MS",
-        "concurrency": "CONCURRENT_CONNECTIONS",
         "error_rate": "ERROR_RATE",
+        "credits": "ESTIMATED_CREDITS",
+        "estimated_credits": "ESTIMATED_CREDITS",
+        "total_ops": "TOTAL_OPERATIONS",
+        "total_operations": "TOTAL_OPERATIONS",
     }
     
     x_col = metric_cols.get(x_metric.lower(), "DURATION_SECONDS")
@@ -787,10 +792,14 @@ async def get_template_scatter(
     correlation = None
     if len(points) >= 2:
         import numpy as np
+        import math
         x_vals = [p.x for p in points]
         y_vals = [p.y for p in points]
         try:
-            correlation = float(np.corrcoef(x_vals, y_vals)[0, 1])
+            with np.errstate(divide='ignore', invalid='ignore'):
+                corr_val = float(np.corrcoef(x_vals, y_vals)[0, 1])
+            if not math.isnan(corr_val) and not math.isinf(corr_val):
+                correlation = corr_val
         except Exception:
             pass
     

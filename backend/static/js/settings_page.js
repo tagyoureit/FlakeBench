@@ -7,7 +7,9 @@ function createSettingsPage() {
         costSettings: {
             dollarsPerCredit: 4.0,
             showCredits: true,
-            currency: 'USD'
+            currency: 'USD',
+            hoursPerDayWarehouse: 8,
+            cloudProvider: 'AWS'
         },
         
         showModal: false,

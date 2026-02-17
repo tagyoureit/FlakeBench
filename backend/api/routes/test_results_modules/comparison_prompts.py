@@ -141,11 +141,29 @@ def _generate_rolling_median_section(compare_context: dict[str, Any]) -> str:
     p95_str = f"{p95:.1f}" if p95 is not None else "N/A"
     error_str = f"{error:.2f}" if error is not None else "N/A"
 
+    # Per-kind P95 latencies (only include kinds with data)
+    per_kind_lines = []
+    _kind_labels = {
+        "point_lookup_p95_latency_ms": "Point Lookup P95",
+        "range_scan_p95_latency_ms": "Range Scan P95",
+        "insert_p95_latency_ms": "Insert P95",
+        "update_p95_latency_ms": "Update P95",
+        "generic_sql_p95_latency_ms": "Generic SQL P95",
+    }
+    for key, label in _kind_labels.items():
+        val = median.get(key)
+        if val is not None:
+            per_kind_lines.append(f"- {label}: {val:.1f}ms")
+
+    per_kind_block = "\n".join(per_kind_lines)
+    if per_kind_block:
+        per_kind_block = f"\nPer-Query-Kind Latency Medians:\n{per_kind_block}\n"
+
     return f"""Rolling Median (last {baseline.get('used_count', 0)} runs):
 - QPS: {qps_str}{qps_range}
 - P95 Latency: {p95_str}ms{p95_range}
 - Error Rate: {error_str}%
-"""
+{per_kind_block}"""
 
 
 def _generate_vs_previous_section(vs_previous: dict[str, Any]) -> str:
@@ -158,11 +176,29 @@ def _generate_vs_previous_section(vs_previous: dict[str, Any]) -> str:
     qps_str = f"{qps_delta:+.1f}%" if qps_delta is not None else "N/A"
     p95_str = f"{p95_delta:+.1f}%" if p95_delta is not None else "N/A"
 
-    return f"""This Test vs Previous Run ({vs_previous.get('test_date', 'unknown')}):
+    result = f"""This Test vs Previous Run ({vs_previous.get('test_date', 'unknown')}):
 - QPS change: {qps_str}
 - P95 Latency change: {p95_str}
 - Comparison confidence: {vs_previous.get('confidence', 'N/A')}
 """
+
+    # Per-kind P95 deltas from previous run
+    _prev_kind_labels = {
+        "point_lookup_p95_delta_pct": "Point Lookup P95",
+        "range_scan_p95_delta_pct": "Range Scan P95",
+        "insert_p95_delta_pct": "Insert P95",
+        "update_p95_delta_pct": "Update P95",
+        "generic_sql_p95_delta_pct": "Generic SQL P95",
+    }
+    per_kind_lines = []
+    for key, label in _prev_kind_labels.items():
+        delta = deltas.get(key)
+        if delta is not None:
+            per_kind_lines.append(f"- {label} change: {delta:+.1f}%")
+    if per_kind_lines:
+        result += "Per-Kind Latency Changes:\n" + "\n".join(per_kind_lines) + "\n"
+
+    return result
 
 
 def _generate_vs_median_section(vs_median: dict[str, Any]) -> str:
@@ -187,6 +223,14 @@ def _generate_vs_median_section(vs_median: dict[str, Any]) -> str:
 - P95 Latency: {p95_str} {p95_indicator}
 - Overall verdict: {verdict}
 """
+
+    # Per-kind delta (only if present)
+    gs_delta = vs_median.get("generic_sql_p95_delta_pct")
+    if gs_delta is not None:
+        gs_class = classify_change("p95_latency", gs_delta)
+        gs_indicator = _get_indicator(gs_class, is_latency=True)
+        result += f"- Generic SQL P95: {gs_delta:+.1f}% {gs_indicator}\n"
+
     if reasons:
         result += f"- Reasons: {'; '.join(reasons)}\n"
 
@@ -623,6 +667,20 @@ def generate_deep_compare_prompt(
         "error_rate_delta_pct": _calc_delta_pct(error_a, error_b),
     }
 
+    # Per-kind P95 deltas
+    _per_kind_p95_keys = [
+        "point_lookup_p95_latency_ms",
+        "range_scan_p95_latency_ms",
+        "insert_p95_latency_ms",
+        "update_p95_latency_ms",
+        "generic_sql_p95_latency_ms",
+    ]
+    for key in _per_kind_p95_keys:
+        val_a = test_a.get(key)
+        val_b = test_b.get(key)
+        delta_key = key.replace("_latency_ms", "_delta_pct")
+        deltas[delta_key] = _calc_delta_pct(val_a, val_b)
+
     # Identify configuration differences
     differences = _identify_config_differences(test_a, test_b)
 
@@ -657,6 +715,24 @@ def generate_deep_compare_prompt(
     sections.append(_format_delta_line("P95 Latency", deltas["p95_delta_pct"], higher_is_better=False))
     sections.append(_format_delta_line("P99 Latency", deltas["p99_delta_pct"], higher_is_better=False))
     sections.append(_format_delta_line("Error Rate", deltas["error_rate_delta_pct"], higher_is_better=False))
+
+    # Per-kind P95 deltas (only show kinds with data)
+    _deep_kind_labels = {
+        "point_lookup_p95_delta_pct": "Point Lookup P95",
+        "range_scan_p95_delta_pct": "Range Scan P95",
+        "insert_p95_delta_pct": "Insert P95",
+        "update_p95_delta_pct": "Update P95",
+        "generic_sql_p95_delta_pct": "Generic SQL P95",
+    }
+    per_kind_shown = False
+    for key, label in _deep_kind_labels.items():
+        if deltas.get(key) is not None:
+            if not per_kind_shown:
+                sections.append("")
+                sections.append("PER-KIND LATENCY DELTAS:")
+                per_kind_shown = True
+            sections.append(_format_delta_line(label, deltas[key], higher_is_better=False))
+
     sections.append("")
 
     # Analysis instructions

@@ -130,16 +130,16 @@
                     <div class="text-xs font-semibold text-gray-500 mb-1">Projected Cost</div>
                     <div class="text-xs text-gray-600 grid grid-cols-2 gap-x-2 gap-y-1">
                         <span>Per Day:</span>
-                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : 8) * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(2)"></span>
+                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : (window.CostUtils?.getCostSettings()?.hoursPerDayWarehouse || 8)) * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(2)"></span>
                         <span>Per Week:</span>
-                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : 8) * 7 * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(2)"></span>
+                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : (window.CostUtils?.getCostSettings()?.hoursPerDayWarehouse || 8)) * 7 * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(2)"></span>
                         <span>Per Month:</span>
-                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : 8) * 30 * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(2)"></span>
+                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : (window.CostUtils?.getCostSettings()?.hoursPerDayWarehouse || 8)) * 30 * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(2)"></span>
                         <span>Per Year:</span>
-                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : 8) * 365 * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(0)"></span>
+                        <span x-text="'$' + (templateInfo.credits_per_hour * (isPostgresOrInteractiveTable() ? 24 : (window.CostUtils?.getCostSettings()?.hoursPerDayWarehouse || 8)) * 365 * (window.CostUtils?.getCostSettings()?.dollarsPerCredit || 3)).toFixed(2)"></span>
                     </div>
                     <div class="text-xs text-gray-400 mt-2" style="font-style: italic;">
-                        <span x-text="isPostgresOrInteractiveTable() ? 'Assumes 24 hrs/day (always-on Postgres/Interactive)' : 'Assumes 8 hrs/day (standard warehouse)'"></span>
+                        <span x-text="isPostgresOrInteractiveTable() ? 'Assumes 24 hrs/day (always-on Postgres/Interactive)' : 'Assumes ' + (window.CostUtils?.getCostSettings()?.hoursPerDayWarehouse || 8) + ' hrs/day (standard warehouse)'"></span>
                     </div>
                 </div>
             </template>

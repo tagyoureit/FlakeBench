@@ -172,6 +172,13 @@ window.DashboardMixins.dataLoading = {
                 !hasLabel(2, "Snowflake queued (queries)"))));
         if (needsRebuild) {
           this.initCharts({ onlyConcurrency: true });
+          // Re-render historical metrics if data was already loaded (race condition fix:
+          // loadHistoricalMetrics may have completed before templateInfo, populating data
+          // into a chart that was then destroyed and rebuilt here with empty arrays).
+          if (this._metricsSnapshots && this._metricsSnapshots.length > 0 &&
+              typeof this.renderHistoricalCharts === "function") {
+            this.renderHistoricalCharts();
+          }
         }
       } catch (_) {}
 

@@ -209,18 +209,21 @@ class TestExecutor:
             "RANGE_SCAN": deque(maxlen=10000),
             "INSERT": deque(maxlen=10000),
             "UPDATE": deque(maxlen=10000),
+            "GENERIC_SQL": deque(maxlen=10000),
         }
         self._find_max_step_ops_by_kind: dict[str, int] = {
             "POINT_LOOKUP": 0,
             "RANGE_SCAN": 0,
             "INSERT": 0,
             "UPDATE": 0,
+            "GENERIC_SQL": 0,
         }
         self._find_max_step_errors_by_kind: dict[str, int] = {
             "POINT_LOOKUP": 0,
             "RANGE_SCAN": 0,
             "INSERT": 0,
             "UPDATE": 0,
+            "GENERIC_SQL": 0,
         }
 
         # Query type counters (for debugging)
@@ -228,12 +231,17 @@ class TestExecutor:
         self._range_scan_count: int = 0
         self._insert_count: int = 0
         self._update_count: int = 0
+        self._generic_read_count: int = 0
+        self._generic_write_count: int = 0
+        self._generic_label_counts: dict[str, int] = {}
+        self._generic_label_read_counts: dict[str, int] = {}
+        self._generic_label_write_counts: dict[str, int] = {}
 
         # CUSTOM workload execution state (authoritative template mix).
-        # - schedule: smooth weighted round-robin sequence of query kinds
+        # - schedule: smooth weighted round-robin sequence of query entry ids
         # - per-worker index: ensures stable offsets across workers without randomness
         self._custom_schedule: list[str] = []
-        self._custom_sql_by_kind: dict[str, str] = {}
+        self._custom_query_by_key: dict[str, dict[str, Any]] = {}
         self._custom_weights: dict[str, int] = {}
         self._custom_pos_by_worker: dict[int, int] = {}
 
@@ -252,6 +260,7 @@ class TestExecutor:
             "RANGE_SCAN": [],
             "INSERT": [],
             "UPDATE": [],
+            "GENERIC_SQL": [],
         }
         self._lat_read_ms: list[float] = []
         self._lat_write_ms: list[float] = []
@@ -346,6 +355,28 @@ class TestExecutor:
             return (
                 True,
                 "Interactive warehouse is suspended. The warehouse should be auto-resumed at test start.",
+            )
+
+        # Object doesn't exist (table, view, etc.)
+        if "does not exist or not authorized" in msg:
+            # Extract the object name from the error
+            import re
+            match = re.search(r"Object '([^']+)'", msg)
+            obj_name = match.group(1) if match else "referenced object"
+            return (
+                True,
+                f"SQL references non-existent object: {obj_name}. Check your GENERIC_SQL query for typos in table/view names.",
+            )
+
+        # GENERIC_SQL parameter configuration errors
+        if "GENERIC_SQL" in msg and (
+            "no parameters configuration" in msg
+            or "parameters count mismatch" in msg
+            or "could not sample column" in msg
+        ):
+            return (
+                True,
+                f"GENERIC_SQL configuration error: {msg}",
             )
 
         return False, None
@@ -458,12 +489,15 @@ class TestExecutor:
         return f'"{col}"'
 
     @staticmethod
-    def _annotate_query_for_sf_kind(query: str, query_kind: str) -> str:
+    def _annotate_query_for_sf_kind(
+        query: str, query_kind: str, operation_type: str | None = None
+    ) -> str:
         """
-        Insert a short SQL comment encoding the benchmark query kind after the first keyword.
+        Insert a short SQL comment encoding benchmark query metadata after first keyword.
 
-        This is used only for Snowflake server-side concurrency sampling (QUERY_HISTORY),
-        so we can break RUNNING counts down by kind without relying on fragile SQL parsing.
+        This is used only for server-side concurrency sampling (QUERY_HISTORY /
+        pg_stat_activity), so we can break RUNNING counts down by kind/read-write
+        without relying on fragile SQL parsing.
 
         NOTE: The marker is placed AFTER the first SQL keyword (SELECT/INSERT/UPDATE/DELETE)
         because Snowflake strips leading comments from QUERY_TEXT in QUERY_HISTORY.
@@ -472,7 +506,11 @@ class TestExecutor:
         kind = str(query_kind or "").strip().upper()
         if not kind:
             return q
-        marker = f"/*UB_KIND={kind}*/"
+        op = str(operation_type or "").strip().upper()
+        marker_parts = [f"UB_KIND={kind}"]
+        if op in {"READ", "WRITE"}:
+            marker_parts.append(f"UB_OP={op}")
+        marker = "/*" + " ".join(marker_parts) + "*/"
         # Avoid double-tagging if the query already contains the marker.
         if "UB_KIND=" in q:
             return q
@@ -516,6 +554,15 @@ class TestExecutor:
         if len(q) > max_chars:
             return q[:max_chars] + "…[truncated]"
         return q
+
+    @staticmethod
+    def _normalize_generic_label(label: Any) -> str | None:
+        raw = str(label or "").strip()
+        if not raw:
+            return None
+        # Keep labels compact and stable for metrics keys.
+        raw = re.sub(r"\s+", "_", raw)
+        return raw[:80]
 
     @staticmethod
     def _preview_param_value_for_log(value: Any, *, max_chars: int = 200) -> str:
@@ -590,7 +637,7 @@ class TestExecutor:
         Build a smooth weighted round-robin schedule.
 
         This yields a stable interleaving that converges to the exact target weights
-        over one full cycle (e.g., 100 slots for percentage weights).
+        over one full cycle (e.g., 10,000 slots for basis-point weights).
         """
         total = int(sum(weights.values()))
         if total <= 0:
@@ -607,13 +654,26 @@ class TestExecutor:
         return schedule
 
     def _init_custom_workload(self) -> None:
-        """Parse scenario.custom_queries into an execution schedule and SQL map."""
+        """Parse scenario.custom_queries into an execution schedule and query map."""
         raw = self.scenario.custom_queries or []
         weights: dict[str, int] = {}
-        sql_by_kind: dict[str, str] = {}
+        query_by_key: dict[str, dict[str, Any]] = {}
 
-        allowed = {"POINT_LOOKUP", "RANGE_SCAN", "INSERT", "UPDATE"}
-        for entry in raw:
+        allowed = {"POINT_LOOKUP", "RANGE_SCAN", "INSERT", "UPDATE", "GENERIC_SQL"}
+
+        def _weight_to_basis_points(value: Any, *, label: str) -> int:
+            try:
+                pct = float(value)
+            except Exception as e:
+                raise ValueError(f"Invalid {label}: {value!r}") from e
+            if not math.isfinite(pct):
+                raise ValueError(f"Invalid {label}: {value!r}")
+            pct = round(float(pct), 2)
+            if pct < 0 or pct > 100:
+                raise ValueError(f"{label} must be between 0.00 and 100.00")
+            return int(round(pct * 100.0))
+
+        for idx, entry in enumerate(raw):
             if not isinstance(entry, dict):
                 raise ValueError("custom_queries entries must be JSON objects")
             kind_raw = entry.get("query_kind") or entry.get("kind") or ""
@@ -622,11 +682,10 @@ class TestExecutor:
                 raise ValueError(f"Unsupported custom query_kind: {kind_raw!r}")
 
             pct_raw = entry.get("weight_pct", entry.get("pct", entry.get("weight", 0)))
-            try:
-                pct = int(pct_raw)
-            except Exception as e:
-                raise ValueError(f"Invalid weight_pct for {kind}: {pct_raw!r}") from e
-            if pct <= 0:
+            bps = _weight_to_basis_points(
+                pct_raw, label=f"custom_queries[{idx}].weight_pct"
+            )
+            if bps <= 0:
                 continue
 
             sql_raw = entry.get("sql", entry.get("query", entry.get("query_text", "")))
@@ -634,30 +693,78 @@ class TestExecutor:
             if not sql:
                 raise ValueError(f"Missing SQL for custom query kind {kind}")
 
-            weights[kind] = pct
-            sql_by_kind[kind] = sql
+            if kind == "GENERIC_SQL":
+                key = str(entry.get("id") or f"GENERIC_SQL_{idx + 1}").strip()
+                if not key:
+                    raise ValueError(
+                        f"generic query at index {idx} must provide a non-empty id"
+                    )
+                op = str(entry.get("operation_type") or "").strip().upper()
+                if op not in {"READ", "WRITE"}:
+                    raise ValueError(
+                        f"GENERIC_SQL entry {key!r} requires operation_type READ or WRITE"
+                    )
+            else:
+                key = kind
+                op = "READ" if kind in {"POINT_LOOKUP", "RANGE_SCAN"} else "WRITE"
+                if key in query_by_key:
+                    raise ValueError(
+                        f"Duplicate custom query kind {kind}; keep one shortcut entry per kind"
+                    )
+
+            if key in query_by_key:
+                raise ValueError(f"Duplicate custom query id/key: {key}")
+
+            params_raw = entry.get("parameters")
+            if params_raw is None:
+                params: list[Any] = []
+            elif isinstance(params_raw, list):
+                params = list(params_raw)
+            else:
+                raise ValueError(
+                    f"custom_queries[{idx}].parameters must be an array when provided"
+                )
+
+            label_raw = entry.get("label")
+            label = str(label_raw).strip() if label_raw is not None else None
+
+            weights[key] = int(bps)
+            query_by_key[key] = {
+                "id": key,
+                "query_kind": kind,
+                "operation_type": op,
+                "sql": sql,
+                "parameters": params,
+                "label": label or None,
+            }
 
         total = sum(weights.values())
-        if total != 100:
+        if total != 10000:
             raise ValueError(
-                f"Custom workload weights must sum to 100 (currently {total})."
+                f"Custom workload weights must sum to 100.00 (currently {total / 100.0:.2f})."
             )
 
         self._custom_weights = dict(weights)
-        self._custom_sql_by_kind = dict(sql_by_kind)
+        self._custom_query_by_key = dict(query_by_key)
         self._custom_schedule = self._build_smooth_weighted_schedule(weights)
         self._custom_pos_by_worker.clear()
 
-    def _custom_next_kind(self, worker_id: int) -> str:
+    def _custom_next_query_key(self, worker_id: int) -> str:
         if not self._custom_schedule:
+            logger.debug("[Worker-%d] _custom_schedule empty, calling _init_custom_workload (custom_queries=%s)",
+                        worker_id, len(self.scenario.custom_queries or []))
             self._init_custom_workload()
         if not self._custom_schedule:
             raise ValueError("CUSTOM workload has no scheduled queries")
         n = len(self._custom_schedule)
         pos = self._custom_pos_by_worker.get(worker_id, worker_id % n)
-        kind = self._custom_schedule[pos]
+        key = self._custom_schedule[pos]
         self._custom_pos_by_worker[worker_id] = (pos + 1) % n
-        return kind
+        return key
+
+    def _custom_next_kind(self, worker_id: int) -> str:
+        # Backward-compatible alias.
+        return self._custom_next_query_key(worker_id)
 
     async def setup(
         self, validation_results: dict[str, dict[str, Any]] | None = None
@@ -838,14 +945,17 @@ class TestExecutor:
                 writes_in_custom = False
                 for q in self.scenario.custom_queries or []:
                     kind = str(q.get("query_kind") or "").strip().upper()
-                    if kind in {"INSERT", "UPDATE"}:
+                    op = str(q.get("operation_type") or "").strip().upper()
+                    if kind in {"INSERT", "UPDATE"} or (
+                        kind == "GENERIC_SQL" and op == "WRITE"
+                    ):
                         writes_in_custom = True
                         break
 
                 if writes_in_custom:
                     self._setup_error = (
                         "Selected object is a VIEW, but workload includes writes. "
-                        "Choose a TABLE or remove INSERT/UPDATE from the workload."
+                        "Choose a TABLE or remove WRITE operations from the workload."
                     )
                     logger.error(self._setup_error)
                     return False
@@ -857,6 +967,13 @@ class TestExecutor:
             validation_error = self._validate_custom_query_requirements()
             if validation_error:
                 self._setup_error = validation_error
+                logger.error(self._setup_error)
+                return False
+
+            # Pre-flight correctness gate for GENERIC_SQL queries
+            preflight_error = await self._validate_generic_sql_preflight()
+            if preflight_error:
+                self._setup_error = preflight_error
                 logger.error(self._setup_error)
                 return False
 
@@ -1064,6 +1181,9 @@ class TestExecutor:
                 pct = 0
             if pct <= 0:
                 continue
+            if kind == "GENERIC_SQL":
+                # Explicitly parameterized path; does not rely on legacy key/time inference.
+                continue
             if kind in {"POINT_LOOKUP", "UPDATE"}:
                 needs_key = True
             elif kind == "RANGE_SCAN":
@@ -1132,6 +1252,130 @@ class TestExecutor:
 
         return None
 
+    async def _validate_generic_sql_preflight(self) -> Optional[str]:
+        """
+        Pre-flight correctness gate for GENERIC_SQL queries.
+
+        Runs before test execution to catch problems early:
+        1. EXPLAIN-based syntax validation (catches typos, bad column refs, etc.)
+        2. DDL/dangerous-statement detection for READ-type queries
+        3. Table-reference existence check (implicit via EXPLAIN)
+
+        Returns an error message if any check fails, None if all pass.
+        """
+        custom_queries = self.scenario.custom_queries or []
+        if not custom_queries:
+            return None
+
+        generic_entries: list[tuple[str, str, str]] = []  # (key, sql, op_type)
+        for idx, q in enumerate(custom_queries):
+            kind = str(q.get("query_kind") or "").strip().upper()
+            if kind != "GENERIC_SQL":
+                continue
+            pct = q.get("weight_pct", q.get("percentage", q.get("pct", 0)))
+            try:
+                pct = float(pct or 0)
+            except (ValueError, TypeError):
+                pct = 0
+            if pct <= 0:
+                continue
+            sql = str(q.get("sql") or q.get("query") or q.get("query_text") or "").strip()
+            if not sql:
+                continue
+            key = str(q.get("id") or f"GENERIC_SQL_{idx + 1}").strip()
+            op = str(q.get("operation_type") or "READ").strip().upper()
+            generic_entries.append((key, sql, op))
+
+        if not generic_entries:
+            return None
+
+        # Forbidden statement prefixes for READ operations (case-insensitive).
+        _DDL_PREFIXES = (
+            "CREATE ", "ALTER ", "DROP ", "TRUNCATE ", "RENAME ",
+            "GRANT ", "REVOKE ", "COMMENT ",
+        )
+        _DML_WRITE_PREFIXES = ("INSERT ", "UPDATE ", "DELETE ", "MERGE ", "COPY ")
+
+        # Substitute {table} with the first table manager's full name for validation.
+        full_name = None
+        if self.table_managers:
+            full_name = self.table_managers[0].get_full_table_name()
+
+        # Get a Snowflake pool for EXPLAIN validation (best-effort — skip if unavailable).
+        sf_pool = None
+        for manager in self.table_managers:
+            pool = getattr(manager, "pool", None)
+            if pool and hasattr(pool, "execute_query") and not isinstance(
+                manager, PostgresTableManager
+            ):
+                sf_pool = pool
+                break
+
+        errors: list[str] = []
+
+        for key, sql_tpl, op_type in generic_entries:
+            # Substitute table placeholder.
+            sql = sql_tpl
+            if full_name:
+                sql = sql.replace("{table}", full_name)
+
+            # Strip trailing semicolons for EXPLAIN compatibility.
+            sql_clean = sql.strip().rstrip(";").strip()
+            sql_upper = sql_clean.upper().lstrip()
+
+            # 1) DDL check — never allowed in benchmark queries.
+            for prefix in _DDL_PREFIXES:
+                if sql_upper.startswith(prefix):
+                    errors.append(
+                        f"GENERIC_SQL '{key}': DDL statements ({prefix.strip()}) "
+                        f"are not allowed in benchmark queries."
+                    )
+                    break
+
+            # 2) DML-write check for READ operations.
+            if op_type == "READ":
+                for prefix in _DML_WRITE_PREFIXES:
+                    if sql_upper.startswith(prefix):
+                        errors.append(
+                            f"GENERIC_SQL '{key}': operation_type is READ but SQL "
+                            f"starts with {prefix.strip()}. Change operation_type to "
+                            f"WRITE or use a SELECT query."
+                        )
+                        break
+
+            # 3) EXPLAIN-based syntax validation (Snowflake only, best-effort).
+            if sf_pool and not any(key in e for e in errors):
+                # Replace placeholders (?) with NULL for EXPLAIN — we only care about syntax.
+                explain_sql = sql_clean.replace("?", "NULL")
+                try:
+                    await sf_pool.execute_query(f"EXPLAIN {explain_sql}")
+                except Exception as explain_err:
+                    err_msg = str(explain_err)
+                    # Filter out expected errors from NULL substitution (type mismatches)
+                    # that wouldn't occur with real parameter values.
+                    if "NULL" not in err_msg.upper() or "does not exist" in err_msg.lower():
+                        errors.append(
+                            f"GENERIC_SQL '{key}': SQL syntax validation failed: {err_msg}"
+                        )
+                    else:
+                        logger.debug(
+                            "GENERIC_SQL '%s' EXPLAIN returned type-mismatch error "
+                            "(expected with NULL placeholders), skipping: %s",
+                            key,
+                            err_msg,
+                        )
+
+        if errors:
+            return (
+                "GENERIC_SQL pre-flight validation failed:\n"
+                + "\n".join(f"  - {e}" for e in errors)
+            )
+
+        logger.info(
+            "GENERIC_SQL pre-flight: %d queries validated OK", len(generic_entries)
+        )
+        return None
+
     async def _load_value_pools(self) -> None:
         """
         Load template-associated value pools (if any) into memory.
@@ -1145,78 +1389,128 @@ class TestExecutor:
             self._value_pools = {}
             return
 
-        ai_cfg = tpl_cfg.get("ai_workload")
-        if not isinstance(ai_cfg, dict):
-            self._value_pools = {}
-            return
+        def _normalize_variant(v: Any) -> Any:
+            # Snowflake VARIANT values may come back as:
+            # - Python native (int/float/dict/list/datetime/date)
+            # - JSON-ish strings (e.g. '"1996-06-03"' including quotes)
+            # Normalize to something safe to bind as a query parameter.
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return v
+                try_json = (
+                    s[0] in '{["'
+                    or s in {"null", "true", "false"}
+                    or s[0].isdigit()
+                    or s[0] == "-"
+                )
+                if try_json:
+                    try:
+                        parsed = json.loads(s)
+                        # Check if parsed is an ISO date string (YYYY-MM-DD)
+                        # and convert to datetime.date for asyncpg compatibility.
+                        if isinstance(parsed, str) and len(parsed) == 10:
+                            try:
+                                return datetime.strptime(parsed, "%Y-%m-%d").date()
+                            except ValueError:
+                                pass
+                        return parsed
+                    except Exception:
+                        return v
+            if isinstance(v, dict):
+                out: dict[str, Any] = {}
+                for k2, v2 in v.items():
+                    out[str(k2).strip().upper()] = _normalize_variant(v2)
+                return out
+            if isinstance(v, list):
+                return [_normalize_variant(x) for x in v]
+            return v
 
-        pool_id = ai_cfg.get("pool_id")
-        if not pool_id:
-            self._value_pools = {}
-            return
+        pools: dict[str, dict[str | None, list[Any]]] = {}
 
         try:
             from backend.connectors import snowflake_pool
 
             pool = snowflake_pool.get_default_pool()
-            rows = await pool.execute_query(
-                f"""
-                SELECT POOL_KIND, COLUMN_NAME, VALUE
-                FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEMPLATE_VALUE_POOLS
-                WHERE TEMPLATE_ID = ?
-                  AND POOL_ID = ?
-                ORDER BY POOL_KIND, COLUMN_NAME, SEQ
-                """,
-                params=[str(tpl_id), str(pool_id)],
-            )
 
-            def _normalize_variant(v: Any) -> Any:
-                # Snowflake VARIANT values may come back as:
-                # - Python native (int/float/dict/list/datetime/date)
-                # - JSON-ish strings (e.g. '"1996-06-03"' including quotes)
-                # Normalize to something safe to bind as a query parameter.
-                if isinstance(v, str):
-                    s = v.strip()
-                    if not s:
-                        return v
-                    try_json = (
-                        s[0] in '{["'
-                        or s in {"null", "true", "false"}
-                        or s[0].isdigit()
-                        or s[0] == "-"
+            # 1) Load AI workload pool (if configured)
+            ai_cfg = tpl_cfg.get("ai_workload")
+            if isinstance(ai_cfg, dict):
+                ai_pool_id = ai_cfg.get("pool_id")
+                if ai_pool_id:
+                    rows = await pool.execute_query(
+                        f"""
+                        SELECT POOL_KIND, COLUMN_NAME, VALUE
+                        FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEMPLATE_VALUE_POOLS
+                        WHERE TEMPLATE_ID = ?
+                          AND POOL_ID = ?
+                        ORDER BY POOL_KIND, COLUMN_NAME, SEQ
+                        """,
+                        params=[str(tpl_id), str(ai_pool_id)],
                     )
-                    if try_json:
-                        try:
-                            parsed = json.loads(s)
-                            # Check if parsed is an ISO date string (YYYY-MM-DD)
-                            # and convert to datetime.date for asyncpg compatibility.
-                            if isinstance(parsed, str) and len(parsed) == 10:
-                                try:
-                                    return datetime.strptime(parsed, "%Y-%m-%d").date()
-                                except ValueError:
-                                    pass
-                            return parsed
-                        except Exception:
-                            return v
-                if isinstance(v, dict):
-                    out: dict[str, Any] = {}
-                    for k2, v2 in v.items():
-                        out[str(k2).strip().upper()] = _normalize_variant(v2)
-                    return out
-                if isinstance(v, list):
-                    return [_normalize_variant(x) for x in v]
-                return v
+                    for kind, col_name, value in rows:
+                        k = str(kind or "").upper()
+                        col = str(col_name).upper() if col_name is not None else None
+                        pools.setdefault(k, {}).setdefault(col, []).append(
+                            _normalize_variant(value)
+                        )
+                self._ai_workload = ai_cfg
+            else:
+                self._ai_workload = None
 
-            pools: dict[str, dict[str | None, list[Any]]] = {}
-            for kind, col_name, value in rows:
-                k = str(kind or "").upper()
-                col = str(col_name).upper() if col_name is not None else None
-                pools.setdefault(k, {}).setdefault(col, []).append(
-                    _normalize_variant(value)
-                )
+            # 2) Load GENERIC_SQL parameter pools (each parameter may have its own pool_id)
+            generic_queries = tpl_cfg.get("generic_queries")
+            if isinstance(generic_queries, list):
+                generic_pool_ids: set[str] = set()
+                for gq in generic_queries:
+                    if not isinstance(gq, dict):
+                        continue
+                    params = gq.get("parameters")
+                    if not isinstance(params, list):
+                        continue
+                    for param in params:
+                        if not isinstance(param, dict):
+                            continue
+                        pid = param.get("pool_id")
+                        if pid:
+                            generic_pool_ids.add(str(pid))
+
+                # Load each GENERIC_SQL pool
+                for gpid in generic_pool_ids:
+                    try:
+                        rows = await pool.execute_query(
+                            f"""
+                            SELECT POOL_KIND, COLUMN_NAME, VALUE
+                            FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.TEMPLATE_VALUE_POOLS
+                            WHERE TEMPLATE_ID = ?
+                              AND POOL_ID = ?
+                            ORDER BY POOL_KIND, COLUMN_NAME, SEQ
+                            """,
+                            params=[str(tpl_id), gpid],
+                        )
+                        logger.debug(
+                            "Loaded GENERIC_SQL pool %s: %d rows (tpl_id=%s)",
+                            gpid, len(rows) if rows else 0, tpl_id
+                        )
+                        for kind, col_name, value in rows:
+                            k = str(kind or "").upper()
+                            col = str(col_name).upper() if col_name is not None else None
+                            pools.setdefault(k, {}).setdefault(col, []).append(
+                                _normalize_variant(value)
+                            )
+                        logger.debug(
+                            "Loaded GENERIC_SQL pool %s: %d values",
+                            gpid,
+                            sum(len(v) for v in pools.get("GENERIC_SQL", {}).values()),
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to load GENERIC_SQL pool %s: %s", gpid, e)
 
             self._value_pools = pools
-            self._ai_workload = ai_cfg
+            # Log summary of loaded pools
+            if pools:
+                pool_summary = {k: {col: len(vals) for col, vals in cols.items()} for k, cols in pools.items()}
+                logger.info("Loaded value pools: %s", pool_summary)
         except Exception as e:
             logger.debug("Failed to load TEMPLATE_VALUE_POOLS: %s", e)
             self._value_pools = {}
@@ -2060,6 +2354,23 @@ class TestExecutor:
                     idx = min(max(0, idx), len(sorted_lat) - 1)
                     return float(sorted_lat[idx])
 
+                generic_weight_pct = 0.0
+                gqs = tpl_cfg.get("generic_queries")
+                if isinstance(gqs, list):
+                    for g in gqs:
+                        if not isinstance(g, dict):
+                            continue
+                        g_kind = str(g.get("query_kind") or "GENERIC_SQL").strip().upper()
+                        if g_kind != "GENERIC_SQL":
+                            continue
+                        try:
+                            w = float(g.get("weight_pct") or 0.0)
+                        except Exception:
+                            w = 0.0
+                        if math.isfinite(w) and w > 0:
+                            generic_weight_pct += w
+                generic_weight_pct = round(generic_weight_pct, 2)
+
                 fmc_slo_by_kind: dict[str, dict[str, float]] = {
                     "POINT_LOOKUP": {
                         "weight_pct": max(
@@ -2111,6 +2422,18 @@ class TestExecutor:
                         ),
                         "target_err_pct": _tpl_float(
                             "target_update_error_rate_pct", -1.0
+                        ),
+                    },
+                    "GENERIC_SQL": {
+                        "weight_pct": max(0.0, float(generic_weight_pct)),
+                        "target_p95_ms": _tpl_float(
+                            "target_generic_sql_p95_latency_ms", -1.0
+                        ),
+                        "target_p99_ms": _tpl_float(
+                            "target_generic_sql_p99_latency_ms", -1.0
+                        ),
+                        "target_err_pct": _tpl_float(
+                            "target_generic_sql_error_rate_pct", -1.0
                         ),
                     },
                 }
@@ -2423,8 +2746,9 @@ class TestExecutor:
                             "RANGE_SCAN": "Range Scan",
                             "INSERT": "Insert",
                             "UPDATE": "Update",
+                            "GENERIC_SQL": "Generic SQL",
                         }
-                        for kind in ["POINT_LOOKUP", "RANGE_SCAN", "INSERT", "UPDATE"]:
+                        for kind in fmc_slo_by_kind:
                             cfg = fmc_slo_by_kind.get(kind) or {}
                             weight = float(cfg.get("weight_pct", 0.0) or 0.0)
                             if not math.isfinite(weight) or weight <= 0:
@@ -2822,7 +3146,14 @@ class TestExecutor:
                 f"✅ Test complete: {self.test_result.total_operations} queries, {self.test_result.qps:.2f} QPS"
             )
             logger.info(
-                f"📊 Query distribution - Reads: {self._point_lookup_count} point lookups, {self._range_scan_count} range scans | Writes: {self._insert_count} inserts, {self._update_count} updates"
+                "📊 Query distribution - Reads: %d point lookups, %d range scans, %d generic reads | "
+                "Writes: %d inserts, %d updates, %d generic writes",
+                self._point_lookup_count,
+                self._range_scan_count,
+                self._generic_read_count,
+                self._insert_count,
+                self._update_count,
+                self._generic_write_count,
             )
 
             return self.test_result
@@ -3032,6 +3363,8 @@ class TestExecutor:
         Unlike `_worker`, this never applies per-worker rate limiting. QPS mode
         controls offered load via the number of active workers.
         """
+        logger.debug("[Worker-%d] _controlled_worker STARTED (warmup=%s, stop_event=%s, stop_signal=%s)",
+                     worker_id, warmup, self._stop_event.is_set(), stop_signal.is_set())
         operations_executed = 0
         target_ops = self.scenario.operations_per_connection
         effective_warmup = bool(warmup)
@@ -3062,8 +3395,8 @@ class TestExecutor:
         except asyncio.CancelledError:
             pass
         except Exception as e:
+            logger.error("[Worker-%d] error (warmup=%s): %s", worker_id, effective_warmup, e, exc_info=True)
             if not effective_warmup:
-                logger.error("Worker %s error: %s", worker_id, e)
                 async with self._metrics_lock:
                     self.metrics.failed_operations += 1
 
@@ -3118,6 +3451,7 @@ class TestExecutor:
             worker_id: Worker identifier
             warmup: If True, don't record metrics
         """
+        logger.debug("[Worker-%d] _execute_operation called (warmup=%s)", worker_id, warmup)
         await self._execute_custom(worker_id, warmup)
 
     def get_query_execution_records(self) -> list[_QueryExecutionRecord]:
@@ -3131,14 +3465,23 @@ class TestExecutor:
         CUSTOM workloads are authoritative for templates:
         - Deterministic selection according to stored weights (exact over a full cycle)
         - SQL comes from template config (scenario.custom_queries), with `{table}` substituted
-        - Params are generated for the canonical 4-query workload (POINT_LOOKUP/RANGE_SCAN/INSERT/UPDATE)
+        - Shortcut kinds use legacy parameter inference; GENERIC_SQL uses explicit parameter specs
         """
         start_wall = datetime.now(UTC)
         start_perf = time.perf_counter()
         epoch_at_start = int(self._metrics_epoch)
 
-        query_kind = self._custom_next_kind(worker_id)
-        is_read = query_kind in {"POINT_LOOKUP", "RANGE_SCAN"}
+        query_key = self._custom_next_query_key(worker_id)
+        entry = self._custom_query_by_key.get(query_key)
+        if not entry:
+            raise ValueError(f"No custom query entry found for key {query_key!r}")
+        query_kind = str(entry.get("query_kind") or "").strip().upper()
+        if not query_kind:
+            raise ValueError(f"Invalid custom query kind for key {query_key!r}")
+        operation_type = str(entry.get("operation_type") or "").strip().upper()
+        if operation_type not in {"READ", "WRITE"}:
+            operation_type = "READ" if query_kind in {"POINT_LOOKUP", "RANGE_SCAN"} else "WRITE"
+        is_read = operation_type == "READ"
 
         # Select random table (templates typically include 1 table; keep generic).
         import random
@@ -3149,13 +3492,14 @@ class TestExecutor:
         state = self._table_state[full_name]
         profile = state.profile
 
-        sql_tpl = self._custom_sql_by_kind.get(query_kind)
+        sql_tpl = str(entry.get("sql") or "").strip()
         if not sql_tpl:
-            raise ValueError(f"No SQL found for custom query kind {query_kind}")
+            raise ValueError(f"No SQL found for custom query key {query_key!r}")
         query = sql_tpl.replace("{table}", full_name)
 
         params: Optional[list[Any]] = None
         rows_written_expected = 0
+        generic_label: str | None = None
 
         def _choose_id() -> Any:
             if profile and profile.id_column:
@@ -3315,7 +3659,294 @@ class TestExecutor:
                 out.extend([col] * n)
             return out
 
-        if query_kind == "POINT_LOOKUP":
+        def _coerce_datetime_like(value: Any) -> datetime | None:
+            if isinstance(value, datetime):
+                return value
+            if hasattr(value, "isoformat") and not isinstance(value, (str, bytes)):
+                try:
+                    # date -> datetime at midnight
+                    iso = value.isoformat()
+                    return datetime.fromisoformat(iso)
+                except Exception:
+                    return None
+            s = str(value or "").strip()
+            if not s:
+                return None
+            # Best-effort ISO parse; normalize trailing Z.
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(s)
+            except Exception:
+                return None
+
+        def _sample_column_value(column_name: Any) -> Any:
+            col_u = str(column_name or "").strip().upper()
+            if not col_u:
+                return None
+
+            # Try exact column from sampled row pool first.
+            pooled = self._next_from_pool(worker_id, "ROW", col_u)
+            if pooled is not None:
+                return pooled
+
+            # Key/time pools are authoritative for discovered key/time columns.
+            if profile and profile.id_column and col_u == str(profile.id_column).strip().upper():
+                pooled = self._next_from_pool(worker_id, "KEY", profile.id_column)
+                if pooled is not None:
+                    return pooled
+            if profile and profile.time_column and col_u == str(profile.time_column).strip().upper():
+                pooled = self._next_from_pool(worker_id, "RANGE", profile.time_column)
+                if pooled is not None:
+                    return pooled
+
+            # GENERIC_SQL pool for auto-profiled placeholder columns.
+            pooled = self._next_from_pool(worker_id, "GENERIC_SQL", col_u)
+            if pooled is not None:
+                return pooled
+
+            # Fallback: scan ROW pool objects for the requested key.
+            row_pool = self._pool_values("ROW", None)
+            if row_pool:
+                for row in row_pool:
+                    if isinstance(row, dict) and col_u in row:
+                        return row.get(col_u)
+            return None
+
+        def _generate_generic_params(
+            sql_text: str, param_specs_raw: Any
+        ) -> Optional[list[Any]]:
+            ph = _count_placeholders(sql_text)
+            if ph <= 0:
+                return None
+            if not isinstance(param_specs_raw, list) or not param_specs_raw:
+                raise ValueError(
+                    "GENERIC_SQL query has placeholders but no parameters configuration"
+                )
+            if not all(isinstance(p, dict) for p in param_specs_raw):
+                raise ValueError("GENERIC_SQL parameters must be JSON objects")
+
+            specs = list(cast(list[dict[str, Any]], param_specs_raw))
+            has_positions = all(
+                isinstance(p.get("position"), (int, float))
+                for p in specs
+                if p.get("position") is not None
+            )
+            if has_positions and any(p.get("position") is not None for p in specs):
+                specs.sort(
+                    key=lambda p: int(p.get("position"))
+                    if p.get("position") is not None
+                    else 10**9
+                )
+
+            if len(specs) != ph:
+                raise ValueError(
+                    f"GENERIC_SQL parameters count mismatch: SQL has {ph} placeholders, "
+                    f"but {len(specs)} parameters were configured"
+                )
+
+            generated: list[Any] = []
+            named: dict[str, Any] = {}
+
+            def _resolve_dep_value(dep: Any) -> Any:
+                if isinstance(dep, (int, float)):
+                    dep_i = int(dep)
+                    # Support both 1-based and 0-based indexing.
+                    idx = dep_i - 1 if dep_i >= 1 else dep_i
+                    if 0 <= idx < len(generated):
+                        return generated[idx]
+                dep_name = str(dep or "").strip()
+                if dep_name and dep_name in named:
+                    return named[dep_name]
+                raise ValueError(
+                    f"GENERIC_SQL offset_from_previous depends_on={dep!r} is invalid"
+                )
+
+            for spec in specs:
+                strategy = str(spec.get("strategy") or "").strip().lower()
+                if not strategy:
+                    strategy = "choice" if isinstance(spec.get("values"), list) else "literal"
+
+                value: Any = None
+                if strategy == "literal":
+                    if "value" not in spec:
+                        raise ValueError("GENERIC_SQL literal strategy requires 'value'")
+                    value = spec.get("value")
+                elif strategy == "choice":
+                    values = spec.get("values")
+                    if not isinstance(values, list) or not values:
+                        raise ValueError("GENERIC_SQL choice strategy requires non-empty values")
+                    value = random.choice(values)
+                elif strategy == "random_numeric":
+                    min_v = spec.get("min")
+                    max_v = spec.get("max")
+                    if min_v is None or max_v is None:
+                        raise ValueError(
+                            "GENERIC_SQL random_numeric strategy requires min and max"
+                        )
+                    try:
+                        min_n = float(min_v)
+                        max_n = float(max_v)
+                    except Exception as e:
+                        raise ValueError(
+                            f"GENERIC_SQL random_numeric has invalid range: {min_v!r}, {max_v!r}"
+                        ) from e
+                    if max_n < min_n:
+                        raise ValueError("GENERIC_SQL random_numeric requires max >= min")
+                    integer_mode = bool(spec.get("integer", False))
+                    value = (
+                        random.randint(int(min_n), int(max_n))
+                        if integer_mode
+                        else random.uniform(min_n, max_n)
+                    )
+                elif strategy == "sample_from_table":
+                    value = _sample_column_value(spec.get("column"))
+                    if value is None:
+                        raise ValueError(
+                            f"GENERIC_SQL sample_from_table could not sample column {spec.get('column')!r}"
+                        )
+                elif strategy == "weighted_sample":
+                    values = spec.get("values")
+                    weights_cfg = spec.get("weights")
+                    if (
+                        isinstance(values, list)
+                        and values
+                        and isinstance(weights_cfg, list)
+                        and len(values) == len(weights_cfg)
+                    ):
+                        value = random.choices(values, weights=weights_cfg, k=1)[0]
+                    else:
+                        value = _sample_column_value(spec.get("column"))
+                        if value is None:
+                            raise ValueError(
+                                "GENERIC_SQL weighted_sample requires values+weights or a sampleable column"
+                            )
+                elif strategy == "random_in_range":
+                    min_v = spec.get("min")
+                    max_v = spec.get("max")
+                    if min_v is None or max_v is None:
+                        col_u = str(spec.get("column") or "").strip().upper()
+                        if (
+                            profile
+                            and profile.id_column
+                            and col_u == str(profile.id_column).strip().upper()
+                            and profile.id_min is not None
+                            and profile.id_max is not None
+                            and profile.id_max >= profile.id_min
+                        ):
+                            value = random.randint(profile.id_min, profile.id_max)
+                        elif (
+                            profile
+                            and profile.time_column
+                            and col_u == str(profile.time_column).strip().upper()
+                            and profile.time_min is not None
+                            and profile.time_max is not None
+                            and profile.time_max >= profile.time_min
+                        ):
+                            span_seconds = int(
+                                (profile.time_max - profile.time_min).total_seconds()
+                            )
+                            offset = random.randint(0, max(0, span_seconds))
+                            value = profile.time_min + timedelta(seconds=offset)
+                        else:
+                            raise ValueError(
+                                "GENERIC_SQL random_in_range requires min/max or a profiled key/time column"
+                            )
+                    else:
+                        min_dt = _coerce_datetime_like(min_v)
+                        max_dt = _coerce_datetime_like(max_v)
+                        if min_dt is not None and max_dt is not None:
+                            if max_dt < min_dt:
+                                raise ValueError(
+                                    "GENERIC_SQL random_in_range requires max >= min"
+                                )
+                            span_seconds = int((max_dt - min_dt).total_seconds())
+                            offset = random.randint(0, max(0, span_seconds))
+                            value = min_dt + timedelta(seconds=offset)
+                        else:
+                            try:
+                                min_n = float(min_v)
+                                max_n = float(max_v)
+                            except Exception as e:
+                                raise ValueError(
+                                    f"GENERIC_SQL random_in_range has invalid range: {min_v!r}, {max_v!r}"
+                                ) from e
+                            if max_n < min_n:
+                                raise ValueError(
+                                    "GENERIC_SQL random_in_range requires max >= min"
+                                )
+                            value = random.uniform(min_n, max_n)
+                elif strategy == "offset_from_previous":
+                    base = _resolve_dep_value(spec.get("depends_on"))
+                    offsets_cfg = spec.get("offsets", spec.get("offset"))
+                    if isinstance(offsets_cfg, list):
+                        if not offsets_cfg:
+                            raise ValueError(
+                                "GENERIC_SQL offset_from_previous requires non-empty offsets"
+                            )
+                        offset = random.choice(offsets_cfg)
+                    else:
+                        offset = offsets_cfg
+                    if offset is None:
+                        raise ValueError(
+                            "GENERIC_SQL offset_from_previous requires offset(s)"
+                        )
+                    try:
+                        offset_n = float(offset)
+                    except Exception as e:
+                        raise ValueError(
+                            f"GENERIC_SQL offset_from_previous has invalid offset: {offset!r}"
+                        ) from e
+                    base_dt = _coerce_datetime_like(base)
+                    if base_dt is not None:
+                        value = base_dt + timedelta(days=offset_n)
+                    else:
+                        try:
+                            value = float(base) + offset_n
+                        except Exception as e:
+                            raise ValueError(
+                                f"GENERIC_SQL offset_from_previous cannot offset base value: {base!r}"
+                            ) from e
+                else:
+                    raise ValueError(
+                        f"Unsupported GENERIC_SQL parameter strategy: {strategy!r}"
+                    )
+
+                generated.append(value)
+                name = str(spec.get("name") or "").strip()
+                if name:
+                    named[name] = value
+
+            return generated
+
+        if query_kind == "GENERIC_SQL":
+            generic_label = self._normalize_generic_label(entry.get("label"))
+            # Fall back to entry id if label is blank
+            if not generic_label:
+                generic_label = str(entry.get("id") or "GENERIC_SQL").strip()
+            params = _generate_generic_params(query, entry.get("parameters"))
+            if operation_type == "WRITE":
+                rows_written_expected = 1
+            if not warmup:
+                if is_read:
+                    self._generic_read_count += 1
+                else:
+                    self._generic_write_count += 1
+                self._generic_label_counts[generic_label] = (
+                    int(self._generic_label_counts.get(generic_label, 0)) + 1
+                )
+                if is_read:
+                    self._generic_label_read_counts[generic_label] = (
+                        int(self._generic_label_read_counts.get(generic_label, 0)) + 1
+                    )
+                else:
+                    self._generic_label_write_counts[generic_label] = (
+                        int(
+                            self._generic_label_write_counts.get(generic_label, 0)
+                        )
+                        + 1
+                    )
+        elif query_kind == "POINT_LOOKUP":
             target_id = _choose_id()
             params = [target_id]
             if not warmup:
@@ -3479,7 +4110,9 @@ class TestExecutor:
 
             # Annotate query with UB_KIND marker for server-side stats tracking
             # (Snowflake QUERY_HISTORY and Postgres pg_stat_statements)
-            query = self._annotate_query_for_sf_kind(query, query_kind)
+            query = self._annotate_query_for_sf_kind(
+                query, query_kind, operation_type
+            )
 
             # Execute via pool (supports both Snowflake and Postgres)
             if is_read:
@@ -3574,12 +4207,28 @@ class TestExecutor:
                         ),
                         bytes_scanned=None,
                         connection_id=None,
-                        custom_metadata={
-                            "params_count": len(params or []),
-                            "rows_returned": int(rows_read),
-                        }
-                        if is_read
-                        else {"params_count": len(params or [])},
+                        custom_metadata=(
+                            {
+                                "params_count": len(params or []),
+                                "rows_returned": int(rows_read),
+                                "operation_type": str(operation_type or "").upper(),
+                                **(
+                                    {"generic_label": generic_label}
+                                    if generic_label
+                                    else {}
+                                ),
+                            }
+                            if is_read
+                            else {
+                                "params_count": len(params or []),
+                                "operation_type": str(operation_type or "").upper(),
+                                **(
+                                    {"generic_label": generic_label}
+                                    if generic_label
+                                    else {}
+                                ),
+                            }
+                        ),
                         query_kind=query_kind,
                         worker_id=worker_id,
                         warmup=warmup,
@@ -3682,7 +4331,11 @@ class TestExecutor:
                     rows_affected=None,
                     bytes_scanned=None,
                     connection_id=None,
-                    custom_metadata={"params_count": len(params or [])},
+                    custom_metadata={
+                        "params_count": len(params or []),
+                        "operation_type": str(operation_type or "").upper(),
+                        **({"generic_label": generic_label} if generic_label else {}),
+                    },
                     query_kind=query_kind,
                     worker_id=worker_id,
                     warmup=warmup,
@@ -3791,7 +4444,22 @@ class TestExecutor:
                                         UPPER(EXECUTION_STATUS) = 'RUNNING'
                                         AND CONTAINS(QUERY_TEXT, 'UB_KIND=UPDATE'),
                                         1, 0
-                                      )) AS RUNNING_UPDATE
+                                      )) AS RUNNING_UPDATE,
+                                      SUM(IFF(
+                                        UPPER(EXECUTION_STATUS) = 'RUNNING'
+                                        AND CONTAINS(QUERY_TEXT, 'UB_KIND=GENERIC_SQL'),
+                                        1, 0
+                                      )) AS RUNNING_GENERIC_SQL,
+                                      SUM(IFF(
+                                        UPPER(EXECUTION_STATUS) = 'RUNNING'
+                                        AND CONTAINS(QUERY_TEXT, 'UB_OP=READ'),
+                                        1, 0
+                                      )) AS RUNNING_READ,
+                                      SUM(IFF(
+                                        UPPER(EXECUTION_STATUS) = 'RUNNING'
+                                        AND CONTAINS(QUERY_TEXT, 'UB_OP=WRITE'),
+                                        1, 0
+                                      )) AS RUNNING_WRITE
                                     FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
                                       RESULT_LIMIT => 10000
                                     ))
@@ -3817,13 +4485,25 @@ class TestExecutor:
                                     running_rs = int(row[5] or 0)
                                     running_ins = int(row[6] or 0)
                                     running_upd = int(row[7] or 0)
-                                    running_read = int(running_pl + running_rs)
-                                    running_write = int(running_ins + running_upd)
+                                    running_generic = int(row[8] or 0)
+                                    running_read_marker = int(row[9] or 0)
+                                    running_write_marker = int(row[10] or 0)
+                                    running_read = int(
+                                        running_read_marker
+                                        if running_read_marker > 0
+                                        else (running_pl + running_rs)
+                                    )
+                                    running_write = int(
+                                        running_write_marker
+                                        if running_write_marker > 0
+                                        else (running_ins + running_upd)
+                                    )
                                     running_tagged = int(
                                         running_pl
                                         + running_rs
                                         + running_ins
                                         + running_upd
+                                        + running_generic
                                     )
                                     running_other = max(
                                         0, int(running) - int(running_tagged)
@@ -3841,6 +4521,7 @@ class TestExecutor:
                                         "running_range_scan": running_rs,
                                         "running_insert": running_ins,
                                         "running_update": running_upd,
+                                        "running_generic_sql": running_generic,
                                         "queued": queued,
                                         "blocked": blocked,
                                         "resuming_warehouse": resuming,
@@ -3888,7 +4569,10 @@ class TestExecutor:
                                         COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_KIND=POINT_LOOKUP%') AS active_point_lookup,
                                         COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_KIND=RANGE_SCAN%') AS active_range_scan,
                                         COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_KIND=INSERT%') AS active_insert,
-                                        COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_KIND=UPDATE%') AS active_update
+                                        COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_KIND=UPDATE%') AS active_update,
+                                        COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_KIND=GENERIC_SQL%') AS active_generic_sql,
+                                        COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_OP=READ%') AS active_read,
+                                        COUNT(*) FILTER (WHERE state = 'active' AND query LIKE '%UB_OP=WRITE%') AS active_write
                                     FROM pg_stat_activity
                                     WHERE datname = current_database()
                                       AND pid != pg_backend_pid()
@@ -3905,10 +4589,25 @@ class TestExecutor:
                                     active_rs = int(row[5] or 0)
                                     active_ins = int(row[6] or 0)
                                     active_upd = int(row[7] or 0)
-                                    active_read = int(active_pl + active_rs)
-                                    active_write = int(active_ins + active_upd)
+                                    active_generic = int(row[8] or 0)
+                                    active_read_marker = int(row[9] or 0)
+                                    active_write_marker = int(row[10] or 0)
+                                    active_read = int(
+                                        active_read_marker
+                                        if active_read_marker > 0
+                                        else (active_pl + active_rs)
+                                    )
+                                    active_write = int(
+                                        active_write_marker
+                                        if active_write_marker > 0
+                                        else (active_ins + active_upd)
+                                    )
                                     active_tagged = int(
-                                        active_pl + active_rs + active_ins + active_upd
+                                        active_pl
+                                        + active_rs
+                                        + active_ins
+                                        + active_upd
+                                        + active_generic
                                     )
                                     active_other = max(
                                         0, int(active) - int(active_tagged)
@@ -3924,6 +4623,7 @@ class TestExecutor:
                                         "running_range_scan": active_rs,
                                         "running_insert": active_ins,
                                         "running_update": active_upd,
+                                        "running_generic_sql": active_generic,
                                         "idle_in_transaction": idle_in_tx,
                                         "idle": idle,
                                         "waiting": waiting,  # Postgres-specific: queries waiting on locks
@@ -4144,21 +4844,60 @@ class TestExecutor:
                     # App-level ops breakdown (accurate, real-time counters from the app).
                     # These track actual operations initiated by this test, not SF-side concurrency.
                     elapsed = self.metrics.elapsed_seconds or 0.0
+                    read_count = (
+                        self._point_lookup_count
+                        + self._range_scan_count
+                        + self._generic_read_count
+                    )
+                    write_count = (
+                        self._insert_count
+                        + self._update_count
+                        + self._generic_write_count
+                    )
+                    total_count = read_count + write_count
+                    generic_label_counts = dict(self._generic_label_counts)
+                    generic_label_read_counts = dict(self._generic_label_read_counts)
+                    generic_label_write_counts = dict(self._generic_label_write_counts)
+                    generic_label_ops_sec = (
+                        {
+                            key: float(value / elapsed)
+                            for key, value in generic_label_counts.items()
+                        }
+                        if elapsed > 0
+                        else {key: 0.0 for key in generic_label_counts}
+                    )
+                    generic_label_read_ops_sec = (
+                        {
+                            key: float(value / elapsed)
+                            for key, value in generic_label_read_counts.items()
+                        }
+                        if elapsed > 0
+                        else {key: 0.0 for key in generic_label_read_counts}
+                    )
+                    generic_label_write_ops_sec = (
+                        {
+                            key: float(value / elapsed)
+                            for key, value in generic_label_write_counts.items()
+                        }
+                        if elapsed > 0
+                        else {key: 0.0 for key in generic_label_write_counts}
+                    )
                     custom["app_ops_breakdown"] = {
                         "point_lookup_count": int(self._point_lookup_count),
                         "range_scan_count": int(self._range_scan_count),
                         "insert_count": int(self._insert_count),
                         "update_count": int(self._update_count),
-                        "read_count": int(
-                            self._point_lookup_count + self._range_scan_count
+                        "generic_read_count": int(self._generic_read_count),
+                        "generic_write_count": int(self._generic_write_count),
+                        "generic_count": int(
+                            self._generic_read_count + self._generic_write_count
                         ),
-                        "write_count": int(self._insert_count + self._update_count),
-                        "total_count": int(
-                            self._point_lookup_count
-                            + self._range_scan_count
-                            + self._insert_count
-                            + self._update_count
-                        ),
+                        "generic_label_counts": generic_label_counts,
+                        "generic_label_read_counts": generic_label_read_counts,
+                        "generic_label_write_counts": generic_label_write_counts,
+                        "read_count": int(read_count),
+                        "write_count": int(write_count),
+                        "total_count": int(total_count),
                         # QPS breakdown (based on elapsed time).
                         "point_lookup_ops_sec": float(
                             self._point_lookup_count / elapsed
@@ -4174,15 +4913,30 @@ class TestExecutor:
                         "update_ops_sec": float(self._update_count / elapsed)
                         if elapsed > 0
                         else 0.0,
-                        "read_ops_sec": float(
-                            (self._point_lookup_count + self._range_scan_count)
+                        "generic_read_ops_sec": float(self._generic_read_count / elapsed)
+                        if elapsed > 0
+                        else 0.0,
+                        "generic_write_ops_sec": float(
+                            self._generic_write_count / elapsed
+                        )
+                        if elapsed > 0
+                        else 0.0,
+                        "generic_ops_sec": float(
+                            (self._generic_read_count + self._generic_write_count)
                             / elapsed
                         )
                         if elapsed > 0
                         else 0.0,
-                        "write_ops_sec": float(
-                            (self._insert_count + self._update_count) / elapsed
-                        )
+                        "generic_label_ops_sec": generic_label_ops_sec,
+                        "generic_label_read_ops_sec": generic_label_read_ops_sec,
+                        "generic_label_write_ops_sec": generic_label_write_ops_sec,
+                        "read_ops_sec": float(read_count / elapsed)
+                        if elapsed > 0
+                        else 0.0,
+                        "write_ops_sec": float(write_count / elapsed)
+                        if elapsed > 0
+                        else 0.0,
+                        "total_ops_sec": float(total_count / elapsed)
                         if elapsed > 0
                         else 0.0,
                     }
@@ -4288,6 +5042,7 @@ class TestExecutor:
         rs = self._lat_by_kind_ms.get("RANGE_SCAN", [])
         ins = self._lat_by_kind_ms.get("INSERT", [])
         upd = self._lat_by_kind_ms.get("UPDATE", [])
+        gs = self._lat_by_kind_ms.get("GENERIC_SQL", [])
 
         # Get first table info
         table_config = (
@@ -4356,6 +5111,11 @@ class TestExecutor:
             update_p99_latency_ms=_pct(upd, 99),
             update_min_latency_ms=_min(upd),
             update_max_latency_ms=_max(upd),
+            generic_sql_p50_latency_ms=_pct(gs, 50),
+            generic_sql_p95_latency_ms=_pct(gs, 95),
+            generic_sql_p99_latency_ms=_pct(gs, 99),
+            generic_sql_min_latency_ms=_min(gs),
+            generic_sql_max_latency_ms=_max(gs),
         )
 
         return result

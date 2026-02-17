@@ -12,6 +12,7 @@ from .constants import (
     _CUSTOM_QUERY_FIELDS,
     _DEFAULT_CUSTOM_QUERIES_POSTGRES,
     _DEFAULT_CUSTOM_QUERIES_SNOWFLAKE,
+    GENERIC_QUERIES_FIELD,
 )
 from .utils import _coerce_int, _is_postgres_family_table_type
 
@@ -44,16 +45,106 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
     for k in _CUSTOM_QUERY_FIELDS:
         out[k] = str(out.get(k) or defaults.get(k) or "").strip()
 
-    # Normalize pct fields.
-    for k in _CUSTOM_PCT_FIELDS:
-        out[k] = _coerce_int(out.get(k) or 0, label=k)
-        if out[k] < 0 or out[k] > 100:
-            raise ValueError(f"{k} must be between 0 and 100 (got {out[k]})")
+    def _coerce_weight_pct(v: Any, *, label: str) -> float:
+        if v is None:
+            return 0.0
+        if isinstance(v, bool):
+            n = float(v)
+        else:
+            s = str(v).strip()
+            if not s:
+                return 0.0
+            try:
+                n = float(s)
+            except Exception as e:
+                raise ValueError(f"Invalid {label}: {v!r}") from e
+        if not math.isfinite(n):
+            raise ValueError(f"Invalid {label}: {v!r}")
+        n = round(float(n), 2)
+        if n < 0 or n > 100:
+            raise ValueError(f"{label} must be between 0.00 and 100.00 (got {n})")
+        return n
 
-    total = sum(int(out[k]) for k in _CUSTOM_PCT_FIELDS)
-    if total != 100:
+    # Normalize shortcut weight fields.
+    for k in _CUSTOM_PCT_FIELDS:
+        out[k] = _coerce_weight_pct(out.get(k), label=k)
+
+    # Normalize generic query entries (optional).
+    raw_generic = out.get(GENERIC_QUERIES_FIELD)
+    if raw_generic is None:
+        raw_generic = []
+    if not isinstance(raw_generic, list):
+        raise ValueError(f"{GENERIC_QUERIES_FIELD} must be a JSON array when provided")
+
+    normalized_generic: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for i, raw in enumerate(raw_generic):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"generic_queries[{i}] must be a JSON object (got {type(raw).__name__})"
+            )
+
+        row = dict(raw)
+        qid = str(row.get("id") or f"GENERIC_SQL_{i + 1}").strip()
+        if not qid:
+            raise ValueError(f"generic_queries[{i}].id cannot be empty")
+        if qid in seen_ids:
+            raise ValueError(f"Duplicate generic_queries id: {qid}")
+        seen_ids.add(qid)
+
+        kind = str(row.get("query_kind") or "GENERIC_SQL").strip().upper()
+        if kind != "GENERIC_SQL":
+            raise ValueError(
+                f"generic_queries[{i}].query_kind must be GENERIC_SQL (got {kind!r})"
+            )
+
+        op = str(row.get("operation_type") or "").strip().upper()
+        if op not in {"READ", "WRITE"}:
+            raise ValueError(
+                f"generic_queries[{i}].operation_type must be READ or WRITE"
+            )
+
+        weight = _coerce_weight_pct(
+            row.get("weight_pct"), label=f"generic_queries[{i}].weight_pct"
+        )
+        sql = str(row.get("sql") or row.get("query") or row.get("query_text") or "").strip()
+        if weight > 0 and not sql:
+            raise ValueError(f"generic_queries[{i}].sql is required when weight_pct > 0")
+
+        params_raw = row.get("parameters")
+        if params_raw is None:
+            params: list[Any] = []
+        elif isinstance(params_raw, list):
+            params = list(params_raw)
+        else:
+            raise ValueError(
+                f"generic_queries[{i}].parameters must be an array when provided"
+            )
+
+        label_raw = row.get("label")
+        label = str(label_raw).strip() if label_raw is not None else None
+
+        normalized_generic.append(
+            {
+                **row,
+                "id": qid,
+                "query_kind": "GENERIC_SQL",
+                "operation_type": op,
+                "weight_pct": weight,
+                "sql": sql,
+                "parameters": params,
+                "label": label,
+            }
+        )
+
+    out[GENERIC_QUERIES_FIELD] = normalized_generic
+
+    shortcut_total = sum(float(out[k]) for k in _CUSTOM_PCT_FIELDS)
+    generic_total = sum(float(q.get("weight_pct") or 0.0) for q in normalized_generic)
+    total = round(shortcut_total + generic_total, 2)
+    if total != 100.0:
         raise ValueError(
-            f"Custom query percentages must sum to 100 (currently {total})."
+            f"Custom query weights must sum to 100.00 (currently {total:.2f})."
         )
 
     required_pairs = [
@@ -63,7 +154,7 @@ def _normalize_template_config(cfg: Any) -> dict[str, Any]:
         ("custom_update_pct", "custom_update_query"),
     ]
     for pct_k, sql_k in required_pairs:
-        if int(out.get(pct_k) or 0) > 0 and not str(out.get(sql_k) or "").strip():
+        if float(out.get(pct_k) or 0.0) > 0 and not str(out.get(sql_k) or "").strip():
             raise ValueError(f"{sql_k} is required when {pct_k} > 0")
 
     # Targets (SLOs): required for any query kind that has weight > 0.

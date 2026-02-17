@@ -2,237 +2,339 @@
 
 High-level modifications needed to support analytical workloads.
 
+> **Decision update (2026-02-16):** Runtime kinds are simplified to
+> `POINT_LOOKUP`, `RANGE_SCAN`, `INSERT`, `UPDATE`, and `GENERIC_SQL`.
+> Analytical constructs (including `ROLLUP/CUBE`) are SQL patterns under
+> `GENERIC_SQL`, with explicit `operation_type` and 2-decimal `weight_pct`.
+
 ## Current Architecture (OLTP-Focused)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    YAML Template/Scenario                    │
-│  workload_type: CUSTOM                                       │
-│  custom_point_lookup_pct: 70                                 │
-│  custom_range_scan_pct: 30                                   │
+│                         UI / Config                          │
+│  - User selects table                                        │
+│  - System auto-detects key_column, time_column               │
+│  - User sets workload mix (2-decimal weights, e.g. 99.99/0.01)│
+│  - User can edit SQL templates                               │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                     Test Registry                            │
-│  Builds custom_queries list from template                    │
-│  [{"query_kind": "POINT_LOOKUP", "weight_pct": 70, ...}]    │
+│                     Prepare (Profile)                        │
+│  - Sample KEY values into TEMPLATE_VALUE_POOLS               │
+│  - Sample RANGE (time) values into TEMPLATE_VALUE_POOLS      │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     Test Executor                            │
-│  _execute_custom() dispatches by query_kind                  │
-│  Allowed: POINT_LOOKUP, RANGE_SCAN, INSERT, UPDATE          │
-│  Parameter type INFERRED from query_kind                     │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     Value Pools                              │
-│  KEY pool → point lookup IDs                                 │
-│  RANGE pool → time cutoffs                                   │
-│  ROW pool → full row data                                    │
-│  (Fixed pools, pre-sampled at setup)                        │
+│  - Dispatch by query_kind (POINT_LOOKUP, RANGE_SCAN, etc.)  │
+│  - Parameter type INFERRED from query_kind                   │
+│  - Pull values from pre-sampled pools                        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 **Limitation:** Parameter types are inferred from query_kind. This works for OLTP
-(point lookups always need an ID) but fails for OLAP where queries filter on
-arbitrary dimensions with varying granularities.
+(point lookups always need an ID) but fails for OLAP where queries:
+- Filter on arbitrary dimensions (not just id/time)
+- Span multiple tables (JOINs)
+- Have variable granularity (hour/day/week/month/year)
 
 ## Proposed Architecture (OLAP-Capable)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    YAML Template/Scenario                    │
-│  custom_queries:                                             │
-│    - query_kind: "AGGREGATION"                               │
-│      sql: "SELECT ... WHERE date >= ? AND region = ?"       │
-│      parameters:                    ◄── NEW: Explicit specs  │
-│        - {type: date, strategy: random_in_range}            │
-│        - {type: categorical, strategy: sample_from_table}   │
+│                    UI: Table Selection                       │
+│  User selects tables to include in query:                    │
+│    ☑ sales_fact    ☑ dim_region    ☑ dim_product            │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Column Profiler (NEW)                     │
-│  Profiles ALL columns referenced in parameter specs         │
-│  - Date columns: min/max bounds                              │
-│  - Categorical: distinct values + frequencies                │
-│  - Numeric: min/max/distribution                             │
+│                 UI: Natural Language Intent                  │
+│  User describes query: "Analyze sales by region and time,   │
+│  filter by product category"                                 │
+│                                                              │
+│  [Generate SQL]                                              │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  Parameter Generator (NEW)                   │
+│                    AI SQL Generation                         │
+│  - Receives table schemas as context                         │
+│  - Generates SQL with ? placeholders                         │
+│  - User can refine/regenerate/edit                           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 UI: Parameter Mapping                        │
+│  For each ? placeholder:                                     │
+│    ?1: [Table: sales_fact▼] [Column: order_date▼]           │
+│        [Strategy: random_in_range▼]                          │
+│    ?2: [Strategy: offset_from_previous▼] [Depends: ?1▼]     │
+│    ?3: [Table: dim_product▼] [Column: category▼]            │
+│        [Strategy: sample_from_table▼]                        │
+└─────────────────────────────────────────────────────────────┘
+
+> **Note on placeholder syntax:** The `?1`, `?2`, `?3` labels shown above are 
+> **UI display notation only**. The actual SQL uses plain `?` placeholders which
+> are bound positionally (first `?` gets first param, second `?` gets second, etc.).
+> - **Snowflake:** `?` (positional) or `%(name)s` (named)
+> - **Postgres:** `$1`, `$2`, `$n` (numbered)
+> - **Table substitution:** `{table}` is replaced with the full qualified table name
+
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Prepare: Column Profiling                    │
+│  Profile ONLY columns referenced in parameter configs:       │
+│    - sales_fact.order_date → min/max dates                  │
+│    - dim_product.category → distinct values                 │
+│  Store in TEMPLATE_COLUMN_PROFILES (not value pools)        │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 Pre-Flight Correctness Gate                 │
+│  - Validate placeholder mappings for OLAP queries           │
+│  - Validate non-approx query semantics                      │
+│  - Validate approximate-cardinality error tolerance          │
+│  - Block benchmark run on failure                           │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  Runtime: Parameter Generator                │
 │  For each query execution:                                   │
-│  - Iterate through parameter specs in order                  │
-│  - Apply generation strategy (random_in_range, sample, etc.) │
-│  - Handle dependent params (end_date from start_date)        │
-│  - Return ordered list of values to bind                     │
+│    - Read parameter configs                                  │
+│    - Generate values on-the-fly from profiles               │
+│    - Handle dependencies (end_date from start_date)         │
+│    - Return ordered list to bind to SQL                     │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     Test Executor                            │
-│  _execute_custom() dispatches by query_kind                  │
-│  Binds generated params to SQL placeholders                  │
-│  Tracks metrics per query kind                               │
+│  - Dispatch by query_kind (POINT/RANGE/INSERT/UPDATE/GENERIC_SQL) │
+│  - Bind generated params to SQL                              │
+│  - Track metrics per runtime kind + optional generic label   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Key change:** Parameters are **explicitly specified** per query, not inferred from query_kind.
+**Key changes:**
+1. **UI-driven** - No manual YAML editing
+2. **AI-assisted SQL** - Natural language → SQL with placeholders
+3. **Multi-table support** - JOINs handled naturally
+4. **Explicit parameter mapping** - User maps each ? to table.column + strategy
+5. **Column profiles** - Lightweight metadata, not pre-sampled value pools
+6. **Correctness gate** - Validates analytical templates before perf execution
+7. **Inherited methodology controls** - Uses existing cache/warmup/trial controls
 
-## Core Changes
+## Component Changes
 
-### 1. Explicit Parameter Specifications
+### 1. New UI Components
 
-Each `?` placeholder gets a specification defining how to generate values:
+| Component | Purpose |
+|-----------|---------|
+| Table Selector | Multi-select tables from schema |
+| Intent Input | Natural language query description |
+| SQL Generator | AI-powered SQL generation |
+| SQL Editor | Review/edit generated SQL |
+| Parameter Mapper | Configure each ? placeholder |
+| Query Manager | Add/edit/delete multiple queries |
 
-```yaml
-parameters:
-  - name: "start_date"
-    type: "date"
-    strategy: "random_in_range"    # Random within column bounds
-    column: "order_date"
-  
-  - name: "end_date"
-    type: "date"
-    strategy: "offset_from_previous"  # Relative to prior param
-    depends_on: "start_date"
-    offset: [7, 30, 90, 365]
-  
-  - name: "region"
-    type: "categorical"
-    strategy: "sample_from_table"  # Random from distinct values
-    column: "region"
-```
+**Location:** `backend/templates/pages/configure.html`
 
-See `04-value-pools.md` for full specification.
+### 2. Canonical Backend Endpoints (No Aliases)
 
-### 2. Column Profiling
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/catalog/objects` | List objects in schema (tables/views, filterable to tables) |
+| `GET /api/catalog/columns` | Get columns/types/samples for a selected table |
+| `POST /api/templates/ai/generate-sql` | AI generates SQL from intent + schema context |
+| `POST /api/templates/ai/validate-sql` | Validate SQL syntax/shape before save |
+| `POST /api/templates/{template_id}/ai/profile-columns` | Profile referenced columns for the template |
 
-Profile ALL columns that may be used in parameters (not just id/time):
+**Route ownership (single surface per concern):**
+- `backend/api/routes/catalog.py` for discovery metadata
+- `backend/api/routes/templates.py` for template-scoped AI actions
+
+### 3. Column Profiler (NEW)
 
 ```python
+# backend/core/column_profiler.py
+
 @dataclass
 class ColumnProfile:
-    name: str
-    data_type: str              # date, number, string
-    min_value: Any              # For dates/numbers
-    max_value: Any
+    """
+    Statistical profile of a table column.
+    
+    CANONICAL DEFINITION: See 04-value-pools.md for the complete field list
+    including null_count, total_count, and validation methods.
+    """
+    table: str
+    column: str
+    data_type: str
+    min_value: Any | None
+    max_value: Any | None
     distinct_count: int
-    sample_values: list[Any]    # For categoricals
-    value_weights: dict         # For weighted sampling
+    null_count: int           # For empty/NULL detection
+    total_count: int          # For empty table detection
+    sample_values: list[Any]
+    value_weights: dict[Any, float]  # For weighted sampling
+
+async def profile_columns(
+    conn,
+    column_refs: list[tuple[str, str]]  # [(table, column), ...]
+) -> dict[str, ColumnProfile]:
+    """Profile specific columns from potentially different tables."""
+    ...
 ```
 
-### 3. Generation Strategies
-
-| Strategy | Description | Use Case |
-|----------|-------------|----------|
-| `choice` | Random from explicit list | Granularity, enums |
-| `random_in_range` | Random in column min/max | Dates, numbers |
-| `sample_from_table` | Random from distinct values | Categoricals |
-| `weighted_sample` | Frequency-weighted random | Realistic distribution |
-| `offset_from_previous` | Relative to prior param | Date range end |
-| `sample_list` | Multiple values for IN clause | Multi-select filters |
-| `sample_from_pool` | Legacy pool-based (OLTP) | Backward compat |
-
-### 4. Add New Query Kinds
-
-**Location:** `backend/api/routes/templates_modules/constants.py`
+### 4. Parameter Generator (NEW)
 
 ```python
-# Proposed (9 kinds)
-_CUSTOM_QUERY_FIELDS = (
-    # OLTP (existing)
-    "custom_point_lookup_query",
-    "custom_range_scan_query",
-    "custom_insert_query",
-    "custom_update_query",
-    # OLAP (new)
-    "custom_aggregation_query",
-    "custom_windowed_query",
-    "custom_analytical_join_query",
-    "custom_wide_scan_query",
-    "custom_approx_distinct_query",
-)
+# backend/core/param_generator.py
+
+class ParameterGenerator:
+    def __init__(self, profiles: dict[str, ColumnProfile]):
+        self._profiles = profiles
+    
+    def generate(self, param_configs: list[ParameterConfig]) -> list[Any]:
+        """Generate values for all parameters in a query."""
+        values = []
+        context = {}  # For dependent params
+        
+        for config in param_configs:
+            value = self._generate_one(config, context)
+            values.append(value)
+            context[config.position] = value
+        
+        return values
 ```
 
-### 5. Modify Test Executor Dispatch
+### 5. Extended Test Executor
 
 **Location:** `backend/core/test_executor.py`
 
-Replace query_kind-based parameter inference with explicit spec-based generation:
-
 ```python
+# Use a simplified runtime kind model
+ALLOWED_QUERY_KINDS = {
+    "POINT_LOOKUP",
+    "RANGE_SCAN",
+    "INSERT",
+    "UPDATE",
+    "GENERIC_SQL",
+}
+
 async def _execute_custom(self, worker_id: int, warmup: bool = False):
-    # Select query by weight
-    query_spec = self._select_query_by_weight()
-    
-    # Generate parameters using explicit specs (NEW)
-    params = self._generate_params(query_spec.parameters, worker_id)
-    
-    # Bind and execute
-    sql = query_spec.sql.replace("{table}", full_name)
-    result = await conn.execute(sql, params)
+    query = self._select_query_by_weight()
+
+    if query.query_kind == "GENERIC_SQL":
+        # Explicit mapping path for arbitrary SQL.
+        generator = ParameterGenerator(self._column_profiles)
+        params = generator.generate(query.parameters or [])
+        operation_type = str(query.operation_type or "READ").upper()
+    else:
+        # Backward-compatible shortcut path.
+        params = self._legacy_generate_params(query.query_kind)
+        operation_type = "READ" if query.query_kind in {"POINT_LOOKUP", "RANGE_SCAN"} else "WRITE"
+
+    result = await conn.execute(query.sql, params)
 ```
 
-### 6. Add Analytics-Specific Metrics
+> **Architectural recommendation:** Consider extracting a `QueryKindDispatcher` class
+> from `test_executor.py`. This would:
+> - Centralize query kind registration and validation
+> - Make it easier to add new query kinds without modifying executor core
+> - Enable per-kind metric collection strategies
+> - Improve testability by isolating dispatch logic
+>
+> ```python
+> # backend/core/query_kind_dispatcher.py (future refactor)
+> class QueryKindDispatcher:
+>     """Registry for query kinds and their execution strategies."""
+>     
+>     _registry: dict[str, QueryKindConfig] = {}
+>     
+>     @classmethod
+>     def register(cls, kind: str, config: QueryKindConfig):
+>         cls._registry[kind] = config
+>     
+>     @classmethod
+>     def get_slo(cls, kind: str) -> dict:
+>         return cls._registry[kind].slo_thresholds
+>     
+>     @classmethod
+>     def is_olap(cls, kind: str) -> bool:
+>         return cls._registry[kind].category == "OLAP"
+> ```
 
-**Current metrics focus:** Latency per operation (p50, p95, p99)
+### 6. Storage Schema
 
-**Add:**
-- Rows processed per second
-- Bytes scanned per second
-- Query compile time vs execution time
-- Warehouse queue time
+**New table for column profiles:**
 
-### 7. Update SLO Definitions
+```sql
+CREATE TABLE TEMPLATE_COLUMN_PROFILES (
+    TEMPLATE_ID VARCHAR NOT NULL,
+    TABLE_NAME VARCHAR NOT NULL,
+    COLUMN_NAME VARCHAR NOT NULL,
+    DATA_TYPE VARCHAR,
+    MIN_VALUE VARIANT,
+    MAX_VALUE VARIANT,
+    DISTINCT_COUNT NUMBER,
+    SAMPLE_VALUES VARIANT,  -- JSON array
+    VALUE_WEIGHTS VARIANT,  -- JSON object
+    PROFILED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (TEMPLATE_ID, TABLE_NAME, COLUMN_NAME)
+);
+```
 
-**Location:** `backend/core/test_executor.py:2063-2116`
+**Extended template config (JSON):**
 
-Analytical queries have different latency expectations:
-- Point lookup: <50ms target
-- Aggregation: <5000ms target (acceptable for analytics)
+```json
+{
+  "analytical_queries": [
+    {
+      "id": "q1",
+      "name": "Sales by Region",
+      "query_kind": "GENERIC_SQL",
+      "operation_type": "READ",
+      "label": "aggregation",
+      "weight_pct": 40.00,
+      "sql": "SELECT r.region_name, SUM(f.amount) ...",
+      "parameters": [
+        {"position": 1, "table": "sales_fact", "column": "order_date", "strategy": "random_in_range"},
+        {"position": 2, "table": "dim_region", "column": "region", "strategy": "sample_from_table"}
+      ]
+    }
+  ]
+}
+```
 
 ## File Modification Summary
 
 | File | Changes |
 |------|---------|
-| `constants.py` | Add 5 new query field tuples, default SQL |
-| `test_executor.py` | Add dispatch branches, metrics dicts, SLO defs |
-| `test_config.py` | Validate new query kinds in model |
-| `table_profiler.py` | Add column statistics for analytical queries |
-| `test_registry.py` | Build custom_queries for new kinds |
+| `backend/templates/pages/configure.html` | Add analytical query builder UI |
+| `backend/api/routes/catalog.py` | Extend discovery endpoints with table-column metadata |
+| `backend/api/routes/templates.py` | Add template-scoped SQL generation, validation, profiling endpoints |
+| `backend/core/column_profiler.py` | NEW: Profile columns across tables |
+| `backend/core/param_generator.py` | NEW: Generate params from profiles |
+| `backend/core/test_executor.py` | Add OLAP query kinds, use param generator |
+| `backend/api/routes/templates_modules/constants.py` | Add OLAP query kind constants |
+| `backend/sql/schema/` | Add TEMPLATE_COLUMN_PROFILES table |
 
 ## Backward Compatibility
 
-- Existing OLTP workloads unchanged
-- New query kinds are additive
-- Templates without analytical queries work as before
-- `workload_type: CUSTOM` supports any mix of kinds
+- Existing OLTP templates work unchanged
+- `analytical_queries` is a new optional config section
+- If no explicit parameters, falls back to legacy pool-based generation
+- No migration needed for existing templates
 
-## Phased Approach
+## Mix Precision
 
-**Phase 1:** Add AGGREGATION query kind only
-- Simplest parameter binding (single date cutoff)
-- Validates architecture changes work
-
-**Phase 2:** Add WINDOWED, WIDE_SCAN
-- Requires date range parameters
-- Tests window function metrics
-
-**Phase 3:** Add ANALYTICAL_JOIN, APPROX_DISTINCT
-- Requires dimension pools
-- More complex binding logic
-
-## Risk Assessment
-
-| Change | Risk | Mitigation |
-|--------|------|------------|
-| New query kinds | Medium | Add one at a time, validate |
-| Value pool changes | Low | Additive, doesn't break existing |
-| Metrics changes | Low | New fields, existing unchanged |
-| Executor dispatch | Medium | Comprehensive test coverage |
+- `weight_pct` supports two decimal places (`0.00` to `100.00`)
+- Total query mix must equal exactly `100.00`
+- This enables very skewed mixes (for example, approximately `10000:1` read:write)

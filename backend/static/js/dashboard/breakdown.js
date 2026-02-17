@@ -42,7 +42,8 @@ window.DashboardMixins.breakdown = {
         l.startsWith("point") ||
         l.startsWith("range") ||
         l.startsWith("insert") ||
-        l.startsWith("update")
+        l.startsWith("update") ||
+        l.startsWith("generic")
       );
     };
 
@@ -95,7 +96,8 @@ window.DashboardMixins.breakdown = {
         l.startsWith("point") ||
         l.startsWith("range") ||
         l.startsWith("insert") ||
-        l.startsWith("update")
+        l.startsWith("update") ||
+        l.startsWith("generic")
       );
     };
 
@@ -147,7 +149,8 @@ window.DashboardMixins.breakdown = {
         l.startsWith("point") ||
         l.startsWith("range") ||
         l.startsWith("insert") ||
-        l.startsWith("update")
+        l.startsWith("update") ||
+        l.startsWith("generic")
       );
     };
 

@@ -18,6 +18,14 @@ _CUSTOM_PCT_FIELDS: tuple[str, str, str, str] = (
     "custom_insert_pct",
     "custom_update_pct",
 )
+GENERIC_QUERIES_FIELD = "generic_queries"
+ALLOWED_QUERY_KINDS: tuple[str, str, str, str, str] = (
+    "POINT_LOOKUP",
+    "RANGE_SCAN",
+    "INSERT",
+    "UPDATE",
+    "GENERIC_SQL",
+)
 
 # Canonical SQL templates for saved CUSTOM workloads.
 #

@@ -23,23 +23,27 @@ window.DashboardMixins.formatters = {
 
   formatCompact(value) {
     const n = typeof value === "number" ? value : Number(value);
-    if (!Number.isFinite(n)) return "0.00";
+    if (!Number.isFinite(n)) return "0";
 
     const abs = Math.abs(n);
-    const format = (x, suffix) => `${x.toFixed(2)}${suffix}`;
+    const format = (x, suffix) => {
+      const formatted = x.toFixed(2);
+      const clean = formatted.replace(/\.00$/, '');
+      return `${clean}${suffix}`;
+    };
 
     if (abs >= 1e12) return format(n / 1e12, "T");
     if (abs >= 1e9) return format(n / 1e9, "B");
     if (abs >= 1e6) return format(n / 1e6, "M");
     if (abs >= 1e3) return format(n / 1e3, "k");
-    return n.toFixed(2);
+    return Number.isInteger(n) ? n.toLocaleString() : n.toFixed(2);
   },
 
   formatMs(value) {
     if (value == null) return "N/A";
     const n = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(n)) return "N/A";
-    return n.toFixed(2);
+    return Math.round(n).toLocaleString();
   },
 
   formatMsWithUnit(value) {

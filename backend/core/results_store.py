@@ -649,6 +649,11 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
             MAX(UPDATE_P99_LATENCY_MS) AS UPDATE_P99,
             MIN(UPDATE_MIN_LATENCY_MS) AS UPDATE_MIN,
             MAX(UPDATE_MAX_LATENCY_MS) AS UPDATE_MAX,
+            AVG(GENERIC_SQL_P50_LATENCY_MS) AS GENERIC_SQL_P50,
+            MAX(GENERIC_SQL_P95_LATENCY_MS) AS GENERIC_SQL_P95,
+            MAX(GENERIC_SQL_P99_LATENCY_MS) AS GENERIC_SQL_P99,
+            MIN(GENERIC_SQL_MIN_LATENCY_MS) AS GENERIC_SQL_MIN,
+            MAX(GENERIC_SQL_MAX_LATENCY_MS) AS GENERIC_SQL_MAX,
             AVG(APP_OVERHEAD_P50_MS) AS APP_OVERHEAD_P50,
             MAX(APP_OVERHEAD_P95_MS) AS APP_OVERHEAD_P95,
             MAX(APP_OVERHEAD_P99_MS) AS APP_OVERHEAD_P99
@@ -658,7 +663,7 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         """,
         params=[parent_run_id, parent_run_id],
     )
-    breakdown = breakdown_rows[0] if breakdown_rows else (None,) * 33
+    breakdown = breakdown_rows[0] if breakdown_rows else (None,) * 38
     (
         read_p50,
         read_p95,
@@ -690,10 +695,39 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         update_p99,
         update_min,
         update_max,
+        generic_sql_p50,
+        generic_sql_p95,
+        generic_sql_p99,
+        generic_sql_min,
+        generic_sql_max,
         app_overhead_p50,
         app_overhead_p95,
         app_overhead_p99,
     ) = breakdown
+
+    # Aggregate OLAP throughput metrics from child workers
+    olap_rows = await pool.execute_query(
+        f"""
+        SELECT
+            SUM(COALESCE(GENERIC_SQL_ROWS_PER_SEC, 0)) AS GENERIC_SQL_ROWS_PER_SEC,
+            SUM(COALESCE(GENERIC_SQL_BYTES_SCANNED_PER_SEC, 0)) AS GENERIC_SQL_BYTES_SCANNED_PER_SEC,
+            SUM(COALESCE(OLAP_TOTAL_OPERATIONS, 0)) AS OLAP_TOTAL_OPERATIONS,
+            SUM(COALESCE(OLAP_TOTAL_ROWS_PROCESSED, 0)) AS OLAP_TOTAL_ROWS_PROCESSED,
+            SUM(COALESCE(OLAP_TOTAL_BYTES_SCANNED, 0)) AS OLAP_TOTAL_BYTES_SCANNED
+        FROM {prefix}.TEST_RESULTS
+        WHERE RUN_ID = ?
+          AND TEST_ID <> ?
+        """,
+        params=[parent_run_id, parent_run_id],
+    )
+    olap_agg = olap_rows[0] if olap_rows else (None,) * 5
+    (
+        agg_gs_rows_per_sec,
+        agg_gs_bytes_per_sec,
+        agg_olap_total_ops,
+        agg_olap_total_rows,
+        agg_olap_total_bytes,
+    ) = olap_agg
 
     merge_query = f"""
     MERGE INTO {prefix}.TEST_RESULTS AS t
@@ -757,6 +791,17 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         UPDATE_P99_LATENCY_MS = ?,
         UPDATE_MIN_LATENCY_MS = ?,
         UPDATE_MAX_LATENCY_MS = ?,
+        GENERIC_SQL_P50_LATENCY_MS = ?,
+        GENERIC_SQL_P95_LATENCY_MS = ?,
+        GENERIC_SQL_P99_LATENCY_MS = ?,
+        GENERIC_SQL_MIN_LATENCY_MS = ?,
+        GENERIC_SQL_MAX_LATENCY_MS = ?,
+        GENERIC_SQL_ROWS_PER_SEC = ?,
+        GENERIC_SQL_BYTES_SCANNED_PER_SEC = ?,
+        OLAP_TOTAL_OPERATIONS = ?,
+        OLAP_TOTAL_ROWS_PROCESSED = ?,
+        OLAP_TOTAL_BYTES_SCANNED = ?,
+        OLAP_METRICS = PARSE_JSON(?),
         APP_OVERHEAD_P50_MS = ?,
         APP_OVERHEAD_P95_MS = ?,
         APP_OVERHEAD_P99_MS = ?,
@@ -820,6 +865,17 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         UPDATE_P99_LATENCY_MS,
         UPDATE_MIN_LATENCY_MS,
         UPDATE_MAX_LATENCY_MS,
+        GENERIC_SQL_P50_LATENCY_MS,
+        GENERIC_SQL_P95_LATENCY_MS,
+        GENERIC_SQL_P99_LATENCY_MS,
+        GENERIC_SQL_MIN_LATENCY_MS,
+        GENERIC_SQL_MAX_LATENCY_MS,
+        GENERIC_SQL_ROWS_PER_SEC,
+        GENERIC_SQL_BYTES_SCANNED_PER_SEC,
+        OLAP_TOTAL_OPERATIONS,
+        OLAP_TOTAL_ROWS_PROCESSED,
+        OLAP_TOTAL_BYTES_SCANNED,
+        OLAP_METRICS,
         APP_OVERHEAD_P50_MS,
         APP_OVERHEAD_P95_MS,
         APP_OVERHEAD_P99_MS
@@ -827,7 +883,12 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
     VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         PARSE_JSON(?), PARSE_JSON(?),
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, PARSE_JSON(?),
+        ?, ?, ?
     )
     """
 
@@ -865,6 +926,17 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         _float_or_none(update_p99),
         _float_or_none(update_min),
         _float_or_none(update_max),
+        _float_or_none(generic_sql_p50),
+        _float_or_none(generic_sql_p95),
+        _float_or_none(generic_sql_p99),
+        _float_or_none(generic_sql_min),
+        _float_or_none(generic_sql_max),
+        _float_or_none(agg_gs_rows_per_sec),
+        _float_or_none(agg_gs_bytes_per_sec),
+        int(agg_olap_total_ops or 0),
+        int(agg_olap_total_rows or 0),
+        int(agg_olap_total_bytes or 0),
+        None,  # OLAP_METRICS: no merge strategy for VARIANT across workers
         _float_or_none(app_overhead_p50),
         _float_or_none(app_overhead_p95),
         _float_or_none(app_overhead_p99),
@@ -1254,10 +1326,24 @@ async def update_test_result_final(
         UPDATE_P99_LATENCY_MS = ?,
         UPDATE_MIN_LATENCY_MS = ?,
         UPDATE_MAX_LATENCY_MS = ?,
+        GENERIC_SQL_P50_LATENCY_MS = ?,
+        GENERIC_SQL_P95_LATENCY_MS = ?,
+        GENERIC_SQL_P99_LATENCY_MS = ?,
+        GENERIC_SQL_MIN_LATENCY_MS = ?,
+        GENERIC_SQL_MAX_LATENCY_MS = ?,
+        GENERIC_SQL_ROWS_PER_SEC = ?,
+        GENERIC_SQL_BYTES_SCANNED_PER_SEC = ?,
+        OLAP_TOTAL_OPERATIONS = ?,
+        OLAP_TOTAL_ROWS_PROCESSED = ?,
+        OLAP_TOTAL_BYTES_SCANNED = ?,
+        OLAP_METRICS = PARSE_JSON(?),
         APP_OVERHEAD_P50_MS = ?,
         APP_OVERHEAD_P95_MS = ?,
         APP_OVERHEAD_P99_MS = ?,
         FIND_MAX_RESULT = PARSE_JSON(?),
+        RUN_TEMPERATURE = ?,
+        TRIAL_INDEX = ?,
+        REALISM_PROFILE = ?,
         UPDATED_AT = CURRENT_TIMESTAMP()
     WHERE TEST_ID = ?
     """
@@ -1319,10 +1405,24 @@ async def update_test_result_final(
         result.update_p99_latency_ms,
         result.update_min_latency_ms,
         result.update_max_latency_ms,
+        result.generic_sql_p50_latency_ms,
+        result.generic_sql_p95_latency_ms,
+        result.generic_sql_p99_latency_ms,
+        result.generic_sql_min_latency_ms,
+        result.generic_sql_max_latency_ms,
+        result.generic_sql_rows_per_sec,
+        result.generic_sql_bytes_scanned_per_sec,
+        result.olap_total_operations,
+        result.olap_total_rows_processed,
+        result.olap_total_bytes_scanned,
+        json.dumps(result.olap_metrics) if result.olap_metrics else None,
         result.app_overhead_p50_ms,
         result.app_overhead_p95_ms,
         result.app_overhead_p99_ms,
         json.dumps(find_max_result) if find_max_result else None,
+        result.run_temperature,
+        result.trial_index,
+        result.realism_profile,
         test_id,
     ]
 
@@ -1478,6 +1578,8 @@ async def enrich_query_executions_from_query_history(
                     BYTES_SCANNED::BIGINT AS SF_BYTES_SCANNED,
                     ROWS_PRODUCED::BIGINT AS SF_ROWS_PRODUCED,
                     CLUSTER_NUMBER::INTEGER AS SF_CLUSTER_NUMBER
+                    -- NOTE: BYTES_SPILLED_*, PARTITIONS_* are only in ACCOUNT_USAGE.QUERY_HISTORY,
+                    -- not available via INFORMATION_SCHEMA.QUERY_HISTORY() table function.
                 FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(
                     END_TIME_RANGE_START=>TO_TIMESTAMP_LTZ(?),
                     END_TIME_RANGE_END=>TO_TIMESTAMP_LTZ(?),

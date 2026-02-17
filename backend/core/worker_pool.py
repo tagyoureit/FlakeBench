@@ -117,11 +117,13 @@ class WorkerPool:
         wid = int(self._next_worker_id)
         self._next_worker_id += 1
         stop_signal = asyncio.Event()
+        logger.debug("[WorkerPool] Spawning worker %d (warmup=%s)", wid, warmup)
         task = asyncio.create_task(
             self._worker_factory(wid, warmup, stop_signal)
         )
         self._worker_tasks[wid] = (task, stop_signal)
         self._notify_changed()
+        logger.debug("[WorkerPool] Worker %d spawned, total tasks: %d", wid, len(self._worker_tasks))
         return wid
 
     async def scale_to(
@@ -163,7 +165,13 @@ class WorkerPool:
 
         running_ids = sorted(self.running_worker_ids())
         running = len(running_ids)
-        live = len(self.live_worker_ids())
+        live_ids = self.live_worker_ids()
+        live = len(live_ids)
+        
+        logger.info(
+            "[WorkerPool] _scale_to_impl: target=%d, running=%d, live=%d, running_ids=%s, live_ids=%s, worker_tasks=%s",
+            target, running, live, running_ids, live_ids, list(self._worker_tasks.keys())
+        )
 
         # Scale up:
         # - Never exceed max_workers by counting ALL live tasks,
@@ -175,7 +183,8 @@ class WorkerPool:
             )
             if prewarm_callback is not None:
                 await prewarm_callback(target)
-            spawn_n = min((target - running), max(0, target - live))
+            spawn_n = min((target - running), max(0, self.max_workers - live))
+            logger.info("[WorkerPool] spawn_n=%d (target=%d, running=%d, live=%d, max_workers=%d)", spawn_n, target, running, live, self.max_workers)
             for _ in range(spawn_n):
                 await self.spawn_one(warmup=warmup)
 

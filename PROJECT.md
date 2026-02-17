@@ -1,6 +1,8 @@
 Start with `docs/index.md` for a human overview or `docs/SKILL.md` for the
 agent-focused index, then follow the referenced docs as needed.
 
+For any 'best practices' or 'how to' questions always consult the GLEAN MCP.
+
 **Debugging metrics/UI issues?** See `docs/metrics-streaming-debug.md` for the
 complete phase transition flow (PREPARING → WARMUP → MEASUREMENT) and why QPS
 may show 0 during certain phases.

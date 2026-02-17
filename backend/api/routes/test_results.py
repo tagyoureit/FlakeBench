@@ -1065,7 +1065,19 @@ async def _fetch_sf_execution_latency_summary(
             ORDER BY IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)
         ) AS SF_UPDATE_P99_LATENCY_MS,
         MIN(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MIN_LATENCY_MS,
-        MAX(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MAX_LATENCY_MS
+        MAX(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)
+        ) AS SF_GENERIC_SQL_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)
+        ) AS SF_GENERIC_SQL_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)
+        ) AS SF_GENERIC_SQL_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)) AS SF_GENERIC_SQL_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)) AS SF_GENERIC_SQL_MAX_LATENCY_MS
     FROM {prefix}.QUERY_EXECUTIONS
     WHERE TEST_ID = ?
       AND COALESCE(WARMUP, FALSE) = FALSE
@@ -1132,6 +1144,11 @@ async def _fetch_sf_execution_latency_summary(
         "sf_update_p99_latency_ms": _to_float_or_none(r[33]),
         "sf_update_min_latency_ms": _to_float_or_none(r[34]),
         "sf_update_max_latency_ms": _to_float_or_none(r[35]),
+        "sf_generic_sql_p50_latency_ms": _to_float_or_none(r[36]),
+        "sf_generic_sql_p95_latency_ms": _to_float_or_none(r[37]),
+        "sf_generic_sql_p99_latency_ms": _to_float_or_none(r[38]),
+        "sf_generic_sql_min_latency_ms": _to_float_or_none(r[39]),
+        "sf_generic_sql_max_latency_ms": _to_float_or_none(r[40]),
     }
 
     if low_enrichment and p50_overhead_ms is not None and p50_overhead_ms > 0:
@@ -1268,7 +1285,19 @@ async def _fetch_app_latency_summary_for_run(
             ORDER BY IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)
         ) AS UPDATE_P99_LATENCY_MS,
         MIN(IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)) AS UPDATE_MIN_LATENCY_MS,
-        MAX(IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)) AS UPDATE_MAX_LATENCY_MS
+        MAX(IFF(QUERY_KIND = 'UPDATE', APP_ELAPSED_MS, NULL)) AS UPDATE_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', APP_ELAPSED_MS, NULL)
+        ) AS GENERIC_SQL_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', APP_ELAPSED_MS, NULL)
+        ) AS GENERIC_SQL_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', APP_ELAPSED_MS, NULL)
+        ) AS GENERIC_SQL_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'GENERIC_SQL', APP_ELAPSED_MS, NULL)) AS GENERIC_SQL_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'GENERIC_SQL', APP_ELAPSED_MS, NULL)) AS GENERIC_SQL_MAX_LATENCY_MS
     FROM {prefix}.QUERY_EXECUTIONS qe
     WHERE qe.TEST_ID IN (
         SELECT TEST_ID FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?
@@ -1321,6 +1350,11 @@ async def _fetch_app_latency_summary_for_run(
         "update_p99_latency_ms": _to_float_or_none(r[33]),
         "update_min_latency_ms": _to_float_or_none(r[34]),
         "update_max_latency_ms": _to_float_or_none(r[35]),
+        "generic_sql_p50_latency_ms": _to_float_or_none(r[36]),
+        "generic_sql_p95_latency_ms": _to_float_or_none(r[37]),
+        "generic_sql_p99_latency_ms": _to_float_or_none(r[38]),
+        "generic_sql_min_latency_ms": _to_float_or_none(r[39]),
+        "generic_sql_max_latency_ms": _to_float_or_none(r[40]),
     }
 
 
@@ -1444,7 +1478,19 @@ async def _fetch_sf_execution_latency_summary_for_run(
             ORDER BY IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)
         ) AS SF_UPDATE_P99_LATENCY_MS,
         MIN(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MIN_LATENCY_MS,
-        MAX(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MAX_LATENCY_MS
+        MAX(IFF(QUERY_KIND = 'UPDATE', SF_EXECUTION_MS, NULL)) AS SF_UPDATE_MAX_LATENCY_MS,
+
+        PERCENTILE_CONT(0.50) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)
+        ) AS SF_GENERIC_SQL_P50_LATENCY_MS,
+        PERCENTILE_CONT(0.95) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)
+        ) AS SF_GENERIC_SQL_P95_LATENCY_MS,
+        PERCENTILE_CONT(0.99) WITHIN GROUP (
+            ORDER BY IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)
+        ) AS SF_GENERIC_SQL_P99_LATENCY_MS,
+        MIN(IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)) AS SF_GENERIC_SQL_MIN_LATENCY_MS,
+        MAX(IFF(QUERY_KIND = 'GENERIC_SQL', SF_EXECUTION_MS, NULL)) AS SF_GENERIC_SQL_MAX_LATENCY_MS
     FROM {prefix}.QUERY_EXECUTIONS qe
     WHERE qe.TEST_ID IN (
         SELECT TEST_ID FROM {prefix}.TEST_RESULTS WHERE RUN_ID = ?
@@ -1513,6 +1559,11 @@ async def _fetch_sf_execution_latency_summary_for_run(
         "sf_update_p99_latency_ms": _to_float_or_none(r[33]),
         "sf_update_min_latency_ms": _to_float_or_none(r[34]),
         "sf_update_max_latency_ms": _to_float_or_none(r[35]),
+        "sf_generic_sql_p50_latency_ms": _to_float_or_none(r[36]),
+        "sf_generic_sql_p95_latency_ms": _to_float_or_none(r[37]),
+        "sf_generic_sql_p99_latency_ms": _to_float_or_none(r[38]),
+        "sf_generic_sql_min_latency_ms": _to_float_or_none(r[39]),
+        "sf_generic_sql_max_latency_ms": _to_float_or_none(r[40]),
     }
 
     if low_enrichment and p50_overhead_ms is not None and p50_overhead_ms > 0:
@@ -1958,10 +2009,18 @@ async def list_tests(
                     # Scaling config
                     "scaling": scaling_config,
                     # Workload mix
-                    "custom_point_lookup_pct": int(custom_point_lookup_pct or 0) if custom_point_lookup_pct is not None else None,
-                    "custom_range_scan_pct": int(custom_range_scan_pct or 0) if custom_range_scan_pct is not None else None,
-                    "custom_insert_pct": int(custom_insert_pct or 0) if custom_insert_pct is not None else None,
-                    "custom_update_pct": int(custom_update_pct or 0) if custom_update_pct is not None else None,
+                    "custom_point_lookup_pct": round(float(custom_point_lookup_pct or 0), 2)
+                    if custom_point_lookup_pct is not None
+                    else None,
+                    "custom_range_scan_pct": round(float(custom_range_scan_pct or 0), 2)
+                    if custom_range_scan_pct is not None
+                    else None,
+                    "custom_insert_pct": round(float(custom_insert_pct or 0), 2)
+                    if custom_insert_pct is not None
+                    else None,
+                    "custom_update_pct": round(float(custom_update_pct or 0), 2)
+                    if custom_update_pct is not None
+                    else None,
                     **_build_cost_fields(
                         float(duration or 0),
                         wh_size,
@@ -2159,6 +2218,108 @@ async def _fetch_qps_controller_step_history(
     return results
 
 
+async def _fetch_generic_label_breakdown(
+    *, pool: Any, run_id: str, test_id: str, is_parent_run: bool
+) -> dict[str, Any]:
+    """Fetch per-label breakdown for GENERIC_SQL queries from QUERY_EXECUTIONS.
+    
+    Extracts generic_label from CUSTOM_METADATA column and aggregates latency stats
+    by label and operation_type (READ/WRITE).
+    
+    Returns:
+        generic_label_read_stats: dict[label -> {count, p50, p95, p99, min, max}]
+        generic_label_write_stats: dict[label -> {count, p50, p95, p99, min, max}]
+    """
+    prefix = _prefix()
+    result: dict[str, Any] = {
+        "generic_label_read_counts": {},
+        "generic_label_write_counts": {},
+        "generic_label_read_stats": {},
+        "generic_label_write_stats": {},
+    }
+
+    if is_parent_run:
+        rows = await pool.execute_query(
+            f"""
+            SELECT 
+                label,
+                op_type,
+                COUNT(*) AS cnt,
+                APPROX_PERCENTILE(latency, 0.5) AS p50,
+                APPROX_PERCENTILE(latency, 0.95) AS p95,
+                APPROX_PERCENTILE(latency, 0.99) AS p99,
+                MIN(latency) AS min_lat,
+                MAX(latency) AS max_lat
+            FROM (
+                SELECT 
+                    COALESCE(NULLIF(JSON_EXTRACT_PATH_TEXT(qe.CUSTOM_METADATA, 'generic_label'), ''), 'GENERIC_SQL') AS label,
+                    COALESCE(UPPER(NULLIF(JSON_EXTRACT_PATH_TEXT(qe.CUSTOM_METADATA, 'operation_type'), '')), 'READ') AS op_type,
+                    qe.DURATION_MS AS latency
+                FROM {prefix}.QUERY_EXECUTIONS qe
+                JOIN {prefix}.TEST_RESULTS tr ON tr.TEST_ID = qe.TEST_ID
+                WHERE tr.RUN_ID = ?
+                  AND tr.TEST_ID <> ?
+                  AND COALESCE(qe.WARMUP, FALSE) = FALSE
+                  AND qe.QUERY_KIND = 'GENERIC_SQL'
+                
+                UNION ALL
+                
+                SELECT 
+                    COALESCE(NULLIF(JSON_EXTRACT_PATH_TEXT(CUSTOM_METADATA, 'generic_label'), ''), 'GENERIC_SQL') AS label,
+                    COALESCE(UPPER(NULLIF(JSON_EXTRACT_PATH_TEXT(CUSTOM_METADATA, 'operation_type'), '')), 'READ') AS op_type,
+                    DURATION_MS AS latency
+                FROM {prefix}.QUERY_EXECUTIONS
+                WHERE TEST_ID = ?
+                  AND COALESCE(WARMUP, FALSE) = FALSE
+                  AND QUERY_KIND = 'GENERIC_SQL'
+            )
+            GROUP BY label, op_type
+            """,
+            params=[run_id, test_id, test_id],
+        )
+    else:
+        rows = await pool.execute_query(
+            f"""
+            SELECT 
+                COALESCE(NULLIF(JSON_EXTRACT_PATH_TEXT(CUSTOM_METADATA, 'generic_label'), ''), 'GENERIC_SQL') AS label,
+                COALESCE(UPPER(NULLIF(JSON_EXTRACT_PATH_TEXT(CUSTOM_METADATA, 'operation_type'), '')), 'READ') AS op_type,
+                COUNT(*) AS cnt,
+                APPROX_PERCENTILE(DURATION_MS, 0.5) AS p50,
+                APPROX_PERCENTILE(DURATION_MS, 0.95) AS p95,
+                APPROX_PERCENTILE(DURATION_MS, 0.99) AS p99,
+                MIN(DURATION_MS) AS min_lat,
+                MAX(DURATION_MS) AS max_lat
+            FROM {prefix}.QUERY_EXECUTIONS
+            WHERE TEST_ID = ?
+              AND COALESCE(WARMUP, FALSE) = FALSE
+              AND QUERY_KIND = 'GENERIC_SQL'
+            GROUP BY label, op_type
+            """,
+            params=[test_id],
+        )
+
+    for row in rows:
+        label, op_type, cnt, p50, p95, p99, min_lat, max_lat = row
+        label_str = str(label or "GENERIC_SQL").strip()
+        op = str(op_type or "READ").strip().upper()
+        stats = {
+            "count": int(cnt or 0),
+            "p50": float(p50) if p50 is not None else None,
+            "p95": float(p95) if p95 is not None else None,
+            "p99": float(p99) if p99 is not None else None,
+            "min": float(min_lat) if min_lat is not None else None,
+            "max": float(max_lat) if max_lat is not None else None,
+        }
+        if op == "WRITE":
+            result["generic_label_write_counts"][label_str] = stats["count"]
+            result["generic_label_write_stats"][label_str] = stats
+        else:
+            result["generic_label_read_counts"][label_str] = stats["count"]
+            result["generic_label_read_stats"][label_str] = stats
+
+    return result
+
+
 async def _fetch_error_rates(
     *, pool: Any, run_id: str, test_id: str, is_parent_run: bool
 ) -> dict[str, Any]:
@@ -2169,10 +2330,12 @@ async def _fetch_error_rates(
         "range_scan_error_rate_pct": None,
         "insert_error_rate_pct": None,
         "update_error_rate_pct": None,
+        "generic_sql_error_rate_pct": None,
         "point_lookup_count": 0,
         "range_scan_count": 0,
         "insert_count": 0,
         "update_count": 0,
+        "generic_sql_count": 0,
     }
 
     if is_parent_run:
@@ -2230,12 +2393,14 @@ async def _fetch_error_rates(
         "RANGE_SCAN": "range_scan_error_rate_pct",
         "INSERT": "insert_error_rate_pct",
         "UPDATE": "update_error_rate_pct",
+        "GENERIC_SQL": "generic_sql_error_rate_pct",
     }
     count_key_map = {
         "POINT_LOOKUP": "point_lookup_count",
         "RANGE_SCAN": "range_scan_count",
         "INSERT": "insert_count",
         "UPDATE": "update_count",
+        "GENERIC_SQL": "generic_sql_count",
     }
     for kind, n, err in err_rows:
         k = str(kind or "").upper()
@@ -2264,15 +2429,15 @@ async def get_test(test_id: str) -> dict[str, Any]:
         pool = snowflake_pool.get_default_pool()
 
         # Workload mix helper fields (templates normalize to workload_type=CUSTOM).
-        def _coerce_pct(v: Any) -> int:
+        def _coerce_pct(v: Any) -> float:
             try:
-                return int(float(v))
+                return round(float(v), 2)
             except Exception:
-                return 0
+                return 0.0
 
-        def _pct_from_dict(d: Any, key: str) -> int:
+        def _pct_from_dict(d: Any, key: str) -> float:
             if not isinstance(d, dict):
-                return 0
+                return 0.0
             return _coerce_pct(d.get(key) or 0)
 
         def _num_from_dict(d: Any, key: str) -> float:
@@ -2286,8 +2451,13 @@ async def get_test(test_id: str) -> dict[str, Any]:
             except Exception:
                 return -1.0
 
-        def _pct_from_custom_queries(queries: Any) -> dict[str, int]:
-            out = {"POINT_LOOKUP": 0, "RANGE_SCAN": 0, "INSERT": 0, "UPDATE": 0}
+        def _pct_from_custom_queries(queries: Any) -> dict[str, float]:
+            out = {
+                "POINT_LOOKUP": 0.0,
+                "RANGE_SCAN": 0.0,
+                "INSERT": 0.0,
+                "UPDATE": 0.0,
+            }
             if not queries:
                 return out
 
@@ -2376,6 +2546,11 @@ async def get_test(test_id: str) -> dict[str, Any]:
             UPDATE_P99_LATENCY_MS,
             UPDATE_MIN_LATENCY_MS,
             UPDATE_MAX_LATENCY_MS,
+            GENERIC_SQL_P50_LATENCY_MS,
+            GENERIC_SQL_P95_LATENCY_MS,
+            GENERIC_SQL_P99_LATENCY_MS,
+            GENERIC_SQL_MIN_LATENCY_MS,
+            GENERIC_SQL_MAX_LATENCY_MS,
             QUERY_TAG,
             FIND_MAX_RESULT,
             FAILURE_REASON,
@@ -2735,6 +2910,11 @@ async def get_test(test_id: str) -> dict[str, Any]:
             update_p99_latency_ms,
             update_min_latency_ms,
             update_max_latency_ms,
+            generic_sql_p50_latency_ms,
+            generic_sql_p95_latency_ms,
+            generic_sql_p99_latency_ms,
+            generic_sql_min_latency_ms,
+            generic_sql_max_latency_ms,
             query_tag,
             find_max_result_raw,
             failure_reason,
@@ -3069,6 +3249,11 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "update_p99_latency_ms": float(update_p99_latency_ms or 0),
             "update_min_latency_ms": float(update_min_latency_ms or 0),
             "update_max_latency_ms": float(update_max_latency_ms or 0),
+            "generic_sql_p50_latency_ms": float(generic_sql_p50_latency_ms or 0),
+            "generic_sql_p95_latency_ms": float(generic_sql_p95_latency_ms or 0),
+            "generic_sql_p99_latency_ms": float(generic_sql_p99_latency_ms or 0),
+            "generic_sql_min_latency_ms": float(generic_sql_min_latency_ms or 0),
+            "generic_sql_max_latency_ms": float(generic_sql_max_latency_ms or 0),
             "find_max_result": find_max_result,
             "failure_reason": failure_reason,
             # Enrichment status (post-processing)
@@ -3122,6 +3307,18 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 (
                     "error_rates",
                     _fetch_error_rates(
+                        pool=pool,
+                        run_id=str(run_id) if run_id else test_id,
+                        test_id=test_id,
+                        is_parent_run=is_parent_run,
+                    ),
+                )
+            )
+            # 2b. Generic label breakdown (terminal states only)
+            parallel_tasks.append(
+                (
+                    "generic_label_breakdown",
+                    _fetch_generic_label_breakdown(
                         pool=pool,
                         run_id=str(run_id) if run_id else test_id,
                         test_id=test_id,
@@ -3241,6 +3438,15 @@ async def get_test(test_id: str) -> dict[str, Any]:
                             "update_count": 0,
                         }
                     )
+                elif task_name == "generic_label_breakdown":
+                    payload.update(
+                        {
+                            "generic_label_read_counts": {},
+                            "generic_label_write_counts": {},
+                            "generic_label_read_stats": {},
+                            "generic_label_write_stats": {},
+                        }
+                    )
                 elif task_name == "sf_latency":
                     payload.update(
                         {"sf_latency_available": False, "sf_latency_sample_count": 0}
@@ -3285,6 +3491,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     "cluster_breakdown",
                     "postgres_stats",
                     "pg_enrichment",
+                    "generic_label_breakdown",
                 ):
                     payload.update(result)
                 elif task_name == "qps_step_history":
@@ -3308,6 +3515,10 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     "range_scan_count": 0,
                     "insert_count": 0,
                     "update_count": 0,
+                    "generic_label_read_counts": {},
+                    "generic_label_write_counts": {},
+                    "generic_label_read_stats": {},
+                    "generic_label_write_stats": {},
                 }
             )
 
@@ -3519,8 +3730,17 @@ async def list_query_executions(
         pool = snowflake_pool.get_default_pool()
         prefix = _prefix()
 
+        # Resolve all TEST_IDs that share the same RUN_ID as the given test_id.
+        # Workers generate their own test_id for query tagging, but link back via RUN_ID.
+        # This subquery finds all sibling test_ids (orchestrator + workers) for the run.
+        test_id_subquery = f"""
+            TEST_ID IN (
+                SELECT TEST_ID FROM {prefix}.TEST_RESULTS
+                WHERE RUN_ID = (SELECT RUN_ID FROM {prefix}.TEST_RESULTS WHERE TEST_ID = ?)
+            )
+        """
         where_clauses: list[str] = [
-            "TEST_ID = ?",
+            test_id_subquery,
             "COALESCE(WARMUP, FALSE) = FALSE",
             "SUCCESS = TRUE",
         ]
@@ -4721,6 +4941,20 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 summed = _sum_dicts(dicts)
                 return {key: value / len(dicts) for key, value in summed.items()}
 
+            def _sum_nested_dicts(
+                dicts: list[dict[str, Any]],
+            ) -> dict[str, float]:
+                out: dict[str, float] = {}
+                for d in dicts:
+                    if not isinstance(d, dict):
+                        continue
+                    for key, value in d.items():
+                        try:
+                            out[str(key)] = out.get(str(key), 0.0) + float(value or 0)
+                        except Exception:
+                            continue
+                return out
+
             def _normalize_metrics(raw: Any) -> dict[str, Any]:
                 if isinstance(raw, str):
                     try:
@@ -4786,8 +5020,73 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     for cm in custom_list
                     if isinstance(cm.get("qps"), dict)
                 ]
+                app_ops_agg = _sum_dicts(app_ops_list)
+                if isinstance(app_ops_agg, dict):
+                    generic_label_counts = _sum_nested_dicts(
+                        [
+                            d.get("generic_label_counts")
+                            for d in app_ops_list
+                            if isinstance(d.get("generic_label_counts"), dict)
+                        ]
+                    )
+                    generic_label_read_counts = _sum_nested_dicts(
+                        [
+                            d.get("generic_label_read_counts")
+                            for d in app_ops_list
+                            if isinstance(d.get("generic_label_read_counts"), dict)
+                        ]
+                    )
+                    generic_label_write_counts = _sum_nested_dicts(
+                        [
+                            d.get("generic_label_write_counts")
+                            for d in app_ops_list
+                            if isinstance(d.get("generic_label_write_counts"), dict)
+                        ]
+                    )
+                    generic_label_ops_sec = _sum_nested_dicts(
+                        [
+                            d.get("generic_label_ops_sec")
+                            for d in app_ops_list
+                            if isinstance(d.get("generic_label_ops_sec"), dict)
+                        ]
+                    )
+                    generic_label_read_ops_sec = _sum_nested_dicts(
+                        [
+                            d.get("generic_label_read_ops_sec")
+                            for d in app_ops_list
+                            if isinstance(d.get("generic_label_read_ops_sec"), dict)
+                        ]
+                    )
+                    generic_label_write_ops_sec = _sum_nested_dicts(
+                        [
+                            d.get("generic_label_write_ops_sec")
+                            for d in app_ops_list
+                            if isinstance(d.get("generic_label_write_ops_sec"), dict)
+                        ]
+                    )
+                    if generic_label_counts:
+                        app_ops_agg["generic_label_counts"] = generic_label_counts
+                    if generic_label_read_counts:
+                        app_ops_agg["generic_label_read_counts"] = (
+                            generic_label_read_counts
+                        )
+                    if generic_label_write_counts:
+                        app_ops_agg["generic_label_write_counts"] = (
+                            generic_label_write_counts
+                        )
+                    if generic_label_ops_sec:
+                        app_ops_agg["generic_label_ops_sec"] = generic_label_ops_sec
+                    if generic_label_read_ops_sec:
+                        app_ops_agg["generic_label_read_ops_sec"] = (
+                            generic_label_read_ops_sec
+                        )
+                    if generic_label_write_ops_sec:
+                        app_ops_agg["generic_label_write_ops_sec"] = (
+                            generic_label_write_ops_sec
+                        )
+
                 custom_agg = {
-                    "app_ops_breakdown": _sum_dicts(app_ops_list),
+                    "app_ops_breakdown": app_ops_agg,
                     "sf_bench": _sum_dicts(sf_bench_list),
                     "warehouse": _sum_dicts(warehouse_list),
                     "resources": _avg_dicts(resources_list),
@@ -4910,6 +5209,20 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 except Exception:
                     return 0.0
 
+            def _to_number_map(raw: Any, *, as_int: bool = False) -> dict[str, Any]:
+                if not isinstance(raw, dict):
+                    return {}
+                out: dict[str, Any] = {}
+                for key, value in raw.items():
+                    try:
+                        if as_int:
+                            out[str(key)] = int(float(value or 0))
+                        else:
+                            out[str(key)] = float(value or 0)
+                    except Exception:
+                        continue
+                return out
+
             def _compute_breakdown_rate(
                 ops_per_sec: float, app_ops: dict[str, Any], count_key: str
             ) -> float:
@@ -4928,6 +5241,29 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                 except Exception:
                     return 0.0
 
+            def _compute_label_breakdown_rates(
+                ops_per_sec: float, app_ops: dict[str, Any], label_counts_key: str
+            ) -> dict[str, float]:
+                try:
+                    total_count = float(app_ops.get("total_count") or 0)
+                except Exception:
+                    total_count = 0.0
+                if total_count <= 0:
+                    return {}
+                label_counts = app_ops.get(label_counts_key)
+                if not isinstance(label_counts, dict):
+                    return {}
+                out: dict[str, float] = {}
+                for label, count_raw in label_counts.items():
+                    try:
+                        count = float(count_raw or 0)
+                        if count <= 0:
+                            continue
+                        out[str(label)] = ops_per_sec * (count / total_count)
+                    except Exception:
+                        continue
+                return out
+
             snapshots.append(
                 {
                     "timestamp": timestamp.isoformat()
@@ -4944,6 +5280,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     # Target workers (desired concurrency from controller).
                     "target_workers": _to_int(target_workers),
                     # Snowflake server-side RUNNING concurrency (best-effort).
+                    "sf_bench_available": bool(sf_bench),
                     "sf_running": _to_int(sf_bench.get("running")),
                     "sf_running_read": _to_int(sf_bench.get("running_read")),
                     "sf_running_write": _to_int(sf_bench.get("running_write")),
@@ -4955,6 +5292,9 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     ),
                     "sf_running_insert": _to_int(sf_bench.get("running_insert")),
                     "sf_running_update": _to_int(sf_bench.get("running_update")),
+                    "sf_running_generic_sql": _to_int(
+                        sf_bench.get("running_generic_sql")
+                    ),
                     "sf_running_tagged": _to_int(sf_bench.get("running_tagged")),
                     "sf_running_other": _to_int(sf_bench.get("running_other")),
                     # Warehouse-level queued counts (aligned with Snowsight warehouse monitoring).
@@ -4967,6 +5307,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     # ops_per_sec according to the proportion of operation counts.
                     # The raw *_ops_sec from workers are cumulative averages (count/elapsed),
                     # not instantaneous rates, so we recalculate here.
+                    "app_ops_available": bool(app_ops),
                     "app_point_lookup_ops_sec": _compute_breakdown_rate(
                         float(ops_per_sec or 0), app_ops, "point_lookup_count"
                     ),
@@ -4979,11 +5320,52 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
                     "app_update_ops_sec": _compute_breakdown_rate(
                         float(ops_per_sec or 0), app_ops, "update_count"
                     ),
+                    "app_generic_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "generic_count"
+                    ),
+                    "app_generic_read_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "generic_read_count"
+                    ),
+                    "app_generic_write_ops_sec": _compute_breakdown_rate(
+                        float(ops_per_sec or 0), app_ops, "generic_write_count"
+                    ),
                     "app_read_ops_sec": _compute_breakdown_rate(
                         float(ops_per_sec or 0), app_ops, "read_count"
                     ),
                     "app_write_ops_sec": _compute_breakdown_rate(
                         float(ops_per_sec or 0), app_ops, "write_count"
+                    ),
+                    "app_point_lookup_count": _to_int(app_ops.get("point_lookup_count")),
+                    "app_range_scan_count": _to_int(app_ops.get("range_scan_count")),
+                    "app_insert_count": _to_int(app_ops.get("insert_count")),
+                    "app_update_count": _to_int(app_ops.get("update_count")),
+                    "app_generic_count": _to_int(app_ops.get("generic_count")),
+                    "app_generic_read_count": _to_int(
+                        app_ops.get("generic_read_count")
+                    ),
+                    "app_generic_write_count": _to_int(
+                        app_ops.get("generic_write_count")
+                    ),
+                    "app_read_count": _to_int(app_ops.get("read_count")),
+                    "app_write_count": _to_int(app_ops.get("write_count")),
+                    "app_total_count": _to_int(app_ops.get("total_count")),
+                    "app_generic_label_counts": _to_number_map(
+                        app_ops.get("generic_label_counts"), as_int=True
+                    ),
+                    "app_generic_label_read_counts": _to_number_map(
+                        app_ops.get("generic_label_read_counts"), as_int=True
+                    ),
+                    "app_generic_label_write_counts": _to_number_map(
+                        app_ops.get("generic_label_write_counts"), as_int=True
+                    ),
+                    "app_generic_label_ops_sec": _compute_label_breakdown_rates(
+                        float(ops_per_sec or 0), app_ops, "generic_label_counts"
+                    ),
+                    "app_generic_label_read_ops_sec": _compute_label_breakdown_rates(
+                        float(ops_per_sec or 0), app_ops, "generic_label_read_counts"
+                    ),
+                    "app_generic_label_write_ops_sec": _compute_label_breakdown_rates(
+                        float(ops_per_sec or 0), app_ops, "generic_label_write_counts"
                     ),
                     "resources_cpu_percent": _to_float(resources.get("cpu_percent")),
                     "resources_memory_mb": _to_float(resources.get("memory_mb")),
@@ -6438,6 +6820,10 @@ def _build_concurrency_prompt(
     max_clusters: int = 1,
     scaling_policy: str = "STANDARD",
     warehouse_credits_used: float | None = None,
+    # Actual concurrent threads (from workload config)
+    actual_concurrent_threads: int | None = None,
+    # Generic SQL queries for custom workloads
+    generic_queries: list | None = None,
 ) -> str:
     """Build prompt for CONCURRENCY mode (fixed worker count)."""
     error_pct = (failed_ops / total_ops * 100) if total_ops > 0 else 0
@@ -6582,17 +6968,35 @@ Specific suggestions:
    - Would a larger warehouse help?
    - Any query optimization opportunities?"""
 
+    # Resolve actual thread count: use actual_concurrent_threads if available, else fallback to concurrency
+    effective_threads = actual_concurrent_threads if actual_concurrent_threads is not None else concurrency
+    
+    # Build generic queries section if present
+    generic_queries_text = ""
+    if generic_queries and len(generic_queries) > 0:
+        gq_lines = ["GENERIC SQL QUERIES (custom workload):"]
+        for gq in generic_queries:
+            query_id = gq.get("id", "unknown")
+            label = gq.get("label", "")
+            weight = gq.get("weight_pct", 0)
+            op_type = gq.get("operation_type", "READ")
+            sql_preview = (gq.get("sql", "") or "")[:100].replace("\n", " ").strip()
+            if len(gq.get("sql", "") or "") > 100:
+                sql_preview += "..."
+            gq_lines.append(f"- {query_id}{f' ({label})' if label else ''}: {weight}% weight, {op_type}, SQL: {sql_preview}")
+        generic_queries_text = "\n".join(gq_lines) + "\n"
+
     return f"""{platform_intro}
 
 **Mode: CONCURRENCY (Fixed Workers / Closed Model)**
-This test ran a fixed number of concurrent workers for a set duration to measure steady-state performance under constant load.
+This test ran a fixed number of concurrent threads for a set duration to measure steady-state performance under constant load.
 
 TEST SUMMARY:
 - Test Name: {test_name}
 - Status: {test_status}
 - Table Type: {table_type}
 - {"Instance" if is_postgres else "Warehouse"}: {warehouse} ({warehouse_size})
-- Fixed Workers: {concurrency} workers
+- Concurrent Threads: {effective_threads} threads
 - Duration: {duration}s (Warmup: {warmup_seconds}s)
 - Think Time: {think_time_ms}ms between operations
 - Result Cache: {"Enabled" if use_cached_result else "Disabled"}
@@ -6601,7 +7005,7 @@ SCALING CONFIGURATION:
 {scaling_config_text}
 
 WORKLOAD MIX: {workload_mix_text}
-
+{generic_queries_text}
 SLO TARGETS: {slo_text}{slo_evaluation}
 
 RESULTS:
@@ -6623,7 +7027,7 @@ Provide your analysis using the following structure with markdown formatting.
 Use **bold** for emphasis and bullet points (-) for all sub-items with proper indentation.
 
 ## 1. Performance Summary
-How did the system perform under {concurrency} concurrent workers?
+How did the system perform under {effective_threads} concurrent threads?
    - Is throughput ({ops_per_sec:.1f} ops/sec) reasonable for this configuration?
    - Are latencies acceptable? (p95={p95:.1f}ms, p99={p99:.1f}ms)
    - Is error rate ({error_pct:.2f}%) acceptable?
@@ -7695,6 +8099,10 @@ async def ai_analysis(
         warmup_seconds = 0
         use_cached_result = True
 
+        # Actual concurrent threads (from workload config, not max capacity)
+        actual_concurrent_threads = concurrency
+        generic_queries: list = []
+
         # Extract scenario config (test_config contains both scenario and template_config)
         scenario_cfg = (
             test_config.get("scenario")
@@ -7748,16 +8156,24 @@ async def ai_analysis(
                 # Try new format first (mix object), then fall back to custom_*_pct fields
                 mix = template_cfg.get("mix")
                 if isinstance(mix, dict):
-                    point_lookup_pct = int(mix.get("point_lookup", 0) or 0)
-                    range_scan_pct = int(mix.get("range_scan", 0) or 0)
-                    insert_pct = int(mix.get("insert", 0) or 0)
-                    update_pct = int(mix.get("update", 0) or 0)
+                    point_lookup_pct = round(float(mix.get("point_lookup", 0) or 0), 2)
+                    range_scan_pct = round(float(mix.get("range_scan", 0) or 0), 2)
+                    insert_pct = round(float(mix.get("insert", 0) or 0), 2)
+                    update_pct = round(float(mix.get("update", 0) or 0), 2)
                 else:
                     # Fall back to custom_*_pct fields (legacy format)
-                    point_lookup_pct = int(template_cfg.get("custom_point_lookup_pct", 0) or 0)
-                    range_scan_pct = int(template_cfg.get("custom_range_scan_pct", 0) or 0)
-                    insert_pct = int(template_cfg.get("custom_insert_pct", 0) or 0)
-                    update_pct = int(template_cfg.get("custom_update_pct", 0) or 0)
+                    point_lookup_pct = round(
+                        float(template_cfg.get("custom_point_lookup_pct", 0) or 0), 2
+                    )
+                    range_scan_pct = round(
+                        float(template_cfg.get("custom_range_scan_pct", 0) or 0), 2
+                    )
+                    insert_pct = round(
+                        float(template_cfg.get("custom_insert_pct", 0) or 0), 2
+                    )
+                    update_pct = round(
+                        float(template_cfg.get("custom_update_pct", 0) or 0), 2
+                    )
 
                 # Extract SLO targets - try new format first, then per-query-type targets
                 targets = template_cfg.get("targets")
@@ -7809,6 +8225,19 @@ async def ai_analysis(
                 test_config.get("max_error_rate_pct", 1.0) or 1.0
             )
             qps_stability_pct = float(test_config.get("qps_stability_pct", 5.0) or 5.0)
+
+            # Extract actual concurrent threads from workload config
+            # This is the ACTUAL thread count used during the test, not the max capacity
+            workload = test_config.get("workload", {})
+            if isinstance(workload, dict):
+                actual_concurrent_threads = int(workload.get("concurrent_connections", concurrency) or concurrency)
+            else:
+                actual_concurrent_threads = concurrency
+
+            # Extract generic_queries from template_config for GENERIC_SQL workloads
+            generic_queries = []
+            if isinstance(template_cfg, dict):
+                generic_queries = template_cfg.get("generic_queries", []) or []
 
         # Fetch query breakdown
         query_breakdown = await pool.execute_query(
@@ -8200,6 +8629,9 @@ async def ai_analysis(
                 think_time_ms=think_time_ms,
                 warmup_seconds=warmup_seconds,
                 use_cached_result=use_cached_result,
+                # Actual concurrent threads and generic queries
+                actual_concurrent_threads=actual_concurrent_threads,
+                generic_queries=generic_queries,
             )
 
         # =================================================================

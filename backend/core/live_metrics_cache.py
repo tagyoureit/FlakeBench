@@ -175,6 +175,19 @@ def _avg_dicts(dicts: list[dict[str, Any]]) -> dict[str, float]:
     return {key: value / len(dicts) for key, value in summed.items()}
 
 
+def _sum_nested_dicts(dicts: list[dict[str, Any]]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for key, value in d.items():
+            try:
+                out[str(key)] = out.get(str(key), 0.0) + float(value or 0)
+            except Exception:
+                continue
+    return out
+
+
 def _aggregate_workers(
     workers: list[WorkerLiveMetrics], *, now: datetime
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -324,6 +337,62 @@ def _aggregate_workers(
         # NOTE: warehouse is NOT included here - it's fetched from WAREHOUSE_POLL_SNAPSHOTS
         # at the API layer (main.py) since it's orchestrator-level data, not worker-level.
     }
+    app_ops_agg = custom_metrics_out.get("app_ops_breakdown")
+    if isinstance(app_ops_agg, dict):
+        generic_label_counts = _sum_nested_dicts(
+            [
+                d.get("generic_label_counts")
+                for d in app_ops_list
+                if isinstance(d.get("generic_label_counts"), dict)
+            ]
+        )
+        generic_label_read_counts = _sum_nested_dicts(
+            [
+                d.get("generic_label_read_counts")
+                for d in app_ops_list
+                if isinstance(d.get("generic_label_read_counts"), dict)
+            ]
+        )
+        generic_label_write_counts = _sum_nested_dicts(
+            [
+                d.get("generic_label_write_counts")
+                for d in app_ops_list
+                if isinstance(d.get("generic_label_write_counts"), dict)
+            ]
+        )
+        generic_label_ops_sec = _sum_nested_dicts(
+            [
+                d.get("generic_label_ops_sec")
+                for d in app_ops_list
+                if isinstance(d.get("generic_label_ops_sec"), dict)
+            ]
+        )
+        generic_label_read_ops_sec = _sum_nested_dicts(
+            [
+                d.get("generic_label_read_ops_sec")
+                for d in app_ops_list
+                if isinstance(d.get("generic_label_read_ops_sec"), dict)
+            ]
+        )
+        generic_label_write_ops_sec = _sum_nested_dicts(
+            [
+                d.get("generic_label_write_ops_sec")
+                for d in app_ops_list
+                if isinstance(d.get("generic_label_write_ops_sec"), dict)
+            ]
+        )
+        if generic_label_counts:
+            app_ops_agg["generic_label_counts"] = generic_label_counts
+        if generic_label_read_counts:
+            app_ops_agg["generic_label_read_counts"] = generic_label_read_counts
+        if generic_label_write_counts:
+            app_ops_agg["generic_label_write_counts"] = generic_label_write_counts
+        if generic_label_ops_sec:
+            app_ops_agg["generic_label_ops_sec"] = generic_label_ops_sec
+        if generic_label_read_ops_sec:
+            app_ops_agg["generic_label_read_ops_sec"] = generic_label_read_ops_sec
+        if generic_label_write_ops_sec:
+            app_ops_agg["generic_label_write_ops_sec"] = generic_label_write_ops_sec
     if find_max_controller is not None:
         custom_metrics_out["find_max_controller"] = find_max_controller
     if qps_controller is not None:

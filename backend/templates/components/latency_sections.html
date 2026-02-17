@@ -573,23 +573,23 @@
     </div>
 
     <div class="metrics-grid mt-4">
-        <div class="metric-card" x-show="(templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) > 0">
+        <div class="metric-card" x-show="(templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) + (templateInfo?.generic_read_count || 0) + (templateInfo?.read_operations || 0) > 0">
             <div class="metric-label">
                 <span>Read Operations</span>
                 <span
                     class="info-icon"
-                    title="Read operations: total completed reads (point lookups + range scans) during this run."
+                    title="Read operations: total completed reads (point lookups + range scans + generic SQL reads) during this run."
                 >i</span>
             </div>
             <div class="metric-value" x-text="templateInfo?.read_operations || 0"></div>
             <div class="metric-change" x-text="(templateInfo?.reads_per_second || 0).toFixed(2) + ' ops/s'"></div>
         </div>
-        <div class="metric-card" x-show="(templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) > 0">
+        <div class="metric-card" x-show="(templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) + (templateInfo?.delete_count || 0) + (templateInfo?.generic_write_count || 0) + (templateInfo?.write_operations || 0) > 0">
             <div class="metric-label">
                 <span>Write Operations</span>
                 <span
                     class="info-icon"
-                    title="Write operations: total completed writes (inserts + updates) during this run."
+                    title="Write operations: total completed writes (inserts + updates + deletes + generic SQL writes) during this run."
                 >i</span>
             </div>
             <div class="metric-value" x-text="templateInfo?.write_operations || 0"></div>
@@ -598,10 +598,10 @@
     </div>
 
     <h4 class="mt-6 mb-2 font-semibold" x-text="
-        ((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0)) > 0 && 
-        ((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0)) > 0 
+        ((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) + (templateInfo?.generic_read_count || 0) + (templateInfo?.read_operations || 0)) > 0 && 
+        ((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) + (templateInfo?.delete_count || 0) + (templateInfo?.generic_write_count || 0) + (templateInfo?.write_operations || 0)) > 0 
             ? 'Read vs Write Latency' 
-            : ((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0)) > 0 
+            : ((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) + (templateInfo?.generic_read_count || 0) + (templateInfo?.read_operations || 0)) > 0 
                 ? 'Read Latency' 
                 : 'Write Latency'
     "></h4>
@@ -619,35 +619,35 @@
             </tr>
         </thead>
         <tbody>
-            <tr x-show="(templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) > 0">
+            <tr x-show="(templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) + (templateInfo?.generic_read_count || 0) + (templateInfo?.read_operations || 0) > 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Reads</td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p50_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p95_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p99_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_min_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_max_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.point_lookup_count || 0) + (templateInfo?.range_scan_count || 0) + (templateInfo?.generic_read_count || 0) || templateInfo?.read_operations || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p50_latency_ms') || detailLatency('generic_sql_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p95_latency_ms') || detailLatency('generic_sql_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p99_latency_ms') || detailLatency('generic_sql_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_min_latency_ms') || detailLatency('generic_sql_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_max_latency_ms') || detailLatency('generic_sql_max_latency_ms'))"></td>
                 <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
-                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('POINT_LOOKUP,RANGE_SCAN')}` : '#'"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('POINT_LOOKUP,RANGE_SCAN,GENERIC_SQL')}` : '#'"
                     >
                         Go to data
                     </a>
                 </td>
             </tr>
-            <tr x-show="(templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) > 0">
+            <tr x-show="(templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) + (templateInfo?.delete_count || 0) + (templateInfo?.generic_write_count || 0) + (templateInfo?.write_operations || 0) > 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Writes</td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p50_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p95_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p99_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_min_latency_ms'))"></td>
-                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_max_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact((templateInfo?.insert_count || 0) + (templateInfo?.update_count || 0) + (templateInfo?.delete_count || 0) + (templateInfo?.generic_write_count || 0) || templateInfo?.write_operations || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p50_latency_ms') || detailLatency('generic_sql_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p95_latency_ms') || detailLatency('generic_sql_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p99_latency_ms') || detailLatency('generic_sql_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_min_latency_ms') || detailLatency('generic_sql_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_max_latency_ms') || detailLatency('generic_sql_max_latency_ms'))"></td>
                 <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
-                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('INSERT,UPDATE')}` : '#'"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('INSERT,UPDATE,GENERIC_SQL')}` : '#'"
                     >
                         Go to data
                     </a>
@@ -723,17 +723,72 @@
                 </td>
             </tr>
             <tr x-show="(templateInfo?.update_count || 0) > 0">
-                <td class="p-2 font-medium">Update</td>
-                <td class="p-2 text-right" x-text="formatCompact(templateInfo?.update_count || 0)"></td>
-                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_p50_latency_ms'))"></td>
-                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_p95_latency_ms'))"></td>
-                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_p99_latency_ms'))"></td>
-                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_min_latency_ms'))"></td>
-                <td class="p-2 text-right" x-text="formatMs(detailLatency('update_max_latency_ms'))"></td>
-                <td x-show="mode === 'history'" class="p-2">
+                <td class="p-2 border-b border-gray-200 font-medium">Update</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.update_count || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('update_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('update_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('update_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('update_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('update_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
                     <a
                         class="btn btn-secondary btn-sm"
                         :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('UPDATE')}` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+            <template x-for="[label, count] in Object.entries(templateInfo?.generic_label_read_counts || {})" :key="'gr_' + label">
+                <tr>
+                    <td class="p-2 border-b border-gray-200 font-medium" x-text="label + ' (Read)'"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(count || 0)"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(templateInfo?.generic_label_read_stats?.[label]?.p50)"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(templateInfo?.generic_label_read_stats?.[label]?.p95)"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(templateInfo?.generic_label_read_stats?.[label]?.p99)"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(templateInfo?.generic_label_read_stats?.[label]?.min)"></td>
+                    <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(templateInfo?.generic_label_read_stats?.[label]?.max)"></td>
+                    <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
+                        <a
+                            class="btn btn-secondary btn-sm"
+                            :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('GENERIC_SQL')}&label=${encodeURIComponent(label)}` : '#'"
+                        >
+                            Go to data
+                        </a>
+                    </td>
+                </tr>
+            </template>
+            <template x-for="[label, count] in Object.entries(templateInfo?.generic_label_write_counts || {})" :key="'gw_' + label">
+                <tr>
+                    <td class="p-2 font-medium" x-text="label + ' (Write)'"></td>
+                    <td class="p-2 text-right" x-text="formatCompact(count || 0)"></td>
+                    <td class="p-2 text-right" x-text="formatMs(templateInfo?.generic_label_write_stats?.[label]?.p50)"></td>
+                    <td class="p-2 text-right" x-text="formatMs(templateInfo?.generic_label_write_stats?.[label]?.p95)"></td>
+                    <td class="p-2 text-right" x-text="formatMs(templateInfo?.generic_label_write_stats?.[label]?.p99)"></td>
+                    <td class="p-2 text-right" x-text="formatMs(templateInfo?.generic_label_write_stats?.[label]?.min)"></td>
+                    <td class="p-2 text-right" x-text="formatMs(templateInfo?.generic_label_write_stats?.[label]?.max)"></td>
+                    <td x-show="mode === 'history'" class="p-2">
+                        <a
+                            class="btn btn-secondary btn-sm"
+                            :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('GENERIC_SQL')}&label=${encodeURIComponent(label)}` : '#'"
+                        >
+                            Go to data
+                        </a>
+                    </td>
+                </tr>
+            </template>
+            <tr x-show="(templateInfo?.generic_sql_count || 0) > 0 && Object.keys(templateInfo?.generic_label_read_counts || {}).length === 0 && Object.keys(templateInfo?.generic_label_write_counts || {}).length === 0">
+                <td class="p-2 border-b border-gray-200 font-medium">Generic SQL</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.generic_sql_count || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('generic_sql_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('generic_sql_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('generic_sql_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('generic_sql_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('generic_sql_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('GENERIC_SQL')}` : '#'"
                     >
                         Go to data
                     </a>

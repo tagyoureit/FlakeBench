@@ -156,6 +156,42 @@ class TestResult(BaseModel):
     update_min_latency_ms: float = Field(0.0, description="Update min latency (ms)")
     update_max_latency_ms: float = Field(0.0, description="Update max latency (ms)")
 
+    generic_sql_p50_latency_ms: float = Field(
+        0.0, description="Generic SQL p50 latency (ms)"
+    )
+    generic_sql_p95_latency_ms: float = Field(
+        0.0, description="Generic SQL p95 latency (ms)"
+    )
+    generic_sql_p99_latency_ms: float = Field(
+        0.0, description="Generic SQL p99 latency (ms)"
+    )
+    generic_sql_min_latency_ms: float = Field(
+        0.0, description="Generic SQL min latency (ms)"
+    )
+    generic_sql_max_latency_ms: float = Field(
+        0.0, description="Generic SQL max latency (ms)"
+    )
+
+    # GENERIC_SQL throughput metrics
+    generic_sql_rows_per_sec: Optional[float] = Field(
+        None, description="Generic SQL rows processed per second"
+    )
+    generic_sql_bytes_scanned_per_sec: Optional[float] = Field(
+        None, description="Generic SQL bytes scanned per second"
+    )
+
+    # Aggregate OLAP metrics (across all GENERIC_SQL queries)
+    olap_total_operations: int = Field(0, description="Total OLAP/GENERIC_SQL operations")
+    olap_total_rows_processed: int = Field(
+        0, description="Total rows processed by OLAP queries"
+    )
+    olap_total_bytes_scanned: int = Field(
+        0, description="Total bytes scanned by OLAP queries"
+    )
+    olap_metrics: Optional[Dict[str, Any]] = Field(
+        None, description="Extensible per-kind OLAP metrics payload"
+    )
+
     # Derived overhead percentiles (filled after enrichment)
     app_overhead_p50_ms: float = Field(0.0, description="App overhead p50 (ms)")
     app_overhead_p95_ms: float = Field(0.0, description="App overhead p95 (ms)")
@@ -211,6 +247,20 @@ class TestResult(BaseModel):
     # Tags and metadata
     tags: Optional[Dict[str, str]] = Field(None, description="Custom tags")
     notes: Optional[str] = Field(None, description="Additional notes")
+
+    # Methodology metadata (benchmark reproducibility)
+    run_temperature: Optional[float] = Field(
+        None,
+        description="Cache warmup temperature: 0.0=cold, 1.0=fully warmed",
+    )
+    trial_index: Optional[int] = Field(
+        None,
+        description="Trial index within a multi-trial run (1-based)",
+    )
+    realism_profile: Optional[str] = Field(
+        None,
+        description="Named realism profile (BASELINE, COLD_START, WARM_CACHE, etc.)",
+    )
 
     model_config = ConfigDict(
         use_enum_values=True,

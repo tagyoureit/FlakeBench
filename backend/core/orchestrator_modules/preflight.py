@@ -51,8 +51,13 @@ async def generate_preflight_warnings(
                 weight = float(raw_weight)
             except (TypeError, ValueError):
                 weight = 0.0
-            normalized_weight = weight / 100.0 if weight > 1.0 else weight
-            if kind in ("INSERT", "UPDATE", "DELETE") and normalized_weight > 0:
+            # weight_pct is stored as percentage points (0.00-100.00).
+            normalized_weight = max(0.0, min(weight / 100.0, 1.0))
+            operation_type = str(q.get("operation_type") or "").upper()
+            is_write = kind in ("INSERT", "UPDATE", "DELETE") or (
+                kind == "GENERIC_SQL" and operation_type == "WRITE"
+            )
+            if is_write and normalized_weight > 0:
                 write_pct += normalized_weight
     write_pct = max(0.0, min(write_pct, 1.0))
 
@@ -77,7 +82,7 @@ async def generate_preflight_warnings(
             "recommendations": [
                 "Use a HYBRID table for concurrent write workloads (row-level locking)",
                 f"Reduce concurrency to ≤{int(LOCK_WAITER_LIMIT / write_pct) if write_pct > 0 else total_threads} threads",
-                "For read-only benchmarking, keep CUSTOM and set INSERT/UPDATE mix to 0%",
+                "For read-only benchmarking, keep CUSTOM and set all WRITE operations to 0%",
             ],
             "details": {
                 "table_type": table_type,

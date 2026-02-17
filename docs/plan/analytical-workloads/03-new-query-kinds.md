@@ -1,11 +1,13 @@
-# New Query Kinds Implementation
+# Runtime Query Model (Simplified)
 
-Detailed implementation guide for adding analytical query kinds to the test executor.
+Detailed implementation guide for extending the existing OLTP shortcuts with
+`GENERIC_SQL`, rather than adding many OLAP-specific runtime enums.
 
 ## Key Design Change: Explicit Parameters
 
-Unlike OLTP query kinds (POINT_LOOKUP, etc.) where parameter types are inferred,
-OLAP query kinds use **explicit parameter specifications**. This allows:
+Unlike OLTP shortcut kinds (POINT_LOOKUP, RANGE_SCAN, INSERT, UPDATE) where
+parameter types can be inferred, `GENERIC_SQL` uses **explicit parameter
+specifications**. This allows:
 
 - Multiple parameter types in one query
 - Arbitrary dimension filters (not just id/time)
@@ -14,145 +16,120 @@ OLAP query kinds use **explicit parameter specifications**. This allows:
 
 See `04-value-pools.md` for the full parameter specification system.
 
-## New Query Kinds
+## Runtime Query Kinds
 
 | Kind | Purpose | Typical Parameters |
 |------|---------|-------------------|
-| `AGGREGATION` | GROUP BY with aggregates | date range, dimension filters |
-| `WINDOWED` | Window functions | date range, partition column |
-| `ANALYTICAL_JOIN` | Fact-dimension joins | date range, dimension filters |
-| `WIDE_SCAN` | Multi-column scans | date range |
-| `APPROX_DISTINCT` | HyperLogLog cardinality | date range, granularity |
+| `POINT_LOOKUP` | Existing OLTP shortcut | key value |
+| `RANGE_SCAN` | Existing OLTP shortcut | key/time range |
+| `INSERT` | Existing OLTP shortcut | row values |
+| `UPDATE` | Existing OLTP shortcut | key + updated values |
+| `GENERIC_SQL` | Arbitrary SQL (READ or WRITE) | explicit placeholder mappings |
+
+`ROLLUP`, `WINDOW`, `JOIN`, `APPROX_COUNT_DISTINCT`, and similar constructs are
+SQL patterns expressed inside `GENERIC_SQL`, not separate runtime kinds.
+
+## Mix Precision Contract
+
+- `weight_pct` is a decimal with two digits (`0.00` to `100.00`)
+- Sum across all active queries must equal `100.00`
+- Minimum non-zero mix is `0.01%`, enabling roughly `10000:1` read:write ratios
 
 ## File Changes
+
+### Table Placeholder Policy
+
+Only `{table}` is a special placeholder substituted at runtime with the template's
+primary table. All other tables (dimension tables, joined tables) should be specified
+with fully-qualified names directly in the SQL.
+
+**Rationale:** This simplifies the system - users/AI write complete SQL. The executor
+only substitutes the primary table, which may vary between test runs.
+
+```sql
+-- {table} is substituted with the template's primary table
+-- Dimension tables use fully-qualified names
+FROM {table} f
+JOIN ANALYTICS_DB.DIM.DIM_DATE d ON f.date_key = d.date_key
+JOIN ANALYTICS_DB.DIM.DIM_PRODUCT p ON f.product_key = p.product_key
+```
 
 ### 1. Constants (`backend/api/routes/templates_modules/constants.py`)
 
 ```python
-# Line ~9-20: Add new query fields
+# Keep existing OLTP shortcut keys.
 _CUSTOM_QUERY_FIELDS: tuple[str, ...] = (
-    # OLTP (existing)
     "custom_point_lookup_query",
     "custom_range_scan_query",
     "custom_insert_query",
     "custom_update_query",
-    # OLAP (new)
-    "custom_aggregation_query",
-    "custom_windowed_query",
-    "custom_analytical_join_query",
-    "custom_wide_scan_query",
-    "custom_approx_distinct_query",
 )
 
-_CUSTOM_PCT_FIELDS: tuple[str, ...] = (
-    # OLTP (existing)
-    "custom_point_lookup_pct",
-    "custom_range_scan_pct",
-    "custom_insert_pct",
-    "custom_update_pct",
-    # OLAP (new)
-    "custom_aggregation_pct",
-    "custom_windowed_pct",
-    "custom_analytical_join_pct",
-    "custom_wide_scan_pct",
-    "custom_approx_distinct_pct",
-)
+# Add one flexible list for arbitrary queries.
+# Each item includes: id, name, query_kind, operation_type, weight_pct, sql, parameters, label.
+GENERIC_QUERIES_FIELD = "generic_queries"
+
+ALLOWED_QUERY_KINDS = {
+    "POINT_LOOKUP",
+    "RANGE_SCAN",
+    "INSERT",
+    "UPDATE",
+    "GENERIC_SQL",
+}
 ```
 
 ### 2. Default SQL Templates
 
 ```python
-# Add to _DEFAULT_CUSTOM_QUERIES_SNOWFLAKE
-
-"custom_aggregation_query": """
-SELECT 
-    DATE_TRUNC('month', created_at) AS month,
-    region,
-    SUM(amount) AS total,
-    COUNT(*) AS cnt
-FROM {table}
-WHERE created_at >= ?
-GROUP BY 1, 2
-""",
-
-"custom_windowed_query": """
-SELECT 
-    id,
-    created_at,
-    amount,
-    SUM(amount) OVER (ORDER BY created_at ROWS UNBOUNDED PRECEDING) AS cumulative
-FROM {table}
-WHERE created_at BETWEEN ? AND ?
-ORDER BY created_at
-""",
-
-"custom_analytical_join_query": """
-SELECT 
-    d.year,
-    d.quarter,
-    SUM(f.amount) AS total
-FROM {table} f
-JOIN {dim_table} d ON f.date_key = d.date_key
-WHERE d.year = ?
-GROUP BY 1, 2
-""",
-
-"custom_wide_scan_query": """
-SELECT 
-    col1, col2, col3, col4, col5,
-    SUM(amount) AS total,
-    AVG(quantity) AS avg_qty
-FROM {table}
-WHERE created_at BETWEEN ? AND ?
-GROUP BY 1, 2, 3, 4, 5
-""",
-
-"custom_approx_distinct_query": """
-SELECT 
-    DATE_TRUNC('day', created_at) AS day,
-    APPROX_COUNT_DISTINCT(user_id) AS unique_users
-FROM {table}
-WHERE created_at BETWEEN ? AND ?
-GROUP BY 1
-"""
+# Keep only OLTP shortcut defaults.
+# Analytical/advanced SQL is user-authored under GENERIC_SQL entries.
+_DEFAULT_CUSTOM_QUERIES_SNOWFLAKE = {
+    "custom_point_lookup_query": "SELECT * FROM {table} WHERE id = ?",
+    "custom_range_scan_query": "SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100",
+    "custom_insert_query": "INSERT INTO {table} (id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)",
+    "custom_update_query": "UPDATE {table} SET data = ?, timestamp = CURRENT_TIMESTAMP WHERE id = ?",
+}
 ```
 
 ### 3. Test Executor Metrics (`backend/core/test_executor.py`)
 
 ```python
-# Lines 207-257: Initialize metrics for new kinds
+# Initialize metrics for shortcut kinds + GENERIC_SQL
 
 self._find_max_step_lat_by_kind_ms: dict[str, deque[float]] = {
-    # OLTP
     "POINT_LOOKUP": deque(maxlen=10000),
     "RANGE_SCAN": deque(maxlen=10000),
     "INSERT": deque(maxlen=10000),
     "UPDATE": deque(maxlen=10000),
-    # OLAP (new)
-    "AGGREGATION": deque(maxlen=10000),
-    "WINDOWED": deque(maxlen=10000),
-    "ANALYTICAL_JOIN": deque(maxlen=10000),
-    "WIDE_SCAN": deque(maxlen=10000),
-    "APPROX_DISTINCT": deque(maxlen=10000),
+    "GENERIC_SQL": deque(maxlen=10000),
 }
 
 self._find_max_step_ops_by_kind: dict[str, int] = {
-    "POINT_LOOKUP": 0, "RANGE_SCAN": 0, "INSERT": 0, "UPDATE": 0,
-    "AGGREGATION": 0, "WINDOWED": 0, "ANALYTICAL_JOIN": 0,
-    "WIDE_SCAN": 0, "APPROX_DISTINCT": 0,
+    "POINT_LOOKUP": 0,
+    "RANGE_SCAN": 0,
+    "INSERT": 0,
+    "UPDATE": 0,
+    "GENERIC_SQL": 0,
 }
 
 self._find_max_step_errors_by_kind: dict[str, int] = {
-    "POINT_LOOKUP": 0, "RANGE_SCAN": 0, "INSERT": 0, "UPDATE": 0,
-    "AGGREGATION": 0, "WINDOWED": 0, "ANALYTICAL_JOIN": 0,
-    "WIDE_SCAN": 0, "APPROX_DISTINCT": 0,
+    "POINT_LOOKUP": 0,
+    "RANGE_SCAN": 0,
+    "INSERT": 0,
+    "UPDATE": 0,
+    "GENERIC_SQL": 0,
 }
 
 self._lat_by_kind_ms: dict[str, list[float]] = {
-    "POINT_LOOKUP": [], "RANGE_SCAN": [], "INSERT": [], "UPDATE": [],
-    "AGGREGATION": [], "WINDOWED": [], "ANALYTICAL_JOIN": [],
-    "WIDE_SCAN": [], "APPROX_DISTINCT": [],
+    "POINT_LOOKUP": [],
+    "RANGE_SCAN": [],
+    "INSERT": [],
+    "UPDATE": [],
+    "GENERIC_SQL": [],
 }
+
+# Optional: secondary breakdown by user label for GENERIC_SQL
+self._lat_by_generic_label_ms: dict[str, list[float]] = {}
 ```
 
 ### 4. Allowed Kinds Validation
@@ -160,8 +137,11 @@ self._lat_by_kind_ms: dict[str, list[float]] = {
 ```python
 # Line ~615: Update allowed set
 allowed = {
-    "POINT_LOOKUP", "RANGE_SCAN", "INSERT", "UPDATE",
-    "AGGREGATION", "WINDOWED", "ANALYTICAL_JOIN", "WIDE_SCAN", "APPROX_DISTINCT"
+    "POINT_LOOKUP",
+    "RANGE_SCAN",
+    "INSERT",
+    "UPDATE",
+    "GENERIC_SQL",
 }
 ```
 
@@ -176,12 +156,8 @@ fmc_slo_by_kind = {
     "RANGE_SCAN": {"p95_ms": 200, "p99_ms": 500, "error_pct": 1.0},
     "INSERT": {"p95_ms": 150, "p99_ms": 300, "error_pct": 1.0},
     "UPDATE": {"p95_ms": 150, "p99_ms": 300, "error_pct": 1.0},
-    # OLAP (new - relaxed latency, acceptable for analytics)
-    "AGGREGATION": {"p95_ms": 5000, "p99_ms": 10000, "error_pct": 1.0},
-    "WINDOWED": {"p95_ms": 5000, "p99_ms": 10000, "error_pct": 1.0},
-    "ANALYTICAL_JOIN": {"p95_ms": 8000, "p99_ms": 15000, "error_pct": 1.0},
-    "WIDE_SCAN": {"p95_ms": 3000, "p99_ms": 8000, "error_pct": 1.0},
-    "APPROX_DISTINCT": {"p95_ms": 2000, "p99_ms": 5000, "error_pct": 1.0},
+    # Generic SQL defaults (can be overridden per-query in config if needed)
+    "GENERIC_SQL": {"p95_ms": 5000, "p99_ms": 10000, "error_pct": 1.0},
 }
 ```
 
@@ -195,133 +171,62 @@ _KIND_DISPLAY_NAMES = {
     "RANGE_SCAN": "Range Scan",
     "INSERT": "Insert",
     "UPDATE": "Update",
-    "AGGREGATION": "Aggregation",
-    "WINDOWED": "Windowed",
-    "ANALYTICAL_JOIN": "Analytical Join",
-    "WIDE_SCAN": "Wide Scan",
-    "APPROX_DISTINCT": "Approx Distinct",
+    "GENERIC_SQL": "Generic SQL",
 }
 ```
 
 ### 7. Execution Dispatch (`_execute_custom`)
 
 ```python
-# Lines 3318-3470: Add dispatch branches
-
-elif query_kind == "AGGREGATION":
-    # Single date cutoff parameter
-    cutoff = self._choose_date_cutoff(tc, runtime)
-    params = [cutoff]
-
-elif query_kind == "WINDOWED":
-    # Date range parameters
-    start_date, end_date = self._choose_date_range(tc, runtime)
-    params = [start_date, end_date]
-
-elif query_kind == "ANALYTICAL_JOIN":
-    # Scalar parameter (year) or date range
-    year_value = self._choose_scalar("year", tc, runtime)
-    params = [year_value]
-
-elif query_kind == "WIDE_SCAN":
-    # Date range parameters
-    start_date, end_date = self._choose_date_range(tc, runtime)
-    params = [start_date, end_date]
-
-elif query_kind == "APPROX_DISTINCT":
-    # Date range parameters
-    start_date, end_date = self._choose_date_range(tc, runtime)
-    params = [start_date, end_date]
-
+# Lines 3318-3470: Dispatch with GENERIC_SQL support
+if query_kind == "GENERIC_SQL":
+    # Generic SQL can be READ or WRITE. Both use explicit parameter mappings.
+    # No query-shape inference is performed in this path.
+    generator = self._get_param_generator(worker_id)
+    params = generator.generate(query.parameters or [])
+    operation_type = str(query.operation_type or "READ").upper()
 else:
-    raise ValueError(f"Unsupported custom query kind {query_kind}")
+    # OLTP shortcut backward-compatible path.
+    params = self._legacy_generate_params(query_kind)
+    operation_type = "READ" if query_kind in {"POINT_LOOKUP", "RANGE_SCAN"} else "WRITE"
 ```
 
-## New Helper Methods
+### Validation Rule: Generic SQL Requires Explicit Operation Type
 
 ```python
-def _choose_date_cutoff(
-    self, 
-    tc: TableConfig, 
-    runtime: _TableRuntimeState
-) -> datetime:
-    """Choose a date cutoff for aggregation queries."""
-    profile = runtime.profile
-    
-    # Try RANGE pool first
-    cutoff = self._next_from_pool(worker_id, "RANGE", None)
-    if cutoff:
-        return cutoff
-    
-    # Fall back to profile time bounds
-    if profile and profile.time_min:
-        # Random date between time_min and time_max
-        delta = (profile.time_max - profile.time_min).days
-        offset_days = random.randint(0, max(1, delta))
-        return profile.time_min + timedelta(days=offset_days)
-    
-    # Default: 30 days ago
-    return datetime.now(UTC) - timedelta(days=30)
-
-
-def _choose_date_range(
-    self,
-    tc: TableConfig,
-    runtime: _TableRuntimeState
-) -> tuple[datetime, datetime]:
-    """Choose a date range for range-based analytical queries."""
-    profile = runtime.profile
-    
-    # Try DATE_RANGE pool first
-    range_val = self._next_from_pool(worker_id, "DATE_RANGE", None)
-    if range_val and isinstance(range_val, (list, tuple)) and len(range_val) == 2:
-        return range_val[0], range_val[1]
-    
-    # Fall back to profile time bounds with 30-day window
-    if profile and profile.time_min and profile.time_max:
-        end_date = profile.time_max
-        start_date = end_date - timedelta(days=30)
-        return max(start_date, profile.time_min), end_date
-    
-    # Default: last 30 days
-    end_date = datetime.now(UTC)
-    start_date = end_date - timedelta(days=30)
-    return start_date, end_date
-
-
-def _choose_scalar(
-    self,
-    scalar_type: str,
-    tc: TableConfig,
-    runtime: _TableRuntimeState
-) -> Any:
-    """Choose a scalar value (year, region, etc.) for analytical queries."""
-    # Try SCALAR pool first
-    value = self._next_from_pool(worker_id, "SCALAR", scalar_type)
-    if value:
-        return value
-    
-    # Default values by type
-    defaults = {
-        "year": datetime.now().year,
-        "region": "WEST",
-        "category": "DEFAULT",
-    }
-    return defaults.get(scalar_type, None)
+def validate_query_entry(query: QueryEntry) -> None:
+    """Validate a query entry from custom_queries/generic_queries."""
+    if query.query_kind == "GENERIC_SQL":
+        if str(query.operation_type or "").upper() not in {"READ", "WRITE"}:
+            raise ValidationError("GENERIC_SQL requires operation_type READ or WRITE.")
+        # Parameters are optional only when the SQL has no placeholders.
+        if sql_has_placeholders(query.sql) and not query.parameters:
+            raise ValidationError(
+                "GENERIC_SQL with placeholders must define parameters."
+            )
+    elif query.query_kind in {"POINT_LOOKUP", "RANGE_SCAN", "INSERT", "UPDATE"}:
+        # Existing shortcut validations remain.
+        pass
+    else:
+        raise ValidationError(
+            f"Unsupported query_kind: {query.query_kind}"
+        )
 ```
+
+This guard should run at template save/prepare time so runtime failures are rare
+and users get immediate feedback in the builder UI.
 
 ## Read vs Write Classification
 
 ```python
-# Update is_read classification for new kinds
-is_read = query_kind in {
-    "POINT_LOOKUP", "RANGE_SCAN",
-    "AGGREGATION", "WINDOWED", "ANALYTICAL_JOIN", 
-    "WIDE_SCAN", "APPROX_DISTINCT"
-}
+# Read/write classification
+if query_kind == "GENERIC_SQL":
+    is_read = str(operation_type or "").upper() == "READ"
+else:
+    is_read = query_kind in {"POINT_LOOKUP", "RANGE_SCAN"}
 ```
 
-All analytical query kinds are **read operations**.
+For `GENERIC_SQL`, read/write is explicit via `operation_type`.
 
 ## Testing Strategy
 

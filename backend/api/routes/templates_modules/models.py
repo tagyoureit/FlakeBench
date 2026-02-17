@@ -5,7 +5,7 @@ Pydantic models for template API requests and responses.
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TemplateConfig(BaseModel):
@@ -67,7 +67,7 @@ class AiPrepareResponse(BaseModel):
     update_columns: List[str] = Field(default_factory=list)
     projection_columns: List[str] = Field(default_factory=list)
     domain_label: Optional[str] = None
-    pools: Dict[str, int] = Field(default_factory=dict)
+    pools: Dict[str, Any] = Field(default_factory=dict)  # {column: {count, kind, refreshed_at}}
     message: str
     # Interactive Table specific fields
     cluster_by: Optional[List[str]] = None  # Cluster key columns for Interactive Tables
@@ -96,3 +96,48 @@ class AiAdjustSqlResponse(BaseModel):
     # Interactive Table specific fields
     cluster_by: Optional[List[str]] = None  # Cluster key columns for Interactive Tables
     warnings: List[str] = Field(default_factory=list)  # Validation warnings
+
+
+class AiGenerateSqlRequest(BaseModel):
+    """Request to generate GENERIC_SQL queries from natural language intent."""
+
+    database: str
+    schema_name: str = Field(..., alias="schema")
+    table_name: str
+    table_type: str = "standard"
+    intent: str  # Natural language description of desired query
+    query_type: Optional[str] = None  # Hint: "aggregation", "windowed", "join", etc.
+    connection_id: Optional[str] = None  # Required for Postgres
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AiGenerateSqlResponse(BaseModel):
+    """Response with AI-generated SQL and metadata."""
+
+    sql: str
+    label: str  # Suggested label for the GENERIC_SQL entry
+    operation_type: str = "READ"  # READ or WRITE
+    placeholders: List[str] = Field(default_factory=list)  # Detected placeholders
+    explanation: str = ""  # AI explanation of what the query does
+    warnings: List[str] = Field(default_factory=list)
+
+
+class AiValidateSqlRequest(BaseModel):
+    """Request to validate SQL syntax without executing."""
+
+    sql: str
+    database: str
+    schema_name: str = Field(..., alias="schema")
+    table_type: str = "standard"
+    connection_id: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AiValidateSqlResponse(BaseModel):
+    """Response from SQL validation."""
+
+    valid: bool
+    error: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)

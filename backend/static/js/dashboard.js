@@ -699,6 +699,7 @@ function dashboard(opts) {
                 { label: "Reads (tagged)", data: [], borderColor: "rgb(34, 197, 94)", backgroundColor: "transparent", tension: 0.4, hidden: byKind },
                 { label: "Point Lookup", data: [], borderColor: "rgb(20, 184, 166)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
                 { label: "Range Scan", data: [], borderColor: "rgb(6, 182, 212)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
+                { label: "Generic SQL", data: [], borderColor: "rgb(99, 102, 241)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
                 { label: "Writes (tagged)", data: [], borderColor: "rgb(249, 115, 22)", backgroundColor: "transparent", tension: 0.4, hidden: byKind },
                 { label: "Insert", data: [], borderColor: "rgb(245, 158, 11)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
                 { label: "Update", data: [], borderColor: "rgb(239, 68, 68)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
@@ -754,6 +755,7 @@ function dashboard(opts) {
                 { label: "Reads (tagged)", data: [], borderColor: "rgb(34, 197, 94)", backgroundColor: "transparent", tension: 0.4, hidden: byKind },
                 { label: "Point Lookup", data: [], borderColor: "rgb(20, 184, 166)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
                 { label: "Range Scan", data: [], borderColor: "rgb(6, 182, 212)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
+                { label: "Generic SQL", data: [], borderColor: "rgb(99, 102, 241)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
                 { label: "Writes (tagged)", data: [], borderColor: "rgb(249, 115, 22)", backgroundColor: "transparent", tension: 0.4, hidden: byKind },
                 { label: "Insert", data: [], borderColor: "rgb(245, 158, 11)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
                 { label: "Update", data: [], borderColor: "rgb(239, 68, 68)", backgroundColor: "transparent", tension: 0.4, hidden: !byKind },
@@ -809,6 +811,7 @@ function dashboard(opts) {
                 { label: "Reads", data: [], borderColor: "rgb(34, 197, 94)", backgroundColor: "transparent", tension: 0.4, hidden: byKindOps },
                 { label: "Point Lookup", data: [], borderColor: "rgb(20, 184, 166)", backgroundColor: "transparent", tension: 0.4, hidden: !byKindOps },
                 { label: "Range Scan", data: [], borderColor: "rgb(6, 182, 212)", backgroundColor: "transparent", tension: 0.4, hidden: !byKindOps },
+                { label: "Generic SQL", data: [], borderColor: "rgb(99, 102, 241)", backgroundColor: "transparent", tension: 0.4, hidden: !byKindOps },
                 { label: "Writes", data: [], borderColor: "rgb(249, 115, 22)", backgroundColor: "transparent", tension: 0.4, hidden: byKindOps },
                 { label: "Insert", data: [], borderColor: "rgb(245, 158, 11)", backgroundColor: "transparent", tension: 0.4, hidden: !byKindOps },
                 { label: "Update", data: [], borderColor: "rgb(239, 68, 68)", backgroundColor: "transparent", tension: 0.4, hidden: !byKindOps },
@@ -1310,6 +1313,8 @@ function dashboard(opts) {
           this.metrics.sf_running_range_scan_bench = 0;
           this.metrics.sf_running_insert_bench = 0;
           this.metrics.sf_running_update_bench = 0;
+          this.metrics.sf_running_generic_sql_bench = 0;
+          this.metrics.pg_running_generic_sql_bench = 0;
           this.metrics.in_flight = 0;
         }
 
@@ -1403,6 +1408,7 @@ function dashboard(opts) {
             this.metrics.sf_running_range_scan_bench = bench.running_range_scan || 0;
             this.metrics.sf_running_insert_bench = bench.running_insert || 0;
             this.metrics.sf_running_update_bench = bench.running_update || 0;
+            this.metrics.sf_running_generic_sql_bench = bench.running_generic_sql || 0;
           }
           // Postgres query stats from pg_stat_activity polling
           const pgBench = custom.pg_bench;
@@ -1418,6 +1424,7 @@ function dashboard(opts) {
             this.metrics.pg_running_range_scan_bench = pgBench.running_range_scan || 0;
             this.metrics.pg_running_insert_bench = pgBench.running_insert || 0;
             this.metrics.pg_running_update_bench = pgBench.running_update || 0;
+            this.metrics.pg_running_generic_sql_bench = pgBench.running_generic_sql || 0;
           }
           const latBreakdown = custom.latency_breakdown;
           if (latBreakdown) {
@@ -1433,6 +1440,9 @@ function dashboard(opts) {
             this.metrics.app_range_scan_count = appOps.range_scan_count || 0;
             this.metrics.app_insert_count = appOps.insert_count || 0;
             this.metrics.app_update_count = appOps.update_count || 0;
+            this.metrics.app_generic_count = appOps.generic_count || 0;
+            this.metrics.app_generic_read_count = appOps.generic_read_count || 0;
+            this.metrics.app_generic_write_count = appOps.generic_write_count || 0;
             this.metrics.app_read_count = appOps.read_count || 0;
             this.metrics.app_write_count = appOps.write_count || 0;
             this.metrics.app_total_count = appOps.total_count || 0;
@@ -1440,6 +1450,38 @@ function dashboard(opts) {
             this.metrics.app_range_scan_ops_sec = appOps.range_scan_ops_sec || 0;
             this.metrics.app_insert_ops_sec = appOps.insert_ops_sec || 0;
             this.metrics.app_update_ops_sec = appOps.update_ops_sec || 0;
+            this.metrics.app_generic_ops_sec = appOps.generic_ops_sec || 0;
+            this.metrics.app_generic_read_ops_sec = appOps.generic_read_ops_sec || 0;
+            this.metrics.app_generic_write_ops_sec = appOps.generic_write_ops_sec || 0;
+            this.metrics.app_generic_label_counts =
+              appOps.generic_label_counts && typeof appOps.generic_label_counts === "object"
+                ? appOps.generic_label_counts
+                : {};
+            this.metrics.app_generic_label_read_counts =
+              appOps.generic_label_read_counts &&
+              typeof appOps.generic_label_read_counts === "object"
+                ? appOps.generic_label_read_counts
+                : {};
+            this.metrics.app_generic_label_write_counts =
+              appOps.generic_label_write_counts &&
+              typeof appOps.generic_label_write_counts === "object"
+                ? appOps.generic_label_write_counts
+                : {};
+            this.metrics.app_generic_label_ops_sec =
+              appOps.generic_label_ops_sec &&
+              typeof appOps.generic_label_ops_sec === "object"
+                ? appOps.generic_label_ops_sec
+                : {};
+            this.metrics.app_generic_label_read_ops_sec =
+              appOps.generic_label_read_ops_sec &&
+              typeof appOps.generic_label_read_ops_sec === "object"
+                ? appOps.generic_label_read_ops_sec
+                : {};
+            this.metrics.app_generic_label_write_ops_sec =
+              appOps.generic_label_write_ops_sec &&
+              typeof appOps.generic_label_write_ops_sec === "object"
+                ? appOps.generic_label_write_ops_sec
+                : {};
             this.metrics.app_read_ops_sec = appOps.read_ops_sec || 0;
             this.metrics.app_write_ops_sec = appOps.write_ops_sec || 0;
           }
@@ -1673,11 +1715,12 @@ function dashboard(opts) {
             const sfWrites = this.metrics.sf_bench_available ? this.metrics.sf_running_write_bench : 0;
             const sfPl = this.metrics.sf_bench_available ? this.metrics.sf_running_point_lookup_bench : 0;
             const sfRs = this.metrics.sf_bench_available ? this.metrics.sf_running_range_scan_bench : 0;
+            const sfGen = this.metrics.sf_bench_available ? this.metrics.sf_running_generic_sql_bench : 0;
             const sfIns = this.metrics.sf_bench_available ? this.metrics.sf_running_insert_bench : 0;
             const sfUpd = this.metrics.sf_bench_available ? this.metrics.sf_running_update_bench : 0;
-            const sfBreakdownHasData = (sfPl + sfRs + sfIns + sfUpd) > 0;
+            const sfBreakdownHasData = (sfPl + sfRs + sfGen + sfIns + sfUpd) > 0;
 
-            let reads = sfReads, writes = sfWrites, pl = sfPl, rs = sfRs, ins = sfIns, upd = sfUpd;
+            let reads = sfReads, writes = sfWrites, pl = sfPl, rs = sfRs, gen = sfGen, ins = sfIns, upd = sfUpd;
             if (!sfBreakdownHasData && this.metrics.app_ops_available && total > 0) {
               const appTotal = this.metrics.app_read_ops_sec + this.metrics.app_write_ops_sec;
               if (appTotal > 0) {
@@ -1686,6 +1729,7 @@ function dashboard(opts) {
                 writes = Math.round(this.metrics.app_write_ops_sec * scale);
                 pl = Math.round(this.metrics.app_point_lookup_ops_sec * scale);
                 rs = Math.round(this.metrics.app_range_scan_ops_sec * scale);
+                gen = Math.round(this.metrics.app_generic_ops_sec * scale);
                 ins = Math.round(this.metrics.app_insert_ops_sec * scale);
                 upd = Math.round(this.metrics.app_update_ops_sec * scale);
               }
@@ -1696,10 +1740,11 @@ function dashboard(opts) {
             sfRunningChart2.data.datasets[1].data.push(reads);
             sfRunningChart2.data.datasets[2].data.push(pl);
             sfRunningChart2.data.datasets[3].data.push(rs);
-            sfRunningChart2.data.datasets[4].data.push(writes);
-            sfRunningChart2.data.datasets[5].data.push(ins);
-            sfRunningChart2.data.datasets[6].data.push(upd);
-            sfRunningChart2.data.datasets[7].data.push(this.metrics.sf_bench_available ? this.metrics.sf_blocked_bench : 0);
+            sfRunningChart2.data.datasets[4].data.push(gen);
+            sfRunningChart2.data.datasets[5].data.push(writes);
+            sfRunningChart2.data.datasets[6].data.push(ins);
+            sfRunningChart2.data.datasets[7].data.push(upd);
+            sfRunningChart2.data.datasets[8].data.push(this.metrics.sf_bench_available ? this.metrics.sf_blocked_bench : 0);
             sfRunningChart2.update();
           }
         }
@@ -1721,6 +1766,7 @@ function dashboard(opts) {
             const pgWrites = this.metrics.pg_running_write_bench;
             const pgPl = this.metrics.pg_running_point_lookup_bench;
             const pgRs = this.metrics.pg_running_range_scan_bench;
+            const pgGen = this.metrics.pg_running_generic_sql_bench;
             const pgIns = this.metrics.pg_running_insert_bench;
             const pgUpd = this.metrics.pg_running_update_bench;
 
@@ -1729,10 +1775,11 @@ function dashboard(opts) {
             pgRunningChart2.data.datasets[1].data.push(pgReads);
             pgRunningChart2.data.datasets[2].data.push(pgPl);
             pgRunningChart2.data.datasets[3].data.push(pgRs);
-            pgRunningChart2.data.datasets[4].data.push(pgWrites);
-            pgRunningChart2.data.datasets[5].data.push(pgIns);
-            pgRunningChart2.data.datasets[6].data.push(pgUpd);
-            pgRunningChart2.data.datasets[7].data.push(this.metrics.pg_waiting_bench);
+            pgRunningChart2.data.datasets[4].data.push(pgGen);
+            pgRunningChart2.data.datasets[5].data.push(pgWrites);
+            pgRunningChart2.data.datasets[6].data.push(pgIns);
+            pgRunningChart2.data.datasets[7].data.push(pgUpd);
+            pgRunningChart2.data.datasets[8].data.push(this.metrics.pg_waiting_bench);
             pgRunningChart2.update();
           }
         }

@@ -190,7 +190,7 @@ const COST_SETTINGS_KEY = "flakebench_cost_settings";
 
 /**
  * Get user's cost settings from localStorage.
- * @returns {{ dollarsPerCredit: number, showCredits: boolean, currency: string }}
+ * @returns {{ dollarsPerCredit: number, showCredits: boolean, currency: string, hoursPerDayWarehouse: number, cloudProvider: string }}
  */
 function getCostSettings() {
   try {
@@ -201,6 +201,8 @@ function getCostSettings() {
         dollarsPerCredit: Number(parsed.dollarsPerCredit) || DEFAULT_DOLLARS_PER_CREDIT,
         showCredits: parsed.showCredits !== false,
         currency: parsed.currency || "USD",
+        hoursPerDayWarehouse: Number(parsed.hoursPerDayWarehouse) || 8,
+        cloudProvider: parsed.cloudProvider || "AWS",
       };
     }
   } catch (_) {
@@ -210,6 +212,8 @@ function getCostSettings() {
     dollarsPerCredit: DEFAULT_DOLLARS_PER_CREDIT,
     showCredits: true,
     currency: "USD",
+    hoursPerDayWarehouse: 8,
+    cloudProvider: "AWS",
   };
 }
 

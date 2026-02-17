@@ -50,6 +50,10 @@ from backend.api.routes.templates_modules.models import (
     AiPrepareResponse,
     AiAdjustSqlRequest,
     AiAdjustSqlResponse,
+    AiGenerateSqlRequest,
+    AiGenerateSqlResponse,
+    AiValidateSqlRequest,
+    AiValidateSqlResponse,
 )
 
 router = APIRouter()
@@ -1450,6 +1454,175 @@ async def ai_adjust_sql(req: AiAdjustSqlRequest):
         raise http_exception("ai adjust sql", e)
 
 
+@router.post("/ai/generate-sql", response_model=AiGenerateSqlResponse)
+async def ai_generate_sql(req: AiGenerateSqlRequest):
+    """
+    Generate a GENERIC_SQL query from natural language intent using Snowflake Cortex.
+
+    Uses the table schema as context to produce a valid SQL query matching the user's
+    intent (e.g., "aggregation query grouping by region", "windowed rank by sales").
+    """
+    import json
+    import re as _re
+
+    try:
+        sf = snowflake_pool.get_default_pool()
+
+        db = _validate_ident(req.database, label="database")
+        sch = _validate_ident(req.schema_name, label="schema")
+        tbl = _validate_ident(req.table_name, label="table")
+        full_name = _full_table_name(db, sch, tbl)
+
+        # Fetch column metadata for context
+        col_rows = await sf.execute_query(
+            f"""
+            SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE
+            FROM {db}.INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = '{sch}' AND TABLE_NAME = '{tbl}'
+            ORDER BY ORDINAL_POSITION
+            """
+        )
+        if not col_rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No columns found for {full_name}",
+            )
+
+        columns_desc = "\n".join(
+            f"  - {row[0]} ({row[1]}, nullable={row[2]})" for row in col_rows
+        )
+
+        query_type_hint = ""
+        if req.query_type:
+            query_type_hint = f"\nQuery type hint: {req.query_type}"
+
+        prompt = f"""You are a SQL expert. Generate a single Snowflake SQL SELECT query for the table {full_name}.
+
+Table columns:
+{columns_desc}
+{query_type_hint}
+User intent: {req.intent}
+
+Requirements:
+- Return ONLY valid Snowflake SQL.
+- Use {full_name} as the table reference.
+- For parameterized benchmarking, use {{{{placeholder_name}}}} syntax for values that should vary per execution.
+- The query should be a realistic analytical workload.
+
+Respond in JSON format:
+{{
+  "sql": "SELECT ...",
+  "label": "short descriptive label",
+  "operation_type": "READ",
+  "explanation": "brief explanation",
+  "placeholders": ["placeholder1", "placeholder2"]
+}}"""
+
+        resp_format = json.dumps({
+            "type": "json",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "sql": {"type": "string"},
+                    "label": {"type": "string"},
+                    "operation_type": {"type": "string"},
+                    "explanation": {"type": "string"},
+                    "placeholders": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["sql", "label", "operation_type"],
+            },
+        })
+
+        result = await sf.execute_query(
+            "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?), response_format => PARSE_JSON(?)) AS RESP",
+            params=[
+                "claude-4-sonnet",
+                prompt,
+                json.dumps({"temperature": 0.3, "max_tokens": 2000}),
+                resp_format,
+            ],
+        )
+
+        if not result or not result[0][0]:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="AI model returned empty response",
+            )
+
+        ai_resp = json.loads(result[0][0])
+        warnings: list[str] = []
+
+        sql = ai_resp.get("sql", "").strip()
+        if not sql:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="AI model did not generate SQL",
+            )
+
+        # Detect placeholders in {placeholder} format
+        placeholders = ai_resp.get("placeholders", [])
+        if not placeholders:
+            placeholders = _re.findall(r"\{(\w+)\}", sql)
+
+        return AiGenerateSqlResponse(
+            sql=sql,
+            label=ai_resp.get("label", "Generated Query"),
+            operation_type=ai_resp.get("operation_type", "READ").upper(),
+            placeholders=placeholders,
+            explanation=ai_resp.get("explanation", ""),
+            warnings=warnings,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise http_exception("ai generate sql", e)
+
+
+@router.post("/ai/validate-sql", response_model=AiValidateSqlResponse)
+async def ai_validate_sql(req: AiValidateSqlRequest):
+    """
+    Validate SQL syntax without executing by using EXPLAIN.
+
+    Returns whether the SQL is syntactically valid and any errors.
+    """
+    try:
+        table_type_upper = _upper_str(req.table_type)
+
+        if _is_postgres_family_table_type(table_type_upper):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="SQL validation for Postgres is not yet supported",
+            )
+
+        sf = snowflake_pool.get_default_pool()
+        db = _validate_ident(req.database, label="database")
+        sch = _validate_ident(req.schema_name, label="schema")
+
+        # Use the target database/schema context for validation
+        await sf.execute_query(f"USE DATABASE {db}")
+        await sf.execute_query(f"USE SCHEMA {sch}")
+
+        # Strip any trailing semicolons for EXPLAIN
+        sql = req.sql.strip().rstrip(";")
+
+        warnings: list[str] = []
+
+        try:
+            await sf.execute_query(f"EXPLAIN {sql}")
+            return AiValidateSqlResponse(valid=True, warnings=warnings)
+        except Exception as explain_err:
+            error_msg = str(explain_err)
+            return AiValidateSqlResponse(
+                valid=False,
+                error=error_msg,
+                warnings=warnings,
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise http_exception("ai validate sql", e)
+
+
 @router.get("/{template_id}", response_model=TemplateResponse)
 async def get_template(template_id: str):
     """
@@ -1727,14 +1900,17 @@ async def create_template(template: TemplateCreate):
         raise http_exception("create template", e)
 
 
-@router.put("/{template_id}", response_model=TemplateResponse)
-async def update_template(template_id: str, template: TemplateUpdate):
+async def _update_template_internal(
+    template_id: str, template: TemplateUpdate, *, allow_with_results: bool = False
+):
     """
-    Update an existing template.
+    Internal function to update a template.
 
     Args:
         template_id: UUID of the template to update
         template: Updated template data
+        allow_with_results: If True, allow updating templates that have test results
+                           (used for metadata-only updates like refreshing value pools)
 
     Returns:
         Updated template
@@ -1751,7 +1927,7 @@ async def update_template(template_id: str, template: TemplateUpdate):
             raise
 
         usage_count = int(existing.get("usage_count") or 0)
-        if usage_count > 0:
+        if usage_count > 0 and not allow_with_results:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
@@ -1812,6 +1988,124 @@ async def update_template(template_id: str, template: TemplateUpdate):
         raise http_exception("update template", e)
 
 
+@router.put("/{template_id}", response_model=TemplateResponse)
+async def update_template(template_id: str, template: TemplateUpdate):
+    """
+    Update an existing template (API endpoint).
+    Templates with test results cannot be modified via this endpoint.
+    """
+    return await _update_template_internal(template_id, template, allow_with_results=False)
+
+
+import re
+
+
+def _extract_joined_tables(sql: str) -> list[str]:
+    """
+    Extract fully-qualified table references from SQL JOINs.
+    
+    Handles patterns like:
+    - JOIN db.schema.table AS alias
+    - INNER JOIN db.schema.table alias
+    - LEFT JOIN db.schema.table
+    
+    Returns list of fully-qualified table names (excluding {table} placeholder).
+    """
+    tables: list[str] = []
+    # Match JOIN ... table_name (with optional db.schema prefix)
+    # Pattern: JOIN [type] db.schema.table [AS] alias
+    join_pattern = r'(?:INNER\s+|LEFT\s+|RIGHT\s+|OUTER\s+|CROSS\s+)?JOIN\s+(\w+(?:\.\w+){0,2})'
+    
+    for match in re.finditer(join_pattern, sql, re.IGNORECASE):
+        table_ref = match.group(1).upper()
+        # Skip the {table} placeholder
+        if '{TABLE}' not in table_ref and table_ref not in tables:
+            tables.append(table_ref)
+    
+    return tables
+
+
+def _extract_placeholder_columns(sql: str) -> list[dict[str, Any]]:
+    """
+    Parse SQL to identify columns associated with ? placeholders.
+    
+    Handles patterns like:
+    - WHERE col = ?
+    - WHERE col BETWEEN ? AND ?  
+    - JOIN ... ON alias.col = ?
+    - AND col IN (?, ?, ?)
+    - WHERE col > ? AND col2 < ?
+    
+    Returns list of column info: [{"column": "O_CUSTKEY", "position": 0}, ...]
+    """
+    columns: list[dict[str, Any]] = []
+    placeholder_idx = 0
+    
+    col_pattern = r'(?:[\w]+\.)?(\w+)\s*(=|>|<|>=|<=|!=|<>|BETWEEN|IN|LIKE)\s*'
+    
+    lines = sql.upper().split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        offset = 0
+        while True:
+            match = re.search(col_pattern, line[offset:], re.IGNORECASE)
+            if not match:
+                break
+            
+            col_name = match.group(1)
+            operator = match.group(2).upper()
+            match_end = offset + match.end()
+            
+            remainder = line[match_end:]
+            
+            if operator in ("=", ">", "<", ">=", "<=", "!=", "<>", "LIKE"):
+                if remainder.lstrip().startswith("?"):
+                    columns.append({
+                        "column": col_name,
+                        "position": placeholder_idx,
+                        "operator": operator
+                    })
+                    placeholder_idx += 1
+            elif operator == "BETWEEN":
+                first_q = remainder.find("?")
+                if first_q >= 0:
+                    columns.append({
+                        "column": col_name,
+                        "position": placeholder_idx,
+                        "operator": "BETWEEN_START"
+                    })
+                    placeholder_idx += 1
+                    rest_after_first = remainder[first_q+1:]
+                    if "?" in rest_after_first:
+                        columns.append({
+                            "column": col_name,
+                            "position": placeholder_idx,
+                            "operator": "BETWEEN_END"
+                        })
+                        placeholder_idx += 1
+            elif operator == "IN":
+                paren_start = remainder.find("(")
+                if paren_start >= 0:
+                    paren_end = remainder.find(")", paren_start)
+                    if paren_end > paren_start:
+                        in_clause = remainder[paren_start+1:paren_end]
+                        num_q = in_clause.count("?")
+                        for _ in range(num_q):
+                            columns.append({
+                                "column": col_name,
+                                "position": placeholder_idx,
+                                "operator": "IN"
+                            })
+                            placeholder_idx += 1
+            
+            offset = match_end
+    
+    return columns
+
+
 @router.post("/{template_id}/ai/prepare", response_model=AiPrepareResponse)
 async def prepare_ai_template(template_id: str):
     """
@@ -1825,15 +2119,6 @@ async def prepare_ai_template(template_id: str):
         pool = snowflake_pool.get_default_pool()
 
         tpl = await get_template(template_id)
-        usage_count = int(tpl.get("usage_count") or 0)
-        if usage_count > 0:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "This template has test results and can no longer be edited. "
-                    "Copy it to create an editable version."
-                ),
-            )
 
         cfg = tpl.get("config") or {}
         if not isinstance(cfg, dict):
@@ -2395,21 +2680,335 @@ async def prepare_ai_template(template_id: str):
                 pools_created["RANGE"] = int(target_n)
 
         # ------------------------------------------------------------------
+        # 3.2.5) Validate GENERIC_SQL queries compile (catch bad table/column names early)
+        # ------------------------------------------------------------------
+        generic_queries = cfg.get("generic_queries", [])
+        sql_validation_errors: list[str] = []
+        
+        if isinstance(generic_queries, list):
+            for q_idx, gq in enumerate(generic_queries):
+                if not isinstance(gq, dict):
+                    continue
+                sql = gq.get("sql", "")
+                if not sql:
+                    continue
+                
+                # Replace {table} placeholder with actual table
+                test_sql = sql.replace("{table}", full_name)
+                
+                # Replace ? placeholders with NULL for validation
+                test_sql = test_sql.replace("?", "NULL")
+                
+                # Use EXPLAIN to validate SQL compiles without executing
+                # Use execute_query_with_info to get error details
+                _, info = await pool.execute_query_with_info(f"EXPLAIN {test_sql}")
+                if info.get("error"):
+                    err_msg = info["error"]
+                    sql_validation_errors.append(
+                        f"generic_queries[{q_idx}]: {err_msg}"
+                    )
+                    logger.warning(
+                        "GENERIC_SQL[%d] validation failed: %s", q_idx, err_msg
+                    )
+                else:
+                    logger.info("GENERIC_SQL[%d] validated successfully", q_idx)
+
+        # If any SQL validation failed, return error with details
+        if sql_validation_errors:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "GENERIC_SQL validation failed",
+                    "errors": sql_validation_errors
+                }
+            )
+
+        # ------------------------------------------------------------------
+        # 3.3) GENERIC_SQL parameter column pools (auto-profile placeholder columns)
+        # ------------------------------------------------------------------
+        generic_sql_pools_created: dict[str, int] = {}
+        auto_generated_params: dict[str, list[dict]] = {}
+        
+        if isinstance(generic_queries, list):
+            for q_idx, gq in enumerate(generic_queries):
+                if not isinstance(gq, dict):
+                    continue
+                    
+                sql = gq.get("sql", "")
+                if not sql or "?" not in sql:
+                    continue
+                
+                existing_params = gq.get("parameters")
+                
+                # If parameters already exist with sample_from_table strategy,
+                # recreate the GENERIC_SQL pools with the NEW pool_id and update references.
+                if existing_params and isinstance(existing_params, list):
+                    updated_params = []
+                    sampled_columns: set[str] = set()
+                    for param in existing_params:
+                        if not isinstance(param, dict):
+                            updated_params.append(param)
+                            continue
+                        if param.get("strategy") != "sample_from_table":
+                            updated_params.append(param)
+                            continue
+                        col_name = str(param.get("column") or "").strip().upper()
+                        if not col_name or col_name not in col_types:
+                            updated_params.append(param)
+                            continue
+                        
+                        if col_name not in sampled_columns:
+                            target_n = max(5000, concurrency * 50)
+                            target_n = min(100_000, target_n)
+                            col_ident = _validate_ident(col_name, label="column")
+                            col_expr = _quote_ident(col_ident)
+                            
+                            if is_view or is_hybrid:
+                                insert_generic_pool = f"""
+                                INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
+                                    POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
+                                )
+                                SELECT
+                                    ?, ?, 'GENERIC_SQL', ?, SEQ4(), TO_VARIANT(COL_VAL)
+                                FROM (
+                                    SELECT DISTINCT {col_expr} AS COL_VAL
+                                    FROM {full_name}
+                                    WHERE {col_expr} IS NOT NULL
+                                    LIMIT {target_n}
+                                )
+                                """
+                            else:
+                                insert_generic_pool = f"""
+                                INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
+                                    POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
+                                )
+                                SELECT
+                                    ?, ?, 'GENERIC_SQL', ?, SEQ4(), TO_VARIANT(COL_VAL)
+                                FROM (
+                                    SELECT DISTINCT {col_expr} AS COL_VAL
+                                    FROM {full_name} TABLESAMPLE SYSTEM (10)
+                                    WHERE {col_expr} IS NOT NULL
+                                    LIMIT {target_n}
+                                )
+                                """
+                            
+                            try:
+                                await pool.execute_query(
+                                    insert_generic_pool,
+                                    params=[pool_id, template_id, col_ident]
+                                )
+                                sampled_columns.add(col_name)
+                                generic_sql_pools_created[col_name] = target_n
+                                logger.info(
+                                    "GENERIC_SQL[%d] re-sampled column %s with new pool_id (up to %d values)",
+                                    q_idx, col_name, target_n
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "Failed to re-sample GENERIC_SQL column %s: %s",
+                                    col_name, e
+                                )
+                                updated_params.append(param)
+                                continue
+                        
+                        # Update pool_id reference to the new pool_id
+                        updated_param = dict(param)
+                        updated_param["pool_id"] = pool_id
+                        updated_params.append(updated_param)
+                    
+                    if updated_params:
+                        query_id = gq.get("id", str(q_idx))
+                        auto_generated_params[query_id] = updated_params
+                    continue
+                
+                placeholder_cols = _extract_placeholder_columns(sql)
+                if not placeholder_cols:
+                    continue
+                
+                logger.info(
+                    "GENERIC_SQL[%d] auto-profiling %d placeholder columns: %s",
+                    q_idx,
+                    len(placeholder_cols),
+                    [pc["column"] for pc in placeholder_cols]
+                )
+                
+                sampled_columns: set[str] = set()
+                params_config: list[dict] = []
+                
+                # Extract joined tables for columns not in main table
+                joined_tables = _extract_joined_tables(sql)
+                
+                for pc in placeholder_cols:
+                    col_name = pc["column"].upper()
+                    source_table = full_name  # Default to main table
+                    col_found_in_main = col_name in col_types
+                    
+                    if not col_found_in_main:
+                        # Column not in main table - check joined tables
+                        found_in_joined = False
+                        for joined_tbl in joined_tables:
+                            try:
+                                # Parse table reference to get INFORMATION_SCHEMA path
+                                parts = joined_tbl.split('.')
+                                if len(parts) == 3:
+                                    db_name, _, tbl_name = parts
+                                    info_schema = f'{db_name}.INFORMATION_SCHEMA'
+                                elif len(parts) == 2:
+                                    info_schema = f'{parts[0]}.INFORMATION_SCHEMA'
+                                    tbl_name = parts[1]
+                                else:
+                                    info_schema = 'INFORMATION_SCHEMA'
+                                    tbl_name = parts[0]
+                                
+                                # Check if column exists in this joined table
+                                check_col_sql = f"""
+                                SELECT COLUMN_NAME 
+                                FROM {info_schema}.COLUMNS
+                                WHERE TABLE_NAME = '{tbl_name}'
+                                  AND COLUMN_NAME = '{col_name}'
+                                LIMIT 1
+                                """
+                                result = await pool.execute_query(check_col_sql)
+                                if result and len(result) > 0:
+                                    source_table = joined_tbl
+                                    found_in_joined = True
+                                    logger.info(
+                                        "GENERIC_SQL[%d] column %s found in joined table %s",
+                                        q_idx, col_name, joined_tbl
+                                    )
+                                    break
+                            except Exception as e:
+                                logger.debug(
+                                    "Could not check column %s in %s: %s",
+                                    col_name, joined_tbl, e
+                                )
+                                continue
+                        
+                        if not found_in_joined:
+                            logger.warning(
+                                "GENERIC_SQL[%d] placeholder column %s not found in main or joined tables; skipping",
+                                q_idx, col_name
+                            )
+                            continue
+                    
+                    # Skip GENERIC_SQL sampling if column already has KEY or RANGE pool.
+                    # Runtime will fall back to those pools for this column.
+                    key_col_u = key_col.upper() if key_col else None
+                    time_col_u = time_col.upper() if time_col else None
+                    if col_name == key_col_u or col_name == time_col_u:
+                        logger.info(
+                            "GENERIC_SQL[%d] column %s already in KEY/RANGE pool; skipping duplicate sampling",
+                            q_idx, col_name
+                        )
+                        # Still need to add parameter config pointing to the existing pool
+                        params_config.append({
+                            "position": pc["position"],
+                            "name": col_name.lower(),
+                            "strategy": "sample_from_table",
+                            "column": col_name,
+                            "pool_id": pool_id,
+                            "fallback_pool_kind": "KEY" if col_name == key_col_u else "RANGE",
+                        })
+                        continue
+                    
+                    if col_name not in sampled_columns:
+                        target_n = max(5000, concurrency * 50)
+                        target_n = min(100_000, target_n)
+                        col_ident = _validate_ident(col_name, label="column")
+                        col_expr = _quote_ident(col_ident)
+                        
+                        # Use source_table (may be main table or joined table)
+                        # For joined tables or views/hybrid, don't use TABLESAMPLE
+                        use_tablesample = (source_table == full_name) and not (is_view or is_hybrid)
+                        
+                        if use_tablesample:
+                            insert_generic_pool = f"""
+                            INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
+                                POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
+                            )
+                            SELECT
+                                ?, ?, 'GENERIC_SQL', ?, SEQ4(), TO_VARIANT(COL_VAL)
+                            FROM (
+                                SELECT DISTINCT {col_expr} AS COL_VAL
+                                FROM {source_table} TABLESAMPLE SYSTEM (10)
+                                WHERE {col_expr} IS NOT NULL
+                                LIMIT {target_n}
+                            )
+                            """
+                        else:
+                            insert_generic_pool = f"""
+                            INSERT INTO {_results_prefix()}.TEMPLATE_VALUE_POOLS (
+                                POOL_ID, TEMPLATE_ID, POOL_KIND, COLUMN_NAME, SEQ, VALUE
+                            )
+                            SELECT
+                                ?, ?, 'GENERIC_SQL', ?, SEQ4(), TO_VARIANT(COL_VAL)
+                            FROM (
+                                SELECT DISTINCT {col_expr} AS COL_VAL
+                                FROM {source_table}
+                                WHERE {col_expr} IS NOT NULL
+                                LIMIT {target_n}
+                            )
+                            """
+                        
+                        try:
+                            await pool.execute_query(
+                                insert_generic_pool,
+                                params=[pool_id, template_id, col_ident]
+                            )
+                            sampled_columns.add(col_name)
+                            generic_sql_pools_created[col_name] = target_n
+                            logger.info(
+                                "GENERIC_SQL auto-sampled column %s from %s (up to %d values)",
+                                col_name, source_table, target_n
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to sample GENERIC_SQL column %s from %s: %s",
+                                col_name, source_table, e
+                            )
+                            continue
+                    
+                    params_config.append({
+                        "position": pc["position"],
+                        "name": col_name.lower(),
+                        "strategy": "sample_from_table",
+                        "column": col_name,
+                        "pool_id": pool_id
+                    })
+                
+                query_id = gq.get("id", str(q_idx))
+                if params_config:
+                    auto_generated_params[query_id] = params_config
+                    logger.info(
+                        "GENERIC_SQL[%d] auto-generated %d parameter configs",
+                        q_idx, len(params_config)
+                    )
+
+        # ------------------------------------------------------------------
         # 4) Count inserted pool sizes (exact) and persist plan metadata into template config
         # ------------------------------------------------------------------
-        counts: dict[str, int] = {}
-        count_rows = await pool.execute_query(
+        # Query pools grouped by column name for better UI display
+        now_iso = datetime.now(UTC).isoformat()
+        column_pools: dict[str, dict[str, Any]] = {}
+        pool_rows = await pool.execute_query(
             f"""
-            SELECT POOL_KIND, COUNT(*) AS N
+            SELECT COLUMN_NAME, POOL_KIND, COUNT(*) AS N
             FROM {_results_prefix()}.TEMPLATE_VALUE_POOLS
             WHERE TEMPLATE_ID = ?
               AND POOL_ID = ?
-            GROUP BY POOL_KIND
+            GROUP BY COLUMN_NAME, POOL_KIND
+            ORDER BY COLUMN_NAME
             """,
             params=[template_id, pool_id],
         )
-        for kind, n in count_rows:
-            counts[str(kind)] = int(n or 0)
+        for col_name, kind, n in pool_rows:
+            col_key = str(col_name or "").upper()
+            if col_key:
+                column_pools[col_key] = {
+                    "count": int(n or 0),
+                    "kind": str(kind or ""),
+                    "refreshed_at": now_iso,
+                }
 
         ai_workload = {
             "available": ai_available,
@@ -2421,7 +3020,7 @@ async def prepare_ai_template(template_id: str):
             "time_column": time_col,
             "range_mode": range_mode,
             "concurrency": concurrency,
-            "pools": counts,
+            "pools": column_pools,
             "insert_columns": insert_cols,
             "update_columns": update_cols,
             "projection_columns": projection_cols,
@@ -2431,6 +3030,8 @@ async def prepare_ai_template(template_id: str):
             "source_database": db,
             "source_schema": sch,
             "source_table": tbl,
+            # Track auto-generated GENERIC_SQL pools
+            "generic_sql_pools": generic_sql_pools_created,
         }
 
         # Store only the columns we will touch (keeps CONFIG small and avoids inserting into arbitrary columns).
@@ -2442,13 +3043,38 @@ async def prepare_ai_template(template_id: str):
             cols_to_store.add(key_col)
         if time_col:
             cols_to_store.add(time_col)
+        # Also store GENERIC_SQL placeholder columns
+        for col in generic_sql_pools_created.keys():
+            cols_to_store.add(col)
         for c in cols_to_store:
             c_ident = _validate_ident(c, label="column")
             selected_cols[c_ident] = col_types.get(c_ident, "VARCHAR")
 
+        # Update generic_queries with auto-generated parameters
+        updated_generic_queries = []
+        for q_idx, gq in enumerate(generic_queries):
+            if not isinstance(gq, dict):
+                updated_generic_queries.append(gq)
+                continue
+            # Use same fallback logic as when storing params (line ~2901)
+            query_id = gq.get("id", str(q_idx))
+            if query_id in auto_generated_params:
+                gq_copy = dict(gq)
+                gq_copy["parameters"] = auto_generated_params[query_id]
+                updated_generic_queries.append(gq_copy)
+                logger.info(
+                    "Injected/updated parameters into generic_queries[id=%s]",
+                    query_id
+                )
+            else:
+                updated_generic_queries.append(gq)
+
         cfg2 = {**cfg, "columns": selected_cols, "ai_workload": ai_workload}
+        if updated_generic_queries:
+            cfg2["generic_queries"] = updated_generic_queries
         # Keep existing template_name/description at top-level columns; only CONFIG changes here.
-        await update_template(template_id, TemplateUpdate(config=cfg2))
+        # Allow updating metadata even for templates with test results
+        await _update_template_internal(template_id, TemplateUpdate(config=cfg2), allow_with_results=True)
 
         msg = (
             "AI workloads prepared."
@@ -2466,7 +3092,7 @@ async def prepare_ai_template(template_id: str):
             update_columns=update_cols,
             projection_columns=projection_cols,
             domain_label=domain_label,
-            pools=counts,
+            pools=column_pools,
             message=msg,
         )
 
