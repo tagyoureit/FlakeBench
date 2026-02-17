@@ -13,10 +13,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Push to personal repo
         run: |
-          git config --global credential.helper store
-          echo "https://tagyoureit:${{ secrets.PERSONAL_GITHUB_PAT }}@github.com" > ~/.git-credentials
-          git remote add personal https://github.com/tagyoureit/FlakeBench.git
+          git remote add personal https://tagyoureit:${{ secrets.PERSONAL_GITHUB_PAT }}@github.com/tagyoureit/FlakeBench.git
           git push personal main --force --tags
