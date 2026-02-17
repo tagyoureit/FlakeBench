@@ -15,6 +15,8 @@ jobs:
           fetch-depth: 0
 
       - name: Push to personal repo
+        env:
+          PERSONAL_PAT: ${{ secrets.PERSONAL_GITHUB_PAT }}
         run: |
-          git remote add personal https://x-access-token:${{ secrets.PERSONAL_GITHUB_PAT }}@github.com/tagyoureit/FlakeBench.git
+          git remote add personal https://${PERSONAL_PAT}@github.com/tagyoureit/FlakeBench.git
           git push personal main --force --tags
