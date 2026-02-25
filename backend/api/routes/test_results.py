@@ -7956,7 +7956,7 @@ async def deep_compare_ai_analysis(req: DeepCompareAiRequest) -> dict[str, Any]:
 
         # Call AI for analysis
         try:
-            ai_resp = await pool.execute_query(
+            ai_resp = await pool.execute_ai_query(
                 "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?)) AS RESP",
                 params=[
                     "claude-4-sonnet",
@@ -8686,7 +8686,7 @@ async def ai_analysis(
             comparison_summary = {"error": str(compare_err)}
 
         try:
-            ai_resp = await pool.execute_query(
+            ai_resp = await pool.execute_ai_query(
                 "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?)) AS RESP",
                 params=[
                     "claude-4-sonnet",
@@ -8786,7 +8786,7 @@ If asked about data you don't have access to, say so and suggest what data would
         full_prompt = f"{context}\n\nCONVERSATION HISTORY:{history_text}\n\nUSER: {req.message}\n\nASSISTANT:"
 
         try:
-            ai_resp = await pool.execute_query(
+            ai_resp = await pool.execute_ai_query(
                 "SELECT AI_COMPLETE(model => ?, prompt => ?, model_parameters => PARSE_JSON(?)) AS RESP",
                 params=[
                     "claude-4-sonnet",

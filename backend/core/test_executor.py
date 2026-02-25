@@ -3324,12 +3324,10 @@ class TestExecutor:
         # Update the executor's current tag (used for SF sampler filtering).
         self._benchmark_query_tag = str(running_tag)
 
-        # Update QUERY_TAG on all pool connections.
+        # Update QUERY_TAG on all pool connections (Snowflake-only; no-op for Postgres).
         pool = getattr(self, "_snowflake_pool_override", None)
         if pool is None:
-            logger.warning(
-                "No pool available for QUERY_TAG update during phase transition"
-            )
+            # Expected for Postgres runs - QUERY_TAG is Snowflake-specific.
             return
         if not hasattr(pool, "update_query_tag"):
             logger.warning(

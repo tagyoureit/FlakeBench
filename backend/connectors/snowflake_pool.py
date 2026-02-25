@@ -603,6 +603,60 @@ class SnowflakeConnectionPool:
             logger.error("Network error during query execution: %s", e)
             return []
 
+    async def execute_ai_query(
+        self,
+        query: str,
+        params: Optional[object] = None,
+    ) -> List[tuple]:
+        """
+        Execute an AI/LLM query with extended timeouts.
+
+        Cortex AI functions (AI_COMPLETE, etc.) can take 30-90+ seconds.
+        This method creates a one-off connection with longer timeouts
+        to avoid timing out on slow LLM responses.
+
+        Args:
+            query: SQL query to execute (typically calling AI_COMPLETE)
+            params: Query parameters (for binding)
+
+        Returns:
+            List of result tuples (empty list on timeout/error)
+        """
+        # Build connection params with AI-specific timeouts
+        ai_params = self._get_connection_params()
+        ai_params["network_timeout"] = settings.SNOWFLAKE_AI_CONNECT_NETWORK_TIMEOUT
+        ai_params["socket_timeout"] = settings.SNOWFLAKE_AI_CONNECT_SOCKET_TIMEOUT
+
+        conn = None
+        try:
+            # Create a one-off connection with longer timeouts
+            conn = await self._run_in_executor(snowflake.connector.connect, **ai_params)
+
+            cursor = await self._run_in_executor(conn.cursor)
+            try:
+                if params is None:
+                    await self._run_in_executor(cursor.execute, query)
+                else:
+                    await self._run_in_executor(cursor.execute, query, params)
+
+                results = await self._run_in_executor(cursor.fetchall)
+                return results
+            finally:
+                try:
+                    await self._run_in_executor(cursor.close)
+                except RuntimeError:
+                    pass
+        except (ReadTimeout, DatabaseError, OperationalError) as e:
+            logger.error("AI query execution error (timeout=%ds): %s",
+                        settings.SNOWFLAKE_AI_CONNECT_NETWORK_TIMEOUT, e)
+            return []
+        finally:
+            if conn:
+                try:
+                    await self._run_in_executor(conn.close)
+                except Exception:
+                    pass
+
     async def execute_query_with_info(
         self,
         query: str,

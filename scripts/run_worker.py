@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from backend.config import settings
 from backend.connectors import postgres_pool, snowflake_pool
 from backend.core import results_store
+from backend.core.file_metrics_logger import FileBasedMetricsLogger
 from backend.core.file_query_logger import FileBasedQueryLogger
 from backend.core.pool_sizing import PoolSizeConfig
 from backend.core.test_executor import TestExecutor
@@ -403,7 +404,28 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         ),
     )
     if load_mode == "QPS":
-        initial_target = max(1, int(min_connections))
+        # Use starting_threads from workload config when available (per-worker share).
+        # Fall back to min_connections only if starting_threads is not set.
+        # This ensures workers start at the configured starting_threads level
+        # rather than ramping slowly from min_connections.
+        qps_starting_threads = workload_cfg.get("starting_threads")
+        if qps_starting_threads is not None and float(qps_starting_threads) > 0:
+            # Distribute starting_threads across workers
+            initial_target = _compute_initial_target(
+                total_connections=int(float(qps_starting_threads)),
+                worker_group_id=worker_group_id,
+                worker_group_count=worker_group_count,
+                per_worker_connections=None,
+            )
+            logger.info(
+                "QPS mode: initial_target=%d (worker_group_id=%d/%d from starting_threads=%.0f)",
+                initial_target,
+                worker_group_id,
+                worker_group_count,
+                float(qps_starting_threads),
+            )
+        else:
+            initial_target = max(1, int(min_connections))
     elif load_mode == "FIND_MAX_CONCURRENCY":
         # CRITICAL: For FIND_MAX mode, start at find_max start_concurrency, not concurrent_connections.
         # The orchestrator controls scaling via WORKER_TARGETS. Starting at concurrent_connections
@@ -577,6 +599,18 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     )
     executor.set_query_logger(query_logger)
 
+    # Initialize metrics logger for bulk loading worker metrics snapshots.
+    # This eliminates Snowflake lock contention by buffering metrics locally
+    # and loading via PUT + COPY INTO during the PROCESSING phase.
+    metrics_logger = FileBasedMetricsLogger(
+        test_id=str(executor.test_id),
+        worker_id=cfg.worker_group_id,
+        results_prefix=results_prefix,
+        run_id=cfg.run_id,
+        worker_group_id=cfg.worker_group_id,
+        worker_group_count=cfg.worker_group_count,
+    )
+
     table_type = str(template_config.get("table_type") or "STANDARD").strip().upper()
     is_postgres = table_type == TableType.POSTGRES.value.upper()
     warehouse = None
@@ -607,6 +641,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             except Exception:
                 pass
             query_logger.cleanup_on_error()
+            metrics_logger.cleanup_on_error()
             return 1
 
     raw_use_cached = template_config.get("use_cached_result")
@@ -657,6 +692,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             "Template execution warehouse must not match results warehouse (SNOWFLAKE_WAREHOUSE)."
         )
         query_logger.cleanup_on_error()
+        metrics_logger.cleanup_on_error()
         return 1
 
     if not is_postgres:
@@ -689,19 +725,22 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         bench_executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="sf-bench"
         )
-        
+
         # Check if template specifies a connection_id to use stored credentials
         connection_id = template_config.get("connection_id")
         if connection_id:
             # Use stored connection credentials
             from backend.core import connection_manager
-            
-            conn_params = await connection_manager.get_connection_for_pool(connection_id)
+
+            conn_params = await connection_manager.get_connection_for_pool(
+                connection_id
+            )
             if not conn_params:
                 logger.error(f"Connection {connection_id} not found")
                 query_logger.cleanup_on_error()
+                metrics_logger.cleanup_on_error()
                 return 1
-            
+
             # Validate connection type
             conn_type = conn_params.get("connection_type", "")
             if conn_type != "SNOWFLAKE":
@@ -709,21 +748,22 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                     f"Connection {connection_id} is type {conn_type}, expected SNOWFLAKE"
                 )
                 query_logger.cleanup_on_error()
+                metrics_logger.cleanup_on_error()
                 return 1
-            
+
             logger.info(
                 "[benchmark] Using stored connection: %s (user=%s)",
                 connection_id,
                 conn_params.get("user"),
             )
-            
+
             per_test_pool = snowflake_pool.SnowflakeConnectionPool(
                 account=conn_params["account"],
                 user=conn_params["user"],
                 password=conn_params["password"],
-                warehouse=warehouse,     # From template config
-                database=sf_database,    # From template config
-                schema=sf_schema,        # From template config
+                warehouse=warehouse,  # From template config
+                database=sf_database,  # From template config
+                schema=sf_schema,  # From template config
                 role=conn_params.get("role") or settings.SNOWFLAKE_ROLE,
                 pool_size=initial_pool,
                 max_overflow=overflow,
@@ -809,19 +849,22 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         )
 
         pg_database = str(template_config.get("database") or "").strip()
-        
+
         # Check if template specifies a connection_id to use stored credentials
         connection_id = template_config.get("connection_id")
         if connection_id:
             # Use stored connection credentials
             from backend.core import connection_manager
-            
-            conn_params = await connection_manager.get_connection_for_pool(connection_id)
+
+            conn_params = await connection_manager.get_connection_for_pool(
+                connection_id
+            )
             if not conn_params:
                 logger.error(f"Connection {connection_id} not found")
                 query_logger.cleanup_on_error()
+                metrics_logger.cleanup_on_error()
                 return 1
-            
+
             # Validate connection type
             conn_type = conn_params.get("connection_type", "")
             if conn_type != "POSTGRES":
@@ -829,18 +872,19 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                     f"Connection {connection_id} is type {conn_type}, expected POSTGRES"
                 )
                 query_logger.cleanup_on_error()
+                metrics_logger.cleanup_on_error()
                 return 1
-            
+
             # Use database from template config if set, otherwise fall back to env vars
             if not pg_database:
                 pg_database = settings.POSTGRES_DATABASE
-            
+
             # Determine port based on PgBouncer setting
             pg_port = conn_params.get("port") or 5432
             if use_pgbouncer:
                 # Use connection's pgbouncer_port if set, otherwise default to 5431
                 pg_port = conn_params.get("pgbouncer_port") or 5431
-            
+
             logger.info(
                 "[benchmark] Using stored connection: %s (user=%s, host=%s, port=%d)",
                 connection_id,
@@ -848,13 +892,14 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 conn_params.get("host"),
                 pg_port,
             )
-            
+
             # Create SSL context for Snowflake Postgres (self-signed certs)
             import ssl
+
             ssl_context = ssl.create_default_context()
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
-            
+
             per_test_pg_pool = postgres_pool.PostgresConnectionPool(
                 host=conn_params["host"],
                 port=pg_port,
@@ -951,6 +996,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             last_error = str(exc)
             await _safe_heartbeat("DEAD")
             query_logger.cleanup_on_error()
+            metrics_logger.cleanup_on_error()
             return 2
     else:
         # Initialize Postgres pool before START
@@ -971,6 +1017,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             last_error = str(exc)
             await _safe_heartbeat("DEAD")
             query_logger.cleanup_on_error()
+            metrics_logger.cleanup_on_error()
             return 2
 
     # Setup executor (table profiling, value pools, etc.) before START
@@ -988,6 +1035,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         logger.error("Executor setup failed: %s", last_error)
         await _safe_heartbeat("DEAD")
         query_logger.cleanup_on_error()
+        metrics_logger.cleanup_on_error()
         return 1
     logger.info("Executor setup complete - ready for START")
     await _safe_heartbeat("READY")  # Signal orchestrator that pool init is complete
@@ -1114,20 +1162,16 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         custom = dict(metrics.custom_metrics or {})
         custom["phase"] = current_phase
         metrics.custom_metrics = custom
-        _track_task(
-            asyncio.create_task(
-                results_store.insert_worker_metrics_snapshot(
-                    run_id=cfg.run_id,
-                    test_id=str(executor.test_id),
-                    worker_id=cfg.worker_id,
-                    worker_group_id=cfg.worker_group_id,
-                    worker_group_count=cfg.worker_group_count,
-                    metrics=metrics,
-                    phase=_normalize_phase(current_phase),
-                    target_connections=current_target,
-                )
-            )
+
+        # Buffer metrics locally for bulk loading (no Snowflake I/O during benchmark).
+        # This is synchronous and fast - eliminates lock contention on WORKER_METRICS_SNAPSHOTS.
+        metrics_logger.append_metrics(
+            metrics,
+            phase=_normalize_phase(current_phase),
+            target_connections=current_target,
         )
+
+        # Post to LiveMetricsCache for real-time dashboard (HTTP POST, not Snowflake).
         live_payload = {
             "test_id": str(executor.test_id),
             "worker_id": cfg.worker_id,
@@ -1259,6 +1303,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         last_error = str(exc)
         await _safe_heartbeat("DEAD")
         query_logger.cleanup_on_error()
+        metrics_logger.cleanup_on_error()
         return 1
 
     executor.status = TestStatus.RUNNING
@@ -1565,6 +1610,23 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
         logger.warning("Failed to finalize FileBasedQueryLogger: %s", exc)
         query_logger.cleanup_on_error()
 
+    # Finalize metrics logger: flush buffer, PUT to stage, COPY INTO, cleanup.
+    # This bulk loads WORKER_METRICS_SNAPSHOTS without lock contention.
+    try:
+        metrics_stats = await metrics_logger.finalize(snowflake_pool.get_default_pool())
+        logger.info(
+            "FileBasedMetricsLogger finalized: %s",
+            {
+                "rows_loaded": metrics_stats.get("rows_loaded"),
+                "files_processed": metrics_stats.get("files_processed"),
+                "total_rows_captured": metrics_stats.get("total_rows_captured"),
+            },
+        )
+        health.record_success()
+    except Exception as exc:
+        logger.warning("Failed to finalize FileBasedMetricsLogger: %s", exc)
+        metrics_logger.cleanup_on_error()
+
     # NOTE: Enrichment (QUERY_HISTORY matching) is handled centrally by the
     # orchestrator as a background task after all workers complete. Worker just
     # sets ENRICHMENT_STATUS='PENDING' above and exits quickly.
@@ -1634,7 +1696,11 @@ def main() -> int:
     from uvicorn.logging import DefaultFormatter
 
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(DefaultFormatter(fmt="%(levelprefix)s %(asctime)s - %(message)s", use_colors=True))
+    console_handler.setFormatter(
+        DefaultFormatter(
+            fmt="%(levelprefix)s %(asctime)s - %(message)s", use_colors=True
+        )
+    )
     logging.basicConfig(level=logging.INFO, handlers=[console_handler])
 
     # Suppress verbose Snowflake connector logging (matches backend/main.py)

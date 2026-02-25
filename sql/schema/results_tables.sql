@@ -401,6 +401,15 @@ CREATE STAGE IF NOT EXISTS QUERY_EXECUTIONS_STAGE
     COMMENT = 'Temporary stage for query execution Parquet files during PROCESSING phase';
 
 -- =============================================================================
+-- WORKER_METRICS_STAGE: Temporary stage for worker metrics bulk loading
+-- Used by FileBasedMetricsLogger for PUT + COPY INTO during PROCESSING phase
+-- =============================================================================
+CREATE STAGE IF NOT EXISTS WORKER_METRICS_STAGE
+    FILE_FORMAT = (TYPE = PARQUET)
+    DIRECTORY = (ENABLE = TRUE)
+    COMMENT = 'Temporary stage for worker metrics Parquet files during PROCESSING phase';
+
+-- =============================================================================
 -- WAREHOUSE_POLL_SNAPSHOTS: Controller-side warehouse metrics
 -- =============================================================================
 CREATE OR ALTER TABLE WAREHOUSE_POLL_SNAPSHOTS (

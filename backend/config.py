@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     # aggressive timeouts that are too short for benchmark workloads.
     SNOWFLAKE_BENCHMARK_STATEMENT_TIMEOUT: int = 600
 
+    # AI/LLM query timeouts (seconds).
+    #
+    # Cortex AI functions (AI_COMPLETE, etc.) can take 30-90+ seconds depending on
+    # prompt size and model. These longer timeouts apply only to AI-related queries.
+    SNOWFLAKE_AI_CONNECT_NETWORK_TIMEOUT: int = 120
+    SNOWFLAKE_AI_CONNECT_SOCKET_TIMEOUT: int = 120
+
     # Optional key-pair authentication
     SNOWFLAKE_PRIVATE_KEY_PATH: str = ""
     SNOWFLAKE_PRIVATE_KEY_PASSPHRASE: str = ""

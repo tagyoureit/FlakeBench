@@ -375,28 +375,24 @@ class TestFileSplitting:
 
     def test_file_splitting_at_threshold(self):
         """Test new file is created when MAX_ROWS_PER_FILE is reached."""
-        # Use smaller thresholds for testing
-        with patch(
-            "backend.core.file_query_logger.MAX_ROWS_PER_FILE", 100
-        ), patch("backend.core.file_query_logger.BUFFER_SIZE", 50):
-            # Re-import to get patched values
-            from backend.core.file_query_logger import FileBasedQueryLogger
+        # Use smaller thresholds for testing via constructor arguments
+        logger = FileBasedQueryLogger(
+            test_id="test-123",
+            worker_id=1,
+            results_prefix=TEST_PREFIX,
+            max_rows_per_file=100,
+            buffer_size=50,
+        )
 
-            logger = FileBasedQueryLogger(
-                test_id="test-123",
-                worker_id=1,
-                results_prefix=TEST_PREFIX,
-            )
+        # Add 150 records (should create 2 files with threshold of 100)
+        for i in range(150):
+            record = _make_mock_record(f"query-{i}")
+            logger.append(record)
 
-            # Add 150 records (should create 2 files with threshold of 100)
-            for i in range(150):
-                record = _make_mock_record(f"query-{i}")
-                logger.append(record)
+        # Should have started a new file after 100 rows
+        assert logger._file_index >= 1
 
-            # Should have started a new file after 100 rows
-            assert logger._file_index >= 1
-
-            logger.cleanup_on_error()
+        logger.cleanup_on_error()
 
 
 class TestStats:
