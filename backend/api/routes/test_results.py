@@ -2208,7 +2208,11 @@ async def _fetch_qps_controller_step_history(
                 "from_threads": int(from_threads) if from_threads is not None else None,
                 "to_threads": int(to_threads) if to_threads is not None else None,
                 "direction": str(direction).lower() if direction else None,
-                "timestamp": step_start_time.isoformat() if hasattr(step_start_time, "isoformat") else str(step_start_time),
+                "timestamp": (
+                    step_start_time.isoformat()
+                    if (hasattr(step_start_time, "tzinfo") and step_start_time.tzinfo is not None)
+                    else step_start_time.isoformat() + "+00:00"
+                ) if hasattr(step_start_time, "isoformat") else str(step_start_time),
                 "qps": float(qps) if qps is not None else None,
                 "target_qps": float(target_qps) if target_qps is not None else None,
                 "qps_error_pct": float(qps_error_pct) if qps_error_pct is not None else None,
@@ -3460,6 +3464,10 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 elif task_name == "qps_step_history":
                     # QPS step history failure - set empty qps_controller_state
                     payload["qps_controller_state"] = {"step_history": []}
+                elif task_name == "pg_enrichment":
+                    # pg_enrichment failure - set defaults so template shows
+                    # meaningful message instead of "unavailable for this run"
+                    payload.update({"pg_enrichment_available": False})
                 # postgres_stats and app_latency failures are silent (no defaults needed)
             else:
                 # Apply successful results

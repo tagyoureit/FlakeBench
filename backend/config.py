@@ -2,21 +2,49 @@
 Application Configuration using Pydantic Settings
 
 Loads configuration from environment variables with sensible defaults.
+Supports both standalone and SPCS (Snowpark Container Services) deployment.
 """
 
-from typing import List
-from pydantic import field_validator
+import os
+from typing import List, Optional
+from pydantic import field_validator, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _detect_spcs_environment() -> bool:
+    """
+    Detect if running inside Snowpark Container Services.
+
+    SPCS injects SNOWFLAKE_HOST env var for container-to-Snowflake connectivity.
+    This is the most reliable indicator of SPCS runtime context.
+    """
+    return bool(os.environ.get("SNOWFLAKE_HOST"))
 
 
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
+
+    Supports dual-mode operation:
+    - Standalone: Uses password/key-pair auth from .env
+    - SPCS: Uses OAuth token authentication automatically
     """
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
+
+    # ========================================================================
+    # SPCS (Snowpark Container Services) Detection
+    # ========================================================================
+    # These are automatically set by SPCS runtime - do not set manually
+    SNOWFLAKE_HOST: Optional[str] = None  # Set by SPCS: e.g., "account.snowflakecomputing.com"
+
+    @computed_field
+    @property
+    def IS_SPCS(self) -> bool:
+        """True if running inside Snowpark Container Services."""
+        return _detect_spcs_environment()
 
     # ========================================================================
     # Snowflake Connection Settings
@@ -27,7 +55,7 @@ class Settings(BaseSettings):
     SNOWFLAKE_WAREHOUSE: str = "COMPUTE_WH"
     SNOWFLAKE_DATABASE: str = "FLAKEBENCH"
     SNOWFLAKE_SCHEMA: str = "PUBLIC"
-    SNOWFLAKE_ROLE: str = "ACCOUNTADMIN"
+    SNOWFLAKE_ROLE: str = "FLAKEBENCH_ROLE"
 
     # Connector-level timeouts (seconds).
     #
@@ -38,6 +66,12 @@ class Settings(BaseSettings):
     SNOWFLAKE_CONNECT_NETWORK_TIMEOUT: int = 60
     SNOWFLAKE_CONNECT_SOCKET_TIMEOUT: int = 60
 
+    # Session-level statement timeout for control-plane queries (seconds).
+    # Applies to catalog browsing, result persistence, and other non-benchmark operations.
+    # Set to 0 to use warehouse default. Useful in SPCS where warehouses may have
+    # aggressive timeouts that are too short for metadata queries.
+    SNOWFLAKE_STATEMENT_TIMEOUT: int = 60
+
     # Benchmark/workload connector timeouts (seconds).
     #
     # These apply to the per-test pool used by workload workers. They should be
@@ -46,6 +80,12 @@ class Settings(BaseSettings):
     SNOWFLAKE_BENCHMARK_CONNECT_LOGIN_TIMEOUT: int = 15
     SNOWFLAKE_BENCHMARK_CONNECT_NETWORK_TIMEOUT: int = 300
     SNOWFLAKE_BENCHMARK_CONNECT_SOCKET_TIMEOUT: int = 300
+
+    # Session-level statement timeout for benchmark queries (seconds).
+    # Overrides restrictive warehouse-level STATEMENT_TIMEOUT_IN_SECONDS settings.
+    # Set to 0 to use warehouse default. Useful in SPCS where warehouses may have
+    # aggressive timeouts that are too short for benchmark workloads.
+    SNOWFLAKE_BENCHMARK_STATEMENT_TIMEOUT: int = 600
 
     # Optional key-pair authentication
     SNOWFLAKE_PRIVATE_KEY_PATH: str = ""

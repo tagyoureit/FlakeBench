@@ -1,0 +1,55 @@
+# FlakeBench SPCS Service Specification
+#
+# This file defines the container service for Snowpark Container Services.
+# Update the image path to match your Snowflake account/repo before deploying.
+#
+# Deployment:
+#   1. Build and push image (see spcs/README.md)
+#   2. Run: CREATE SERVICE flakebench ... FROM SPECIFICATION $$<contents>$$;
+
+spec:
+  containers:
+  - name: flakebench
+    # Update this path to match your image repository:
+    # /<DATABASE>/<SCHEMA>/<REPOSITORY>/flakebench:latest
+    image: /SANDBOX/SPCS/FLAKEBENCH_REPO/flakebench:latest
+    env:
+      # Server binding (required for SPCS)
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8080"
+      APP_DEBUG: "false"
+      APP_RELOAD: "false"
+      # Snowflake settings (SNOWFLAKE_HOST is auto-injected by SPCS)
+      SNOWFLAKE_WAREHOUSE: "COMPUTE_WH"
+      SNOWFLAKE_DATABASE: "FLAKEBENCH"
+      SNOWFLAKE_SCHEMA: "PUBLIC"
+      SNOWFLAKE_ROLE: "FLAKEBENCH_ROLE"
+      # Results storage
+      RESULTS_DATABASE: "FLAKEBENCH"
+      RESULTS_SCHEMA: "TEST_RESULTS"
+      # Logging
+      LOG_LEVEL: "INFO"
+    resources:
+      requests:
+        memory: 2Gi
+        cpu: 1000m
+      limits:
+        memory: 4Gi
+        cpu: 2000m
+    readinessProbe:
+      port: 8080
+      path: /health
+    secrets:
+      # Optional: mount secrets for external connections (e.g., Postgres)
+      # - snowflakeSecret: FLAKEBENCH_SECRETS
+      #   secretKeyRef: POSTGRES_PASSWORD
+      #   envVarName: POSTGRES_PASSWORD
+  endpoints:
+  - name: flakebench-ui
+    port: 8080
+    public: true
+  # External Access Integrations for outbound connections
+  # Required for Test Connection and benchmarks against external targets
+  externalAccessIntegrations:
+  - SNOWFLAKE_EAI   # Allows connections to *.snowflakecomputing.com:443
+  - POSTGRES_EAI    # Allows connections to *.postgres.snowflake.app:5432

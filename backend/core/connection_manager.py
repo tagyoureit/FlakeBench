@@ -780,9 +780,27 @@ async def _test_snowflake_connection(
     import snowflake.connector
 
     try:
+        # Check for internal SPCS endpoint format - these don't support password auth
+        # Internal SPCS endpoints look like: zpb65314.prod3.us-west-2.aws.snowflakecomputing.com
+        # They only work with OAuth tokens, not username/password
+        account_lower = (conn.account or "").lower()
+        if ".prod" in account_lower and ".aws.snowflakecomputing.com" in account_lower:
+            return ConnectionTestResponse(
+                success=False,
+                message=(
+                    "This appears to be an internal SPCS endpoint (contains .prod#.*.aws). "
+                    "Internal endpoints only support OAuth authentication. "
+                    "Use your account identifier instead (e.g., 'MYORG-MYACCOUNT' or 'xy12345.us-west-2')."
+                ),
+            )
+
+        # Normalize account identifier: underscores should be hyphens in URLs
+        # e.g., SFSENORTHAMERICA-RGOLDIN_AWS1 -> SFSENORTHAMERICA-RGOLDIN-AWS1
+        normalized_account = (conn.account or "").replace("_", "-")
+
         # Build connection parameters
         connect_params: dict[str, Any] = {
-            "account": conn.account,
+            "account": normalized_account,
             "user": username,
             "login_timeout": 15,
             "network_timeout": 15,
@@ -940,9 +958,12 @@ async def get_connection_for_pool(connection_id: str) -> dict[str, Any] | None:
     # Get decrypted credentials
     credentials = await _get_credentials(connection_id) or {}
     
+    # Normalize account identifier: underscores should be hyphens in URLs
+    normalized_account = (conn.account or "").replace("_", "-") if conn.account else None
+    
     result: dict[str, Any] = {
         "connection_type": conn.connection_type.value,
-        "account": conn.account,
+        "account": normalized_account,
         "host": conn.host,
         "port": conn.port,
         "pgbouncer_port": conn.pgbouncer_port,

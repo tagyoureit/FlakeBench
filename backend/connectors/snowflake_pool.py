@@ -269,12 +269,39 @@ class SnowflakeConnectionPool:
                 )
                 raise PoolInitializationError(error_msg, errors=connection_errors)
 
+    def _get_spcs_oauth_token(self) -> Optional[str]:
+        """
+        Read OAuth token from SPCS token file.
+
+        In SPCS, Snowflake injects an OAuth token at /snowflake/session/token
+        that can be used for container-to-Snowflake authentication.
+
+        Returns:
+            OAuth token string if available, None otherwise.
+        """
+        token_path = "/snowflake/session/token"
+        try:
+            with open(token_path) as f:
+                return f.read().strip()
+        except (FileNotFoundError, PermissionError, OSError):
+            return None
+
     def _get_connection_params(self) -> Dict[str, Any]:
-        """Get connection parameters for snowflake.connector."""
+        """
+        Get connection parameters for snowflake.connector.
+
+        Supports dual-mode authentication:
+        - SPCS: OAuth token from /snowflake/session/token
+        - Standalone: Password or key-pair authentication
+        """
         session_params: Dict[str, Any] = {"QUERY_TAG": "flakebench"}
         session_params.update(self._session_parameters)
+
+        # Check if running in SPCS environment
+        is_spcs = settings.IS_SPCS
+        spcs_host = settings.SNOWFLAKE_HOST
+
         params = {
-            "account": self.account,
             "user": self.user,
             # We use `?` placeholders throughout the codebase. Snowflake's Python connector
             # defaults to `pyformat`, which can raise `TypeError: not all arguments converted
@@ -291,9 +318,40 @@ class SnowflakeConnectionPool:
             },
         }
 
-        if self.password:
-            params["password"] = self.password
-        # TODO: Add private key authentication support
+        if is_spcs and spcs_host:
+            # SPCS mode: use OAuth token authentication
+            oauth_token = self._get_spcs_oauth_token()
+            if oauth_token:
+                params["host"] = spcs_host
+                params["account"] = spcs_host.split(".")[0]  # Extract account from host
+                params["authenticator"] = "oauth"
+                params["token"] = oauth_token
+                # Remove user param - OAuth token already contains user identity
+                params.pop("user", None)
+                # Use SPCS service role, not stored connection role (OAuth token is for service account)
+                spcs_role = settings.SNOWFLAKE_ROLE
+                if spcs_role:
+                    params["role"] = spcs_role
+                    logger.info(
+                        f"[{self._pool_name}] Using SPCS OAuth authentication (host={spcs_host}, role={spcs_role})"
+                    )
+                else:
+                    logger.info(
+                        f"[{self._pool_name}] Using SPCS OAuth authentication (host={spcs_host})"
+                    )
+            else:
+                logger.warning(
+                    f"[{self._pool_name}] SPCS detected but no OAuth token found, falling back to password auth"
+                )
+                params["account"] = self.account
+                if self.password:
+                    params["password"] = self.password
+        else:
+            # Standalone mode: use password or key-pair authentication
+            params["account"] = self.account
+            if self.password:
+                params["password"] = self.password
+            # TODO: Add private key authentication support
 
         if self.warehouse:
             params["warehouse"] = self.warehouse
@@ -301,7 +359,8 @@ class SnowflakeConnectionPool:
             params["database"] = self.database
         if self.schema:
             params["schema"] = self.schema
-        if self.role:
+        # Only set role if not already set (SPCS OAuth sets role earlier)
+        if self.role and "role" not in params:
             params["role"] = self.role
 
         return params
@@ -906,6 +965,12 @@ def get_default_pool() -> SnowflakeConnectionPool:
             executor=_default_executor,
             owns_executor=False,
             max_parallel_creates=settings.SNOWFLAKE_POOL_MAX_PARALLEL_CREATES,
+            connect_login_timeout=settings.SNOWFLAKE_CONNECT_LOGIN_TIMEOUT,
+            connect_network_timeout=settings.SNOWFLAKE_CONNECT_NETWORK_TIMEOUT,
+            connect_socket_timeout=settings.SNOWFLAKE_CONNECT_SOCKET_TIMEOUT,
+            session_parameters={
+                "STATEMENT_TIMEOUT_IN_SECONDS": settings.SNOWFLAKE_STATEMENT_TIMEOUT,
+            },
             pool_name="control",
         )
 

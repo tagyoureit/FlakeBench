@@ -1876,6 +1876,22 @@ class OrchestratorService:
                 float(max_memory_seen_raw) if max_memory_seen_raw is not None else None,
             )
 
+        async def _get_dead_worker_errors() -> list[str]:
+            """Fetch distinct LAST_ERROR values from dead workers for this run."""
+            rows = await self._pool.execute_query(
+                f"""
+                SELECT DISTINCT LAST_ERROR
+                FROM {prefix}.WORKER_HEARTBEATS
+                WHERE RUN_ID = ?
+                  AND STATUS = 'DEAD'
+                  AND LAST_ERROR IS NOT NULL
+                  AND LAST_ERROR != ''
+                LIMIT 5
+                """,
+                params=[run_id],
+            )
+            return [str(row[0]) for row in rows] if rows else []
+
         def _apply_worker_health_snapshot(
             snapshot: tuple[int, int, int, int, int, Any, float | None, float | None]
         ) -> None:
@@ -2785,9 +2801,17 @@ class OrchestratorService:
                             "timestamp": datetime.now(UTC).isoformat(),
                         },
                     )
+                    # Fetch actual error messages from dead workers
+                    worker_errors = await _get_dead_worker_errors()
                     cancellation_msg = (
                         f"Worker failure: {dead_workers} worker(s) stopped responding"
                     )
+                    if worker_errors:
+                        # Include first error, truncated for readability
+                        first_error = worker_errors[0][:500]
+                        cancellation_msg += f". Error: {first_error}"
+                        if len(worker_errors) > 1:
+                            cancellation_msg += f" (+{len(worker_errors) - 1} more)"
                     await self._pool.execute_query(
                         f"""
                         UPDATE {prefix}.RUN_STATUS
@@ -3038,22 +3062,20 @@ class OrchestratorService:
                     and phase == "MEASUREMENT"
                     and target_qps_total
                 ):
-                    worker_cap = (
-                        int(max_workers)
-                        if max_workers is not None
-                        else int(worker_group_count)
-                    )
-                    max_total_threads = (
-                        int(effective_max_threads_per_worker) * int(worker_cap)
-                        if effective_max_threads_per_worker is not None
-                        else None
-                    )
-                    under_target = float(current_qps) < float(target_qps_total) * 0.98
-                    at_ceiling = (
-                        max_total_threads is not None
-                        and target_connections_total >= max_total_threads
-                        and (max_workers is None or worker_group_count >= max_workers)
-                    )
+                    # Can only be at ceiling if BOTH max_workers and
+                    # max_connections are explicitly bounded.  When max_workers
+                    # is None the system can always spawn more workers, so the
+                    # resource ceiling is effectively infinite.
+                    if max_workers is not None and effective_max_threads_per_worker is not None:
+                        max_total_threads = int(effective_max_threads_per_worker) * int(max_workers)
+                        under_target = float(current_qps) < float(target_qps_total) * 0.98
+                        at_ceiling = (
+                            target_connections_total >= max_total_threads
+                            and worker_group_count >= int(max_workers)
+                        )
+                    else:
+                        under_target = float(current_qps) < float(target_qps_total) * 0.98
+                        at_ceiling = False
                     if under_target and at_ceiling:
                         bounds_under_target_intervals += 1
                     else:

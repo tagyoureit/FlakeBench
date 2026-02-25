@@ -43,7 +43,7 @@
                 <div class="mt-1">
                     <strong>Table:</strong>
                     <span x-text="templateInfo ? (templateInfo.table_full_name || '') : ''"></span>
-                    (<span x-text="templateInfo ? (templateInfo.table_type || '') : ''"></span>)
+                    <span x-show="!isPostgresTable()">(<span x-text="templateInfo ? (templateInfo.table_type || '') : ''"></span>)</span>
                 </div>
                 <div class="mt-1" x-show="!isPostgresTable()">
                     <strong>Warehouse:</strong>
@@ -53,9 +53,9 @@
                     <strong>Database:</strong>
                     <span>Postgres</span>
                 </div>
-                <div class="mt-1" x-show="isPostgresTable() && postgresConnectionsDisplay()">
-                    <strong>Pool:</strong>
-                    <span x-text="postgresConnectionsDisplay()"></span>
+                <div class="mt-1" x-show="isPostgresTable()">
+                    <strong>Instance:</strong>
+                    <span x-text="templateInfo?.postgres_instance_size || '—'"></span>
                 </div>
                 <div class="mt-1" x-show="loadModeDisplay()">
                     <strong>Load Mode:</strong>

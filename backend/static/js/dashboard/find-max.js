@@ -183,12 +183,24 @@ window.DashboardMixins.findMax = {
     return { label: "Monitoring", icon: "◉", class: "text-gray-600" };
   },
 
+  // Ensure a timestamp string is treated as UTC.
+  // Snowflake TIMESTAMP_NTZ returns naive datetimes (no timezone suffix).
+  // Without a suffix, JavaScript's new Date() interprets them as local time,
+  // causing an offset equal to the local timezone (e.g. ~8h for Pacific).
+  _ensureUTC(ts) {
+    if (!ts) return ts;
+    // Already has timezone info (+00:00, Z, +05:30, etc.)
+    if (/[Zz]$/.test(ts) || /[+-]\d{2}:\d{2}$/.test(ts)) return ts;
+    // Append Z to treat as UTC
+    return ts + 'Z';
+  },
+
   // Format time ago for last adjustment
   qpsLastAdjustmentTimeAgo() {
     const step = this.qpsLastStepObject();
     if (!step || !step.timestamp) return null;
 
-    const ts = new Date(step.timestamp).getTime();
+    const ts = new Date(this._ensureUTC(step.timestamp)).getTime();
     if (!Number.isFinite(ts)) return null;
 
     const diffMs = Date.now() - ts;
@@ -222,7 +234,7 @@ window.DashboardMixins.findMax = {
   // Format a timestamp as "Xs ago", "Xm ago", etc.
   formatTimeAgo(timestamp) {
     if (!timestamp) return '—';
-    const ts = new Date(timestamp).getTime();
+    const ts = new Date(this._ensureUTC(timestamp)).getTime();
     if (!Number.isFinite(ts)) return '—';
     
     const diffMs = Date.now() - ts;
@@ -238,7 +250,7 @@ window.DashboardMixins.findMax = {
   // Format a timestamp as readable date/time (for history mode)
   formatTimestamp(timestamp) {
     if (!timestamp) return '—';
-    const d = new Date(timestamp);
+    const d = new Date(this._ensureUTC(timestamp));
     if (isNaN(d.getTime())) return '—';
     
     // Format as "Jan 15, 10:30:45"

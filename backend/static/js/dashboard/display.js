@@ -254,9 +254,20 @@ window.DashboardMixins.display = {
   durationDisplay() {
     const info = this.templateInfo;
     if (!info) return "";
+
+    const warmup = Number(info.warmup_seconds || 0);
+    const loadMode = String(info.load_mode || "CONCURRENCY").toUpperCase();
+
+    // Find Max mode is not time-bound for measurement phase
+    if (loadMode === "FIND_MAX_CONCURRENCY") {
+      if (warmup > 0) {
+        return `${warmup}s warmup, then indefinite`;
+      }
+      return "Indefinite";
+    }
+
     // duration_seconds is the RUN time (measurement period), not total
     const runDuration = Number(info.duration_seconds || 0);
-    const warmup = Number(info.warmup_seconds || 0);
     if (runDuration <= 0) return "";
     
     // Calculate total = warmup + run

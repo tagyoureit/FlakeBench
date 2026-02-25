@@ -83,21 +83,41 @@ SNOWFLAKE_USER=your_username
 SNOWFLAKE_PASSWORD=your_password
 SNOWFLAKE_WAREHOUSE=COMPUTE_WH
 SNOWFLAKE_DATABASE=FLAKEBENCH
-SNOWFLAKE_SCHEMA=PUBLIC
-SNOWFLAKE_ROLE=ACCOUNTADMIN
+SNOWFLAKE_SCHEMA=TEST_RESULTS
+SNOWFLAKE_ROLE=FLAKEBENCH_ROLE
 ```
+
+> **Note:** Using ACCOUNTADMIN is not recommended. Run `sql/setup_role.sql` to
+> create a dedicated FLAKEBENCH_ROLE with minimal privileges (see Step 3).
 
 These credentials are used for the control plane (results storage, schema
 management, connection table). Benchmark target connections are configured via
 the Settings page.
 
-### 3. Initialize database schema
+### 3. Create the FlakeBench role
+
+Using ACCOUNTADMIN is an anti-pattern. Run the role setup script to create a
+dedicated role with minimal privileges:
+
+```bash
+# In Snowflake (via SnowSQL, Snowsight, or snow CLI)
+# Review and customize sql/setup_role.sql, then execute it
+snow sql -f sql/setup_role.sql
+```
+
+The script creates `FLAKEBENCH_ROLE` with permissions for:
+- Control plane tables in `FLAKEBENCH.TEST_RESULTS`
+- Warehouse usage for `COMPUTE_WH`
+
+Edit the script to add grants for your benchmark databases/warehouses.
+
+### 4. Initialize database schema
 
 ```bash
 uv run python -m backend.setup_schema
 ```
 
-### 4. Start the application
+### 5. Start the application
 
 ```bash
 # Development mode (with auto-reload)
@@ -107,11 +127,11 @@ uv run uvicorn backend.main:app --reload [--host 127.0.0.1 --port 8000]
 uv run uvicorn backend.main:app [--host 0.0.0.0 --port 8000]
 ```
 
-### 5. Open your browser
+### 6. Open your browser
 
 Navigate to: <http://localhost:8000>
 
-### 6. Verify it works
+### 7. Verify it works
 
 ```bash
 curl http://localhost:8000/health

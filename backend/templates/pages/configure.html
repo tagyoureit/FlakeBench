@@ -2546,7 +2546,8 @@ function testConfiguration() {
                 await this.onSchemaChanged(preserveSelection);
             } catch (e) {
                 console.warn('Failed to load schemas:', e);
-                window.toast.error('Failed to load schemas: ' + (e?.message || e));
+                const msg = e?.message || (typeof e === 'string' ? e : 'Unknown error');
+                window.toast.error('Failed to load schemas: ' + msg);
                 this.availableSchemas = [];
                 this.availableObjects = [];
                 if (!preserveSelection) {
@@ -3465,25 +3466,37 @@ function testConfiguration() {
                         window.toast.success(successMessage);
                     }
                 } else {
-                    const error = await response.json().catch(() => ({}));
-                    const detail = error && error.detail ? error.detail : null;
-                    
-                    // Check for PgBouncer-related errors and show helpful message with docs link
-                    if (detail && (detail.error === 'pgbouncer_extension_missing' || detail.error === 'pgbouncer_privileged_user_not_allowed')) {
-                        window.toast.error(detail.message);
-                        if (detail.docs_url) {
-                            window.toast.info(`See docs: ${detail.docs_url}`, { timeoutMs: 15000 });
+                    // Try to parse JSON error, fall back to text
+                    let errorMsg = `HTTP ${response.status}`;
+                    try {
+                        const text = await response.text();
+                        try {
+                            const error = JSON.parse(text);
+                            const detail = error?.detail;
+                            // Check for PgBouncer-related errors and show helpful message with docs link
+                            if (detail && (detail.error === 'pgbouncer_extension_missing' || detail.error === 'pgbouncer_privileged_user_not_allowed')) {
+                                window.toast.error(detail.message);
+                                if (detail.docs_url) {
+                                    window.toast.info(`See docs: ${detail.docs_url}`, { timeoutMs: 15000 });
+                                }
+                                return;
+                            }
+                            errorMsg = detail?.message || detail?.detail || (typeof detail === 'string' ? detail : null) || error?.message || errorMsg;
+                        } catch {
+                            // Not JSON - use text directly (truncated)
+                            if (text && text.trim()) {
+                                errorMsg = text.length > 200 ? text.substring(0, 200) + '...' : text;
+                            }
                         }
-                    } else {
-                        window.toast.error(
-                            'Error saving template: ' +
-                                (detail?.message || detail?.detail || detail || 'Unknown error'),
-                        );
+                    } catch {
+                        // Couldn't read response body
                     }
+                    window.toast.error(`Error saving template (${response.status}): ${errorMsg}`);
                 }
             } catch (error) {
                 console.error('Failed to save template:', error);
-                window.toast.error('Failed to save template: ' + (error?.message || error));
+                const msg = error?.message || (typeof error === 'string' ? error : 'Network error');
+                window.toast.error('Failed to save template: ' + msg);
             } finally {
                 this.isSaving = false;
             }

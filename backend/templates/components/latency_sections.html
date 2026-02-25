@@ -777,7 +777,46 @@
                     </td>
                 </tr>
             </template>
-            <tr x-show="(templateInfo?.generic_sql_count || 0) > 0 && Object.keys(templateInfo?.generic_label_read_counts || {}).length === 0 && Object.keys(templateInfo?.generic_label_write_counts || {}).length === 0">
+            <!-- Generic Read row for Postgres/unlabeled generic reads -->
+            <!-- Check both generic_read_count (live dashboard) and app_generic_read_count (history API) -->
+            <tr x-show="((templateInfo?.generic_read_count || templateInfo?.app_generic_read_count || 0) > 0) && Object.keys(templateInfo?.generic_label_read_counts || templateInfo?.app_generic_label_read_counts || {}).length === 0">
+                <td class="p-2 border-b border-gray-200 font-medium">Generic Read</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.generic_read_count || templateInfo?.app_generic_read_count || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p50_latency_ms') || detailLatency('generic_sql_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p95_latency_ms') || detailLatency('generic_sql_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_p99_latency_ms') || detailLatency('generic_sql_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_min_latency_ms') || detailLatency('generic_sql_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('read_max_latency_ms') || detailLatency('generic_sql_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('GENERIC_SQL')}&operation_type=READ` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+            <!-- Generic Write row for Postgres/unlabeled generic writes -->
+            <!-- Check both generic_write_count (live dashboard) and app_generic_write_count (history API) -->
+            <tr x-show="((templateInfo?.generic_write_count || templateInfo?.app_generic_write_count || 0) > 0) && Object.keys(templateInfo?.generic_label_write_counts || templateInfo?.app_generic_label_write_counts || {}).length === 0">
+                <td class="p-2 border-b border-gray-200 font-medium">Generic Write</td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.generic_write_count || templateInfo?.app_generic_write_count || 0)"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p50_latency_ms') || detailLatency('generic_sql_p50_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p95_latency_ms') || detailLatency('generic_sql_p95_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_p99_latency_ms') || detailLatency('generic_sql_p99_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_min_latency_ms') || detailLatency('generic_sql_min_latency_ms'))"></td>
+                <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('write_max_latency_ms') || detailLatency('generic_sql_max_latency_ms'))"></td>
+                <td x-show="mode === 'history'" class="p-2 border-b border-gray-200">
+                    <a
+                        class="btn btn-secondary btn-sm"
+                        :href="testId ? `/dashboard/history/${testId}/data?kinds=${encodeURIComponent('GENERIC_SQL')}&operation_type=WRITE` : '#'"
+                    >
+                        Go to data
+                    </a>
+                </td>
+            </tr>
+            <!-- Legacy Generic SQL row (fallback for mixed/unknown operation types) -->
+            <tr x-show="(templateInfo?.generic_sql_count || 0) > 0 && (templateInfo?.generic_read_count || templateInfo?.app_generic_read_count || 0) === 0 && (templateInfo?.generic_write_count || templateInfo?.app_generic_write_count || 0) === 0 && Object.keys(templateInfo?.generic_label_read_counts || templateInfo?.app_generic_label_read_counts || {}).length === 0 && Object.keys(templateInfo?.generic_label_write_counts || templateInfo?.app_generic_label_write_counts || {}).length === 0">
                 <td class="p-2 border-b border-gray-200 font-medium">Generic SQL</td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatCompact(templateInfo?.generic_sql_count || 0)"></td>
                 <td class="p-2 text-right border-b border-gray-200" x-text="formatMs(detailLatency('generic_sql_p50_latency_ms'))"></td>

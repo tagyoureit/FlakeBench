@@ -738,6 +738,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 session_parameters={
                     "USE_CACHED_RESULT": "TRUE" if use_cached_result else "FALSE",
                     "QUERY_TAG": benchmark_query_tag_warmup,
+                    "STATEMENT_TIMEOUT_IN_SECONDS": settings.SNOWFLAKE_BENCHMARK_STATEMENT_TIMEOUT,
                 },
                 pool_name="benchmark",
             )
@@ -764,6 +765,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 session_parameters={
                     "USE_CACHED_RESULT": "TRUE" if use_cached_result else "FALSE",
                     "QUERY_TAG": benchmark_query_tag_warmup,
+                    "STATEMENT_TIMEOUT_IN_SECONDS": settings.SNOWFLAKE_BENCHMARK_STATEMENT_TIMEOUT,
                 },
                 pool_name="benchmark",
             )
