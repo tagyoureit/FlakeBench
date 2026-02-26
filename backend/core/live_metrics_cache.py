@@ -7,12 +7,15 @@ Stores recent worker metrics snapshots in memory for low-latency WebSocket updat
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from backend.config import settings
 from backend.models.metrics import Metrics
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -210,9 +213,12 @@ def _aggregate_workers(
     phases: list[str] = []
     app_ops_list: list[dict[str, Any]] = []
     sf_bench_list: list[dict[str, Any]] = []
+    pg_bench_list: list[dict[str, Any]] = []
     resources_list: list[dict[str, Any]] = []
     find_max_controller: dict[str, Any] | None = None
     qps_controller: dict[str, Any] | None = None
+    # Per-kind latencies for SLO evaluation (aggregate across workers)
+    latencies_by_kind_list: list[dict[str, dict[str, Any]]] = []
     # NOTE: Warehouse MCW data (started_clusters) is NOT aggregated from workers.
     # It's polled by the orchestrator only and fetched from WAREHOUSE_POLL_SNAPSHOTS
     # at the API layer. See main.py where RUN_UPDATE payloads are built.
@@ -273,6 +279,9 @@ def _aggregate_workers(
         sf_bench = custom_metrics.get("sf_bench")
         if isinstance(sf_bench, dict):
             sf_bench_list.append(sf_bench)
+        pg_bench = custom_metrics.get("pg_bench")
+        if isinstance(pg_bench, dict):
+            pg_bench_list.append(pg_bench)
         # NOTE: Warehouse MCW data is NOT collected from workers - see comment above.
         resources = custom_metrics.get("resources")
         if isinstance(resources, dict):
@@ -293,6 +302,10 @@ def _aggregate_workers(
             custom_metrics.get("qps_controller"), dict
         ):
             qps_controller = custom_metrics.get("qps_controller")
+
+        # Collect per-kind latencies for SLO aggregation
+        if include_for_metrics and metrics.latencies_by_kind:
+            latencies_by_kind_list.append(metrics.latencies_by_kind)
 
         last_dt = metrics.timestamp if isinstance(metrics.timestamp, datetime) else None
         age_seconds = (now - snapshot.received_at).total_seconds()
@@ -330,9 +343,39 @@ def _aggregate_workers(
     p99_latency = max(p99_vals) if p99_vals else 0.0
     avg_latency = sum(avg_vals) / len(avg_vals) if avg_vals else 0.0
 
+    # Aggregate per-kind latencies across workers (use max for p95/p99, sum for counts)
+    latency_by_kind_agg: dict[str, dict[str, Any]] = {}
+    for kind_name in ["POINT_LOOKUP", "RANGE_SCAN", "INSERT", "UPDATE", "GENERIC_SQL"]:
+        kind_p50_vals: list[float] = []
+        kind_p95_vals: list[float] = []
+        kind_p99_vals: list[float] = []
+        kind_avg_vals: list[float] = []
+        kind_count = 0
+        for lbk in latencies_by_kind_list:
+            if kind_name in lbk:
+                kind_data = lbk[kind_name]
+                kind_count += int(kind_data.get("count", 0))
+                if kind_data.get("p50"):
+                    kind_p50_vals.append(float(kind_data["p50"]))
+                if kind_data.get("p95"):
+                    kind_p95_vals.append(float(kind_data["p95"]))
+                if kind_data.get("p99"):
+                    kind_p99_vals.append(float(kind_data["p99"]))
+                if kind_data.get("avg"):
+                    kind_avg_vals.append(float(kind_data["avg"]))
+        if kind_count > 0:
+            latency_by_kind_agg[kind_name] = {
+                "count": kind_count,
+                "p50": sum(kind_p50_vals) / len(kind_p50_vals) if kind_p50_vals else 0.0,
+                "p95": max(kind_p95_vals) if kind_p95_vals else 0.0,
+                "p99": max(kind_p99_vals) if kind_p99_vals else 0.0,
+                "avg": sum(kind_avg_vals) / len(kind_avg_vals) if kind_avg_vals else 0.0,
+            }
+
     custom_metrics_out = {
         "app_ops_breakdown": _sum_dicts(app_ops_list),
         "sf_bench": _sum_dicts(sf_bench_list),
+        "pg_bench": _sum_dicts(pg_bench_list),
         "resources": _avg_dicts(resources_list),
         # NOTE: warehouse is NOT included here - it's fetched from WAREHOUSE_POLL_SNAPSHOTS
         # at the API layer (main.py) since it's orchestrator-level data, not worker-level.
@@ -437,6 +480,7 @@ def _aggregate_workers(
                 "p99": float(p99_latency),
                 "avg": float(avg_latency),
             },
+            "latency_by_kind": latency_by_kind_agg,
             "latency_aggregation_method": "slowest_worker_approximation",
             "errors": {"count": error_count, "rate": float(error_rate)},
             "connections": {

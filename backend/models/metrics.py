@@ -148,6 +148,11 @@ class Metrics(BaseModel):
     # Custom metrics
     custom_metrics: Optional[Dict[str, Any]] = Field(None, description="Custom metrics")
 
+    # Per-kind latencies for SLO evaluation (populated from MetricsCollector)
+    latencies_by_kind: Optional[Dict[str, Dict[str, Any]]] = Field(
+        None, description="Latencies by query kind (POINT_LOOKUP, RANGE_SCAN, etc.)"
+    )
+
     class Config:
         json_encoders = {
             datetime: lambda v: v.isoformat(),
@@ -194,6 +199,8 @@ class Metrics(BaseModel):
                 "p99": self.overall_latency.p99,
                 "avg": self.overall_latency.avg,
             },
+            # Per-kind latencies for SLO evaluation
+            "latency_by_kind": self.latencies_by_kind or {},
             "throughput": {
                 "bytes_per_sec": self.bytes_per_second,
                 "rows_per_sec": self.rows_per_second,

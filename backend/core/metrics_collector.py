@@ -31,6 +31,16 @@ class OperationType(str, Enum):
     DELETE = "delete"
 
 
+class QueryKind(str, Enum):
+    """Query kind for per-kind latency tracking (maps to SLO categories)."""
+
+    POINT_LOOKUP = "POINT_LOOKUP"
+    RANGE_SCAN = "RANGE_SCAN"
+    INSERT = "INSERT"
+    UPDATE = "UPDATE"
+    GENERIC_SQL = "GENERIC_SQL"
+
+
 class OperationResult:
     """Result of a single operation."""
 
@@ -42,6 +52,7 @@ class OperationResult:
         rows_affected: int = 0,
         bytes_transferred: int = 0,
         timestamp: Optional[datetime] = None,
+        query_kind: Optional[QueryKind] = None,
     ):
         self.operation_type = operation_type
         self.success = success
@@ -49,6 +60,7 @@ class OperationResult:
         self.rows_affected = rows_affected
         self.bytes_transferred = bytes_transferred
         self.timestamp = timestamp or datetime.now(UTC)
+        self.query_kind = query_kind
 
 
 class MetricsCollector:
@@ -88,6 +100,19 @@ class MetricsCollector:
         self._write_latencies: deque = deque(maxlen=window_size)
         self._update_latencies: deque = deque(maxlen=window_size)
         self._delete_latencies: deque = deque(maxlen=window_size)
+
+        # Per-kind latency tracking (for SLO evaluation)
+        # Maps QueryKind -> deque of latencies
+        self._latencies_by_kind: Dict[str, deque] = {
+            QueryKind.POINT_LOOKUP.value: deque(maxlen=window_size),
+            QueryKind.RANGE_SCAN.value: deque(maxlen=window_size),
+            QueryKind.INSERT.value: deque(maxlen=window_size),
+            QueryKind.UPDATE.value: deque(maxlen=window_size),
+            QueryKind.GENERIC_SQL.value: deque(maxlen=window_size),
+        }
+        # Per-kind operation counts and error counts
+        self._counts_by_kind: Dict[str, int] = {k: 0 for k in self._latencies_by_kind}
+        self._errors_by_kind: Dict[str, int] = {k: 0 for k in self._latencies_by_kind}
 
         # Time-series snapshots
         self.snapshots: List[MetricsSnapshot] = []
@@ -137,6 +162,20 @@ class MetricsCollector:
 
             # Store latency for percentile calculation
             self._operation_history.append(result.latency_ms)
+
+            # Track per-kind latencies for SLO evaluation
+            if result.query_kind is not None:
+                kind_key = (
+                    result.query_kind.value
+                    if isinstance(result.query_kind, QueryKind)
+                    else str(result.query_kind).upper()
+                )
+                if kind_key in self._latencies_by_kind:
+                    self._counts_by_kind[kind_key] += 1
+                    if result.success:
+                        self._latencies_by_kind[kind_key].append(result.latency_ms)
+                    else:
+                        self._errors_by_kind[kind_key] += 1
 
             # Update operation-specific metrics
             if result.operation_type == OperationType.READ:
@@ -220,6 +259,9 @@ class MetricsCollector:
                 self.metrics.delete_metrics.latency = self._calculate_percentiles(
                     list(self._delete_latencies)
                 )
+
+            # Calculate per-kind latencies for SLO evaluation (no lock needed, we're inside one)
+            self.metrics.latencies_by_kind = self._get_latencies_by_kind_unlocked()
 
             # Calculate current QPS (since last snapshot)
             if self._last_snapshot_time:
@@ -312,6 +354,48 @@ class MetricsCollector:
             avg=sum(sorted_latencies) / n,
         )
 
+    def _get_latencies_by_kind_unlocked(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get per-kind latency percentiles (internal, no lock).
+
+        Must be called while holding _metrics_lock.
+
+        Returns:
+            Dict mapping query kind to latency stats
+        """
+        result: Dict[str, Dict[str, Any]] = {}
+        for kind_key, latency_deque in self._latencies_by_kind.items():
+            count = self._counts_by_kind.get(kind_key, 0)
+            error_count = self._errors_by_kind.get(kind_key, 0)
+            error_rate_pct = (error_count / count * 100) if count > 0 else 0.0
+
+            if latency_deque:
+                percentiles = self._calculate_percentiles(list(latency_deque))
+                result[kind_key] = {
+                    "p50": percentiles.p50,
+                    "p95": percentiles.p95,
+                    "p99": percentiles.p99,
+                    "avg": percentiles.avg,
+                    "min": percentiles.min,
+                    "max": percentiles.max,
+                    "count": count,
+                    "error_count": error_count,
+                    "error_rate_pct": error_rate_pct,
+                }
+            else:
+                result[kind_key] = {
+                    "p50": None,
+                    "p95": None,
+                    "p99": None,
+                    "avg": None,
+                    "min": None,
+                    "max": None,
+                    "count": count,
+                    "error_count": error_count,
+                    "error_rate_pct": error_rate_pct,
+                }
+        return result
+
     async def create_snapshot(self) -> MetricsSnapshot:
         """
         Create a snapshot of current metrics.
@@ -401,6 +485,54 @@ class MetricsCollector:
             "snapshots_collected": len(self.snapshots),
         }
 
+    def get_latencies_by_kind(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get per-kind latency percentiles for SLO evaluation.
+
+        Returns:
+            Dict mapping query kind to latency stats:
+            {
+                "POINT_LOOKUP": {
+                    "p50": 12.5, "p95": 45.2, "p99": 78.1,
+                    "count": 1000, "error_count": 5, "error_rate_pct": 0.5
+                },
+                ...
+            }
+        """
+        result: Dict[str, Dict[str, Any]] = {}
+        for kind_key, latency_deque in self._latencies_by_kind.items():
+            count = self._counts_by_kind.get(kind_key, 0)
+            error_count = self._errors_by_kind.get(kind_key, 0)
+            error_rate_pct = (error_count / count * 100) if count > 0 else 0.0
+
+            if latency_deque:
+                percentiles = self._calculate_percentiles(list(latency_deque))
+                result[kind_key] = {
+                    "p50": percentiles.p50,
+                    "p95": percentiles.p95,
+                    "p99": percentiles.p99,
+                    "avg": percentiles.avg,
+                    "min": percentiles.min,
+                    "max": percentiles.max,
+                    "count": count,
+                    "error_count": error_count,
+                    "error_rate_pct": error_rate_pct,
+                }
+            else:
+                # No latencies recorded yet for this kind
+                result[kind_key] = {
+                    "p50": None,
+                    "p95": None,
+                    "p99": None,
+                    "avg": None,
+                    "min": None,
+                    "max": None,
+                    "count": count,
+                    "error_count": error_count,
+                    "error_rate_pct": error_rate_pct,
+                }
+        return result
+
     async def reset(self):
         """Reset all metrics (useful for warmup)."""
         async with self._metrics_lock:
@@ -411,6 +543,11 @@ class MetricsCollector:
             self._write_latencies.clear()
             self._update_latencies.clear()
             self._delete_latencies.clear()
+            # Reset per-kind tracking
+            for kind_key in self._latencies_by_kind:
+                self._latencies_by_kind[kind_key].clear()
+                self._counts_by_kind[kind_key] = 0
+                self._errors_by_kind[kind_key] = 0
             self.snapshots.clear()
             self.start_time = datetime.now(UTC)
             self._last_snapshot_time = None

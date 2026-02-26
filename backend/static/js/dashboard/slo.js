@@ -78,6 +78,17 @@ window.DashboardMixins.slo = {
       return this.stepSloObservedP95Ms(kind, effectiveStep);
     }
 
+    // First check real-time latencyByKind from WebSocket
+    const kindUpper = kind != null ? String(kind).toUpperCase() : "";
+    if (this.latencyByKind && typeof this.latencyByKind === "object") {
+      const liveData = this.latencyByKind[kindUpper];
+      if (liveData && typeof liveData === "object") {
+        const n = Number(liveData.p95 || 0);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+    }
+
+    // Fall back to templateInfo (post-processing results)
     const info = this.templateInfo;
     if (!info) return null;
     const k = this._kindKey(kind);
@@ -100,6 +111,17 @@ window.DashboardMixins.slo = {
       return this.stepSloObservedP99Ms(kind, effectiveStep);
     }
 
+    // First check real-time latencyByKind from WebSocket
+    const kindUpper = kind != null ? String(kind).toUpperCase() : "";
+    if (this.latencyByKind && typeof this.latencyByKind === "object") {
+      const liveData = this.latencyByKind[kindUpper];
+      if (liveData && typeof liveData === "object") {
+        const n = Number(liveData.p99 || 0);
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+    }
+
+    // Fall back to templateInfo (post-processing results)
     const info = this.templateInfo;
     if (!info) return null;
     const k = this._kindKey(kind);

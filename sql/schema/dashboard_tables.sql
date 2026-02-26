@@ -637,10 +637,11 @@ SELECT
 FROM TEST_RESULTS
 WHERE 
     STATUS = 'COMPLETED'
-    AND TEST_CONFIG:template_id IS NOT NULL;
+    AND TEST_CONFIG:template_id IS NOT NULL
+    AND (RUN_ID IS NULL OR RUN_ID = TEST_ID);  -- Only parent/single runs, not child workers
 
 COMMENT ON VIEW V_TEMPLATE_RUNS IS 
-'Detailed run list per template for analysis page. Use with template_id filter.';
+'Detailed run list per template for analysis page. Only includes parent/single runs, not child workers. Use with template_id filter.';
 
 
 -- =============================================================================

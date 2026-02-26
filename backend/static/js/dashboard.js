@@ -1347,6 +1347,11 @@ function dashboard(opts) {
           this.metrics.p95_latency = latency.p95 || 0;
           this.metrics.p99_latency = latency.p99 || 0;
         }
+        // Per-kind latencies for real-time SLO evaluation
+        const latencyByKind = payload.latency_by_kind;
+        if (latencyByKind && typeof latencyByKind === "object") {
+          this.latencyByKind = latencyByKind;
+        }
         if (errors) {
           this.metrics.error_rate = (errors.rate || 0) * 100.0;
           this.metrics.total_errors = errors.count || 0;
@@ -1372,12 +1377,12 @@ function dashboard(opts) {
               const avgRatio = this._saturationSamples.reduce((sum, s) => {
                 return sum + (s.target > 0 ? s.inflight / s.target : 1);
               }, 0) / this._saturationSamples.length;
-              // If average in-flight is < 70% of target for 5+ seconds, worker is saturated
+              // If average in-flight is < 70% of target for 5+ seconds, backend is saturated
               if (avgRatio < 0.7) {
                 this._saturationWarningShown = true;
                 if (window.toast && typeof window.toast.warning === "function") {
                   window.toast.warning(
-                    `Worker saturation detected: in-flight (${inflight}) is only ${Math.round(avgRatio * 100)}% of target (${target}). Consider using more workers with fewer threads each.`
+                    `Backend saturation detected: in-flight (${inflight}) is only ${Math.round(avgRatio * 100)}% of target (${target}). Consider reducing total thread count or scaling the database.`
                   );
                 }
               }

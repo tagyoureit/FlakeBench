@@ -118,6 +118,8 @@ window.DashboardMixins.state = function (opts) {
     latencyView: "end_to_end", // 'end_to_end' | 'sf_execution'
     latencyViewUserSelected: false,
     latencyAggregationMethod: null,
+    // Per-kind latencies from WebSocket for real-time SLO evaluation
+    latencyByKind: {},
     didRefreshAfterComplete: false,
     // NOTE: Do not store Chart.js instances on Alpine reactive state.
     // Chart objects have circular refs/getters; Alpine Proxy wrapping can cause

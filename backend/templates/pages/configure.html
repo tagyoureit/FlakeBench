@@ -36,7 +36,7 @@
             <span class="text-blue-600 font-semibold">Viewing Template:</span>
             <span class="font-medium" x-text="loadedTemplate?.template_name"></span>
             <span x-show="hasResults" class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
-                <span x-text="runsTotal || loadedTemplate?.usage_count || 0"></span> run(s)
+                <span x-text="(runsTotal || loadedTemplate?.usage_count || 0) + ' run(s)'"></span>
             </span>
         </div>
         <div class="flex items-center gap-2">
@@ -106,7 +106,7 @@
         
         <div x-show="hasResults" class="alert alert-warning mt-4">
             <strong>⚠️ Template has test results</strong><br>
-            This template has been used <span x-text="loadedTemplate?.usage_count"></span> time(s) and can no longer be edited. 
+            This template has been used <span x-text="runsTotal || loadedTemplate?.usage_count || 0"></span> time(s) and can no longer be edited. 
             You can <strong>copy</strong> it to create an editable version or <strong>delete</strong> it (which will remove all test results).
         </div>
 

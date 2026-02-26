@@ -4543,12 +4543,20 @@ class TestExecutor:
                     pg_override = getattr(self, "_postgres_pool_override", None)
                     if pg_override is not None and self._is_postgres_pool(pg_override):
                         self._postgres_pool_for_polling = pg_override
+                        logger.info(
+                            "[Worker %s] pg_stat_activity: using _postgres_pool_override",
+                            self._worker_id,
+                        )
                     else:
                         # Fall back to discovering from table managers.
                         for manager in self.table_managers:
                             pool = getattr(manager, "pool", None)
                             if pool is not None and self._is_postgres_pool(pool):
                                 self._postgres_pool_for_polling = pool
+                                logger.info(
+                                    "[Worker %s] pg_stat_activity: using pool from table_managers",
+                                    self._worker_id,
+                                )
                                 break
 
                 if self._postgres_pool_for_polling is not None:
@@ -4632,6 +4640,12 @@ class TestExecutor:
                                         "idle": idle,
                                         "waiting": waiting,  # Postgres-specific: queries waiting on locks
                                     }
+                                    logger.debug(
+                                        "[Worker %s] pg_stat_activity: active=%d tagged=%d",
+                                        self._worker_id,
+                                        active,
+                                        active_tagged,
+                                    )
                             except Exception as pg_exc:
                                 logger.debug(
                                     "pg_stat_activity poll failed: %s", pg_exc
@@ -4985,6 +4999,35 @@ class TestExecutor:
                         self.metrics.overall_latency.avg = float(
                             sum(latencies) / len(latencies)
                         )
+
+                    # Populate per-kind latencies for real-time SLO evaluation
+                    def kind_pct(vals: list[float], p: float) -> float:
+                        if not vals:
+                            return 0.0
+                        xs = sorted(vals)
+                        k = int(round((p / 100.0) * (len(xs) - 1)))
+                        k = max(0, min(k, len(xs) - 1))
+                        return float(xs[k])
+
+                    self.metrics.latencies_by_kind = {}
+                    for kind_name in [
+                        "POINT_LOOKUP",
+                        "RANGE_SCAN",
+                        "INSERT",
+                        "UPDATE",
+                        "GENERIC_SQL",
+                    ]:
+                        kind_vals = self._lat_by_kind_ms.get(kind_name, [])
+                        if kind_vals:
+                            self.metrics.latencies_by_kind[kind_name] = {
+                                "count": len(kind_vals),
+                                "p50": kind_pct(kind_vals, 50),
+                                "p95": kind_pct(kind_vals, 95),
+                                "p99": kind_pct(kind_vals, 99),
+                                "avg": sum(kind_vals) / len(kind_vals),
+                                "min": min(kind_vals),
+                                "max": max(kind_vals),
+                            }
 
                 # Invoke callback if set
                 if self.metrics_callback:
