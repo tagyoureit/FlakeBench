@@ -11,7 +11,7 @@
 -- automatically when TEST_RESULTS receives new data.
 -- =============================================================================
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 -- =============================================================================

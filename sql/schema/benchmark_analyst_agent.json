@@ -71,7 +71,7 @@
   ],
   "tool_resources": {
     "query_benchmark_data": {
-      "semantic_view": "UNISTORE_BENCHMARK.TEST_RESULTS.BENCHMARK_ANALYTICS",
+      "semantic_view": "FLAKEBENCH.TEST_RESULTS.BENCHMARK_ANALYTICS",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "COMPUTE_WH",
@@ -80,7 +80,7 @@
     },
     "statistical_analysis": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.STATISTICAL_ANALYSIS",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.STATISTICAL_ANALYSIS",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "COMPUTE_WH",
@@ -89,7 +89,7 @@
     },
     "cost_calculator": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.COST_CALCULATOR",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.COST_CALCULATOR",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "COMPUTE_WH",

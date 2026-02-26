@@ -604,7 +604,7 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     # and loading via PUT + COPY INTO during the PROCESSING phase.
     metrics_logger = FileBasedMetricsLogger(
         test_id=str(executor.test_id),
-        worker_id=cfg.worker_group_id,
+        worker_id=cfg.worker_id,
         results_prefix=results_prefix,
         run_id=cfg.run_id,
         worker_group_id=cfg.worker_group_id,

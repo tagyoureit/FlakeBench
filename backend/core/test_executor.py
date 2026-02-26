@@ -4539,11 +4539,17 @@ class TestExecutor:
                 # Similar to Snowflake polling but uses Postgres-native views.
                 # Cache the Postgres pool reference on first discovery.
                 if self._postgres_pool_for_polling is None:
-                    for manager in self.table_managers:
-                        pool = getattr(manager, "pool", None)
-                        if pool is not None and self._is_postgres_pool(pool):
-                            self._postgres_pool_for_polling = pool
-                            break
+                    # First check _postgres_pool_override (set by distributed workers).
+                    pg_override = getattr(self, "_postgres_pool_override", None)
+                    if pg_override is not None and self._is_postgres_pool(pg_override):
+                        self._postgres_pool_for_polling = pg_override
+                    else:
+                        # Fall back to discovering from table managers.
+                        for manager in self.table_managers:
+                            pool = getattr(manager, "pool", None)
+                            if pool is not None and self._is_postgres_pool(pool):
+                                self._postgres_pool_for_polling = pool
+                                break
 
                 if self._postgres_pool_for_polling is not None:
                     pg_last = self._last_postgres_query_status_mono
@@ -4626,8 +4632,10 @@ class TestExecutor:
                                         "idle": idle,
                                         "waiting": waiting,  # Postgres-specific: queries waiting on locks
                                     }
-                            except Exception:
-                                pass
+                            except Exception as pg_exc:
+                                logger.debug(
+                                    "pg_stat_activity poll failed: %s", pg_exc
+                                )
 
                         self._last_postgres_query_status_mono = now_mono
                         self._postgres_query_status_task = asyncio.create_task(

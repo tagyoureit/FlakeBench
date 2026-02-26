@@ -4,11 +4,11 @@
 -- This stored procedure wraps AI_COMPLETE with mode-specific prompts for
 -- comprehensive benchmark analysis. It mirrors the Python prompt builders.
 --
--- Database: UNISTORE_BENCHMARK
+-- Database: FLAKEBENCH
 -- Schema: TEST_RESULTS
 -- =============================================================================
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 -- =============================================================================
@@ -569,6 +569,6 @@ $$;
 -- =============================================================================
 -- Validation: Show created objects
 -- =============================================================================
-SHOW PROCEDURES LIKE 'ANALYZE_BENCHMARK' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW PROCEDURES LIKE 'GET_QUICK_SUMMARY' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW USER FUNCTIONS LIKE 'BUILD_%_PROMPT' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'ANALYZE_BENCHMARK' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'GET_QUICK_SUMMARY' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW USER FUNCTIONS LIKE 'BUILD_%_PROMPT' IN SCHEMA FLAKEBENCH.TEST_RESULTS;

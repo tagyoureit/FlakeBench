@@ -173,7 +173,7 @@
   
   "tool_resources": {
     "query_benchmarks": {
-      "semantic_view": "UNISTORE_BENCHMARK.TEST_RESULTS.BENCHMARK_ANALYTICS",
+      "semantic_view": "FLAKEBENCH.TEST_RESULTS.BENCHMARK_ANALYTICS",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",
@@ -182,7 +182,7 @@
     },
     "get_metrics_timeseries": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.GET_METRICS_TIMESERIES",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.GET_METRICS_TIMESERIES",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",
@@ -191,7 +191,7 @@
     },
     "get_error_timeline": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.GET_ERROR_TIMELINE",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.GET_ERROR_TIMELINE",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",
@@ -200,7 +200,7 @@
     },
     "get_latency_breakdown": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.GET_LATENCY_BREAKDOWN",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.GET_LATENCY_BREAKDOWN",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",
@@ -209,7 +209,7 @@
     },
     "get_step_history": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.GET_STEP_HISTORY",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.GET_STEP_HISTORY",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",
@@ -218,7 +218,7 @@
     },
     "get_warehouse_timeseries": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.GET_WAREHOUSE_TIMESERIES",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.GET_WAREHOUSE_TIMESERIES",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",
@@ -227,7 +227,7 @@
     },
     "analyze_benchmark": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.ANALYZE_BENCHMARK",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.ANALYZE_BENCHMARK",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",
@@ -236,7 +236,7 @@
     },
     "get_quick_summary": {
       "type": "procedure",
-      "identifier": "UNISTORE_BENCHMARK.TEST_RESULTS.GET_QUICK_SUMMARY",
+      "identifier": "FLAKEBENCH.TEST_RESULTS.GET_QUICK_SUMMARY",
       "execution_environment": {
         "type": "warehouse",
         "warehouse": "",

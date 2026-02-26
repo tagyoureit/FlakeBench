@@ -7,14 +7,14 @@
 -- - Mann-Whitney U test for significance testing
 -- - Delta calculations vs baseline
 --
--- Database: UNISTORE_BENCHMARK
+-- Database: FLAKEBENCH
 -- Schema: TEST_RESULTS
 --
 -- Created: 2026-02-12
 -- Part of: Phase 7 - Cortex Agent for Analysis & Investigation
 -- =============================================================================
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 -- =============================================================================
@@ -54,7 +54,7 @@ BEGIN
         ),
         TABLE_TYPE
     INTO v_template_id, v_load_mode, v_table_type
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = :v_test_id;
     
     IF (v_template_id IS NULL) THEN
@@ -127,7 +127,7 @@ BEGIN
             ARRAY_AGG(TEST_ID) WITHIN GROUP (ORDER BY START_TIME DESC) AS baseline_test_ids
         FROM (
             SELECT *
-            FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+            FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
             WHERE TEST_CONFIG:template_id::VARCHAR = :v_template_id
               AND COALESCE(TEST_CONFIG:template_config:load_mode::VARCHAR, 
                            TEST_CONFIG:scenario:load_mode::VARCHAR, 'CONCURRENCY') = :v_load_mode
@@ -231,7 +231,7 @@ BEGIN
                         ELSE QPS
                     END AS y,
                     TEST_ID
-                FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+                FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
                 WHERE TEST_CONFIG:template_id::VARCHAR = :v_template_id
                   AND STATUS = 'COMPLETED'
                   AND (RUN_ID IS NULL OR RUN_ID = TEST_ID)
@@ -364,7 +364,7 @@ BEGIN
                             WHEN 'SF_EXECUTION_MS' THEN SF_EXECUTION_MS
                             ELSE APP_ELAPSED_MS
                         END AS metric_value
-                    FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS
+                    FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS
                     WHERE TEST_ID = :v_test_id_a
                       AND COALESCE(WARMUP, FALSE) = FALSE
                       AND SUCCESS = TRUE
@@ -379,7 +379,7 @@ BEGIN
                             WHEN 'SF_EXECUTION_MS' THEN SF_EXECUTION_MS
                             ELSE APP_ELAPSED_MS
                         END AS metric_value
-                    FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS
+                    FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS
                     WHERE TEST_ID = :v_test_id_b
                       AND COALESCE(WARMUP, FALSE) = FALSE
                       AND SUCCESS = TRUE
@@ -500,8 +500,8 @@ BEGIN
         ),
         'analysis_timestamp', CURRENT_TIMESTAMP()
     ) INTO result
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS a
-    LEFT JOIN UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS b 
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS a
+    LEFT JOIN FLAKEBENCH.TEST_RESULTS.TEST_RESULTS b 
         ON b.TEST_ID = :v_test_id_b
     WHERE a.TEST_ID = :v_test_id_a;
     
@@ -550,7 +550,7 @@ DECLARE
 BEGIN
     -- Get template_id for trend analysis
     SELECT TEST_CONFIG:template_id::VARCHAR INTO v_template_id
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = :v_test_id;
     
     -- Get rolling statistics
@@ -685,7 +685,7 @@ BEGIN
                 WHEN '4X-LARGE' THEN 128 WHEN '4XLARGE' THEN 128
                 ELSE 4
             END * :v_credit_cost_usd AS cost_usd
-        FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+        FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
         WHERE TEST_ID IN (SELECT VALUE::VARCHAR FROM TABLE(FLATTEN(INPUT => :v_test_ids)))
           AND STATUS = 'COMPLETED'
     );
@@ -787,7 +787,7 @@ BEGIN
                 WHEN '4X-LARGE' THEN 128 WHEN '4XLARGE' THEN 128
                 ELSE 4
             END * :v_credit_cost_usd AS cost_usd
-        FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+        FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
         WHERE TEST_ID IN (SELECT TRIM(VALUE) FROM TABLE(SPLIT_TO_TABLE(:v_test_ids, ',')))
           AND STATUS = 'COMPLETED'
     );
@@ -806,8 +806,8 @@ $$;
 -- =============================================================================
 -- Validation: Show created procedures
 -- =============================================================================
-SHOW PROCEDURES LIKE 'CALCULATE_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW PROCEDURES LIKE 'MANN_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW PROCEDURES LIKE 'COMPARE_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW PROCEDURES LIKE 'STATISTICAL_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW PROCEDURES LIKE 'COST_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'CALCULATE_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'MANN_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'COMPARE_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'STATISTICAL_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'COST_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;

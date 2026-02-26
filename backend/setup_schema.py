@@ -35,6 +35,8 @@ def read_schema_sql() -> str:
         schema_dir / "template_value_pools_table.sql",
         schema_dir / "test_logs_table.sql",
         schema_dir / "control_tables.sql",
+        schema_dir / "settings_tables.sql",
+        schema_dir / "dashboard_tables.sql",
     ]
 
     contents: list[str] = []

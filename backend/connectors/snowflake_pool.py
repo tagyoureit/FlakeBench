@@ -622,6 +622,8 @@ class SnowflakeConnectionPool:
         Returns:
             List of result tuples (empty list on timeout/error)
         """
+        import functools
+
         # Build connection params with AI-specific timeouts
         ai_params = self._get_connection_params()
         ai_params["network_timeout"] = settings.SNOWFLAKE_AI_CONNECT_NETWORK_TIMEOUT
@@ -630,7 +632,9 @@ class SnowflakeConnectionPool:
         conn = None
         try:
             # Create a one-off connection with longer timeouts
-            conn = await self._run_in_executor(snowflake.connector.connect, **ai_params)
+            # Use functools.partial since _run_in_executor doesn't support **kwargs
+            connect_fn = functools.partial(snowflake.connector.connect, **ai_params)
+            conn = await self._run_in_executor(connect_fn)
 
             cursor = await self._run_in_executor(conn.cursor)
             try:

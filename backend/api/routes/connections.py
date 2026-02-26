@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 
 from backend.api.error_handling import http_exception
 from backend.core import connection_manager
+from backend.core.postgres_instances import get_cached_instances, refresh_postgres_instances
 from backend.models.connection import (
     ConnectionCreate,
     ConnectionListResponse,
@@ -241,3 +242,27 @@ def _validate_connection_fields(data: ConnectionCreate) -> None:
     elif data.connection_type == ConnectionType.POSTGRES:
         if not data.host:
             raise ValueError("Postgres connections require 'host' field")
+
+
+@router.post("/refresh-postgres-instances")
+async def refresh_postgres_instance_cache() -> dict:
+    """
+    Refresh the Postgres instance size cache.
+
+    Use this endpoint when Postgres instances have been resized and the
+    cached sizes are stale. The cache is normally loaded once at startup
+    and persists for the lifetime of the application.
+
+    Returns:
+        List of instances with their current sizes
+    """
+    try:
+        await refresh_postgres_instances()
+        instances = get_cached_instances()
+        return {
+            "instances": instances,
+            "count": len(instances),
+            "message": f"Refreshed {len(instances)} Postgres instances",
+        }
+    except Exception as e:
+        raise http_exception("refresh postgres instances", e)

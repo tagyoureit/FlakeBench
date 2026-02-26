@@ -129,7 +129,7 @@ def _enrich_postgres_instance_size(cfg: dict[str, Any]) -> dict[str, Any]:
     
     # Try to look up the actual instance size
     try:
-        from backend.core.cost_calculator import get_postgres_instance_size_by_host
+        from backend.core.postgres_instances import get_postgres_instance_size_by_host
         
         # First try to get host from stored connection
         connection_id = cfg.get("connection_id")

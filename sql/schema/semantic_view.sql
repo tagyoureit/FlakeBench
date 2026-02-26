@@ -4,14 +4,14 @@
 -- This semantic view provides a governed, queryable interface for benchmark
 -- analytics data, enabling natural language queries via Cortex Agent.
 --
--- Database: UNISTORE_BENCHMARK
+-- Database: FLAKEBENCH
 -- Schema: TEST_RESULTS
 --
 -- Updated: 2026-02-12
 -- Changes: Added VQRs, improved table_type documentation, added filters
 -- =============================================================================
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 -- =============================================================================
@@ -37,19 +37,19 @@ CREATE OR REPLACE SEMANTIC VIEW BENCHMARK_ANALYTICS
   -- -------------------------------------------------------------------------
   TABLES (
     -- Main test results table
-    UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS 
+    FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS 
       PRIMARY KEY (EXECUTION_ID) 
       WITH SYNONYMS = ('queries', 'operations', 'query log'),
 
-    STEP_HISTORY AS UNISTORE_BENCHMARK.TEST_RESULTS.CONTROLLER_STEP_HISTORY 
+    STEP_HISTORY AS FLAKEBENCH.TEST_RESULTS.CONTROLLER_STEP_HISTORY 
       PRIMARY KEY (STEP_ID) 
       WITH SYNONYMS = ('find max steps', 'scaling steps'),
 
-    UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS 
+    FLAKEBENCH.TEST_RESULTS.TEST_RESULTS 
       PRIMARY KEY (TEST_ID) 
       WITH SYNONYMS = ('tests', 'benchmarks', 'test runs', 'benchmark results'),
 
-    WORKER_METRICS AS UNISTORE_BENCHMARK.TEST_RESULTS.WORKER_METRICS_SNAPSHOTS 
+    WORKER_METRICS AS FLAKEBENCH.TEST_RESULTS.WORKER_METRICS_SNAPSHOTS 
       PRIMARY KEY (SNAPSHOT_ID) 
       WITH SYNONYMS = ('worker snapshots', 'time series', 'metrics over time')
   )
@@ -613,4 +613,4 @@ SHOW SEMANTIC METRICS IN SEMANTIC VIEW BENCHMARK_ANALYTICS;
 SHOW SEMANTIC FACTS IN SEMANTIC VIEW BENCHMARK_ANALYTICS;
 
 -- Get the DDL
-SELECT GET_DDL('SEMANTIC_VIEW', 'UNISTORE_BENCHMARK.TEST_RESULTS.BENCHMARK_ANALYTI   
+SELECT GET_DDL('SEMANTIC_VIEW', 'FLAKEBENCH.TEST_RESULTS.BENCHMARK_ANALYTI   

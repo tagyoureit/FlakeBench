@@ -251,19 +251,19 @@ class TestScenario(BaseModel):
     start_concurrency: int = Field(
         5,
         ge=1,
-        le=100,
+        le=1000,
         description="Starting worker count for FIND_MAX_CONCURRENCY mode",
     )
     concurrency_increment: int = Field(
         10,
         ge=1,
-        le=100,
+        le=500,
         description="Workers to add each step in FIND_MAX_CONCURRENCY mode",
     )
     step_duration_seconds: int = Field(
         30,
         ge=10,
-        le=300,
+        le=3600,
         description="Duration of each step in FIND_MAX_CONCURRENCY mode",
     )
     qps_stability_pct: float = Field(
@@ -275,7 +275,7 @@ class TestScenario(BaseModel):
     latency_stability_pct: float = Field(
         20.0,
         ge=5.0,
-        le=100.0,
+        le=1000.0,
         description="P95 latency can increase up to this % and still be stable",
     )
     max_error_rate_pct: float = Field(

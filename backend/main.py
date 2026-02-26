@@ -187,7 +187,7 @@ async def lifespan(app: FastAPI):
     # Initialize database connection pools
     try:
         from backend.connectors import snowflake_pool, postgres_pool
-        from backend.core.cost_calculator import load_postgres_instances
+        from backend.core.postgres_instances import load_postgres_instances
 
         logger.info("📊 Initializing Snowflake connection pool...")
         sf_pool = snowflake_pool.get_default_pool()

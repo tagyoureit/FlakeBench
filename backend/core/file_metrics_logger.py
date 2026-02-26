@@ -55,7 +55,7 @@ class FileBasedMetricsLogger(FileBasedLoggerBase):
     def __init__(
         self,
         test_id: str,
-        worker_id: int,
+        worker_id: str | int,
         results_prefix: str,
         *,
         run_id: str,
@@ -69,7 +69,7 @@ class FileBasedMetricsLogger(FileBasedLoggerBase):
 
         Args:
             test_id: Unique identifier for the test run.
-            worker_id: Worker identifier (integer).
+            worker_id: Worker identifier (e.g., "worker-0" or integer).
             results_prefix: Snowflake schema prefix (e.g., "DB.SCHEMA").
             run_id: Run identifier for all snapshots.
             worker_group_id: Worker group ID.

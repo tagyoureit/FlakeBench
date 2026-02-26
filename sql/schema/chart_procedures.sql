@@ -5,14 +5,14 @@
 -- They are designed to be called by the Cortex Agent as tools and match
 -- the Python API endpoints for consistency.
 --
--- Database: UNISTORE_BENCHMARK
+-- Database: FLAKEBENCH
 -- Schema: TEST_RESULTS
 --
 -- Updated: 2026-02-12
 -- Changes: All SPs now match Python API functionality exactly
 -- =============================================================================
 
-USE DATABASE UNISTORE_BENCHMARK;
+USE DATABASE FLAKEBENCH;
 USE SCHEMA TEST_RESULTS;
 
 -- =============================================================================
@@ -74,7 +74,7 @@ BEGIN
             )
         ) WITHIN GROUP (ORDER BY START_TIME DESC) AS results_arr
         FROM (
-            SELECT * FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+            SELECT * FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
             WHERE RUN_ID IS NULL OR RUN_ID = TEST_ID  -- Only parent runs or single tests
             ORDER BY START_TIME DESC
             LIMIT :v_limit
@@ -114,7 +114,7 @@ DECLARE
 BEGIN
     -- Check if parent run
     SELECT RUN_ID INTO v_run_id
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = :v_test_id;
     
     IF (v_run_id IS NOT NULL AND v_run_id = :v_test_id) THEN
@@ -216,7 +216,7 @@ BEGIN
         -- Multi-worker info
         'latency_aggregation_method', IFF(RUN_ID = TEST_ID, 'slowest_worker_approximation', NULL)
     ) INTO result
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = :v_test_id;
     
     IF (result IS NULL) THEN
@@ -252,7 +252,7 @@ DECLARE
 BEGIN
     -- Check if this is a parent run
     SELECT RUN_ID INTO v_run_id
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = :v_test_id;
     
     IF (v_run_id IS NOT NULL AND v_run_id = :v_test_id) THEN
@@ -332,8 +332,8 @@ BEGIN
                             ELSE 'OTHER'
                         END AS OPERATION_TYPE,
                         START_TIME
-                    FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS
-                    WHERE TEST_ID IN (SELECT TEST_ID FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS WHERE RUN_ID = :v_test_id)
+                    FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS
+                    WHERE TEST_ID IN (SELECT TEST_ID FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS WHERE RUN_ID = :v_test_id)
                       AND COALESCE(WARMUP, FALSE) = FALSE
                       AND SUCCESS = TRUE
                       AND APP_ELAPSED_MS IS NOT NULL
@@ -450,7 +450,7 @@ BEGIN
                             ELSE 'OTHER'
                         END AS OPERATION_TYPE,
                         START_TIME
-                    FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS
+                    FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS
                     WHERE TEST_ID = :v_test_id
                       AND COALESCE(WARMUP, FALSE) = FALSE
                       AND SUCCESS = TRUE
@@ -535,7 +535,7 @@ DECLARE
 BEGIN
     -- Check if this is a parent run
     SELECT RUN_ID INTO v_run_id
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = :v_test_id;
     
     IF (v_run_id IS NOT NULL AND v_run_id = :v_test_id) THEN
@@ -579,8 +579,8 @@ BEGIN
                         MIN(qe.START_TIME) AS FIRST_QUERY,
                         MAX(qe.START_TIME) AS LAST_QUERY,
                         MIN(CASE WHEN COALESCE(qe.WARMUP, FALSE) = FALSE THEN qe.START_TIME END) AS FIRST_MEASUREMENT
-                    FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS qe
-                    WHERE qe.TEST_ID IN (SELECT TEST_ID FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS WHERE RUN_ID = :v_test_id)
+                    FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS qe
+                    WHERE qe.TEST_ID IN (SELECT TEST_ID FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS WHERE RUN_ID = :v_test_id)
                 )
                 SELECT
                     FLOOR(DATEDIFF('second', qb.FIRST_QUERY, qe.START_TIME) / 5) * 5 AS bucket_seconds,
@@ -591,9 +591,9 @@ BEGIN
                     SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'INSERT' THEN 1 ELSE 0 END) AS ins_errors,
                     SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'UPDATE' THEN 1 ELSE 0 END) AS upd_errors,
                     MAX(CASE WHEN qe.START_TIME < qb.FIRST_MEASUREMENT THEN 1 ELSE 0 END) AS is_warmup
-                FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS qe
+                FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS qe
                 CROSS JOIN query_bounds qb
-                WHERE qe.TEST_ID IN (SELECT TEST_ID FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS WHERE RUN_ID = :v_test_id)
+                WHERE qe.TEST_ID IN (SELECT TEST_ID FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS WHERE RUN_ID = :v_test_id)
                 GROUP BY FLOOR(DATEDIFF('second', qb.FIRST_QUERY, qe.START_TIME) / 5) * 5
             )
         );
@@ -634,7 +634,7 @@ BEGIN
                         MIN(qe.START_TIME) AS FIRST_QUERY,
                         MAX(qe.START_TIME) AS LAST_QUERY,
                         MIN(CASE WHEN COALESCE(qe.WARMUP, FALSE) = FALSE THEN qe.START_TIME END) AS FIRST_MEASUREMENT
-                    FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS qe
+                    FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS qe
                     WHERE qe.TEST_ID = :v_test_id
                 )
                 SELECT
@@ -646,7 +646,7 @@ BEGIN
                     SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'INSERT' THEN 1 ELSE 0 END) AS ins_errors,
                     SUM(CASE WHEN qe.SUCCESS = FALSE AND qe.QUERY_KIND = 'UPDATE' THEN 1 ELSE 0 END) AS upd_errors,
                     MAX(CASE WHEN qe.START_TIME < qb.FIRST_MEASUREMENT THEN 1 ELSE 0 END) AS is_warmup
-                FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS qe
+                FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS qe
                 CROSS JOIN query_bounds qb
                 WHERE qe.TEST_ID = :v_test_id
                 GROUP BY FLOOR(DATEDIFF('second', qb.FIRST_QUERY, qe.START_TIME) / 5) * 5
@@ -692,7 +692,7 @@ DECLARE
 BEGIN
     -- Get run_id and check if parent run
     SELECT RUN_ID INTO v_run_id
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = :v_test_id
     LIMIT 1;
     
@@ -783,7 +783,7 @@ BEGIN
                 ) AS app_upd_ops,
                 AVG(CUSTOM_METRICS:resources:cpu_percent::NUMBER) AS cpu_pct,
                 AVG(CUSTOM_METRICS:resources:memory_mb::NUMBER) AS mem_mb
-            FROM UNISTORE_BENCHMARK.TEST_RESULTS.WORKER_METRICS_SNAPSHOTS
+            FROM FLAKEBENCH.TEST_RESULTS.WORKER_METRICS_SNAPSHOTS
             WHERE RUN_ID = :v_run_id
               AND PHASE IN ('WARMUP', 'MEASUREMENT', 'RUNNING')
             GROUP BY ROUND(ELAPSED_SECONDS)
@@ -826,7 +826,7 @@ DECLARE
 BEGIN
     -- Get the run_id for this test
     SELECT RUN_ID INTO run_id_val
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = p_test_id
     LIMIT 1;
     
@@ -865,7 +865,7 @@ BEGIN
             ) ORDER BY STEP_NUMBER
         )
     ) INTO result
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.CONTROLLER_STEP_HISTORY
+    FROM FLAKEBENCH.TEST_RESULTS.CONTROLLER_STEP_HISTORY
     WHERE RUN_ID = run_id_val
       AND STEP_TYPE = 'FIND_MAX';
     
@@ -877,7 +877,7 @@ BEGIN
             'source', 'TEST_RESULTS.find_max_result',
             'find_max_result', FIND_MAX_RESULT
         ) INTO result
-        FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+        FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
         WHERE TEST_ID = p_test_id
           AND FIND_MAX_RESULT IS NOT NULL;
     END IF;
@@ -920,7 +920,7 @@ BEGIN
     
     -- Get the run_id for this test
     SELECT RUN_ID INTO run_id_val
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.TEST_RESULTS
+    FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS
     WHERE TEST_ID = p_test_id
     LIMIT 1;
     
@@ -949,7 +949,7 @@ BEGIN
             ) ORDER BY ELAPSED_SECONDS
         ), ARRAY_CONSTRUCT())
     ) INTO result
-    FROM UNISTORE_BENCHMARK.TEST_RESULTS.WAREHOUSE_POLL_SNAPSHOTS
+    FROM FLAKEBENCH.TEST_RESULTS.WAREHOUSE_POLL_SNAPSHOTS
     WHERE RUN_ID = run_id_val;
     
     -- If no warehouse poll data, try to derive from query executions
@@ -973,7 +973,7 @@ BEGIN
         FROM (
             SELECT
                 FLOOR(TIMESTAMPDIFF('SECOND', 
-                    (SELECT MIN(START_TIME) FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS WHERE TEST_ID = p_test_id), 
+                    (SELECT MIN(START_TIME) FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS WHERE TEST_ID = p_test_id), 
                     START_TIME
                 ) / :bucket_size) * :bucket_size AS time_bucket,
                 COUNT(DISTINCT SF_CLUSTER_NUMBER) AS active_clusters,
@@ -982,11 +982,11 @@ BEGIN
                 ROUND(AVG(SF_QUEUED_OVERLOAD_MS), 2) AS avg_queue_overload,
                 MAX(SF_QUEUED_OVERLOAD_MS) AS max_queue_overload,
                 SUM(CASE WHEN SF_QUEUED_OVERLOAD_MS > 0 THEN 1 ELSE 0 END) AS queries_queued
-            FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS
+            FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS
             WHERE TEST_ID = p_test_id
               AND WARMUP = FALSE
             GROUP BY FLOOR(TIMESTAMPDIFF('SECOND', 
-                (SELECT MIN(START_TIME) FROM UNISTORE_BENCHMARK.TEST_RESULTS.QUERY_EXECUTIONS WHERE TEST_ID = p_test_id), 
+                (SELECT MIN(START_TIME) FROM FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS WHERE TEST_ID = p_test_id), 
                 START_TIME
             ) / :bucket_size)
         );
@@ -1040,6 +1040,6 @@ $$;
 -- =============================================================================
 -- Validation: Show created procedures
 -- =============================================================================
-SHOW PROCEDURES LIKE 'GET_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW PROCEDURES LIKE 'LIST_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
-SHOW PROCEDURES LIKE 'ANALYZE_%' IN SCHEMA UNISTORE_BENCHMARK.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'GET_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'LIST_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
+SHOW PROCEDURES LIKE 'ANALYZE_%' IN SCHEMA FLAKEBENCH.TEST_RESULTS;
