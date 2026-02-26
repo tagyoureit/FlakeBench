@@ -2733,6 +2733,16 @@ async def get_test(test_id: str) -> dict[str, Any]:
                         if load_mode == "QPS"
                         else None
                     ),
+                    "starting_threads": (
+                        float(getattr(running.scenario, "starting_threads", 0.0) or 0.0)
+                        if load_mode == "QPS"
+                        else None
+                    ),
+                    "max_thread_increase": (
+                        float(getattr(running.scenario, "max_thread_increase", 15.0) or 15.0)
+                        if load_mode == "QPS"
+                        else None
+                    ),
                     "min_connections": int(
                         getattr(running.scenario, "min_threads_per_worker", 1) or 1
                     )
@@ -3030,12 +3040,24 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 concurrency_increment = _coerce_optional_int(scenario_cfg.get("concurrency_increment"))
         
         target_qps = None
+        starting_threads = None
+        max_thread_increase = None
         if load_mode == "QPS" and isinstance(template_cfg, dict):
             try:
                 v = template_cfg.get("target_qps")
                 target_qps = float(v) if v is not None else None
             except Exception:
                 target_qps = None
+            try:
+                v = template_cfg.get("starting_threads")
+                starting_threads = float(v) if v is not None else None
+            except Exception:
+                starting_threads = None
+            try:
+                v = template_cfg.get("max_thread_increase")
+                max_thread_increase = float(v) if v is not None else None
+            except Exception:
+                max_thread_increase = None
         min_connections = None
         scaling_cfg = (
             template_cfg.get("scaling") if isinstance(template_cfg, dict) else None
@@ -3130,6 +3152,8 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "start_concurrency": start_concurrency,
             "concurrency_increment": concurrency_increment,
             "target_qps": target_qps if load_mode == "QPS" else None,
+            "starting_threads": starting_threads if load_mode == "QPS" else None,
+            "max_thread_increase": max_thread_increase if load_mode == "QPS" else None,
             "min_connections": min_connections if load_mode == "QPS" else None,
             "scaling": scaling_payload,
             "bounds_state": bounds_state,

@@ -184,6 +184,8 @@ window.DashboardMixins.dataLoading = {
 
       // Load warehouse details only during active phases to avoid 404 errors
       // before the test starts running.
+      // In live mode, skip if WebSocket is connected (WS will handle updates).
+      const wsOpen = this.websocket && this.websocket.readyState === WebSocket.OPEN;
       if (activePhases.includes(phaseUpper) && (this.mode === "history" || !wsOpen)) {
         this.loadWarehouseDetails();
       }

@@ -154,6 +154,7 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
 
     app_ops_list: list[dict[str, Any]] = []
     sf_bench_list: list[dict[str, Any]] = []
+    pg_bench_list: list[dict[str, Any]] = []
     warehouse_list: list[dict[str, Any]] = []
     resources_list: list[dict[str, Any]] = []
     find_max_controller: dict[str, Any] | None = None
@@ -247,6 +248,9 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
         sf_bench = cm.get("sf_bench")
         if isinstance(sf_bench, dict):
             sf_bench_list.append(sf_bench)
+        pg_bench = cm.get("pg_bench")
+        if isinstance(pg_bench, dict):
+            pg_bench_list.append(pg_bench)
         warehouse = cm.get("warehouse")
         if isinstance(warehouse, dict):
             warehouse_list.append(warehouse)
@@ -269,6 +273,7 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
     custom_metrics_out = {
         "app_ops_breakdown": _sum_dicts(app_ops_list),
         "sf_bench": _sum_dicts(sf_bench_list),
+        "pg_bench": _sum_dicts(pg_bench_list),
         "resources": _avg_dicts(resources_list),
     }
     # Warehouse MCW data comes ONLY from orchestrator's WAREHOUSE_POLL_SNAPSHOTS

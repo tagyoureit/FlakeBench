@@ -3186,7 +3186,6 @@ function testConfiguration() {
                 const startC = Number(this.config.start_concurrency || 5);
                 const increment = Number(this.config.concurrency_increment || 10);
                 const stepDur = Number(this.config.step_duration_seconds || 30);
-                const maxC = Number(this.config.concurrent_connections || 100);
                 if (!Number.isFinite(startC) || startC < 1) {
                     window.toast.warning('Start Concurrency must be >= 1.');
                     return;
@@ -3199,9 +3198,15 @@ function testConfiguration() {
                     window.toast.warning('Step Duration must be >= 10 seconds.');
                     return;
                 }
-                if (!Number.isFinite(maxC) || maxC < startC) {
-                    window.toast.warning('Max Connections must be >= Start Concurrency.');
-                    return;
+                // Check total capacity: maxWorkers * maxConnectionsPerWorker >= startConcurrency
+                // Skip check for AUTO mode (unlimited scaling) or when either limit is unbounded (null)
+                // maxC comes from scaling.max_connections (Max Threads/Wkr field)
+                if (scalingMode === 'BOUNDED' && maxWorkers != null && maxC != null) {
+                    const totalCapacity = maxWorkers * maxC;
+                    if (!Number.isFinite(totalCapacity) || totalCapacity < startC) {
+                        window.toast.warning(`Total capacity (${maxWorkers} workers × ${maxC} threads) must be >= Start Threads (${startC}).`);
+                        return;
+                    }
                 }
             }
 
