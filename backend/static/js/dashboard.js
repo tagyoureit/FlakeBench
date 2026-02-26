@@ -1100,7 +1100,7 @@ function dashboard(opts) {
       const isActive = statusUpper === "RUNNING" || statusUpper === "CANCELLING" || statusUpper === "STOPPING";
       
       if (isActive && !this.isTimerRunning()) {
-        if (normalizedPhase === "WARMUP" || normalizedPhase === "RUNNING") {
+        if (normalizedPhase === "WARMUP" || normalizedPhase === "RUNNING" || normalizedPhase === "MEASUREMENT") {
           this.startElapsedTimer(0);
         }
       }
@@ -1326,7 +1326,7 @@ function dashboard(opts) {
         const ops = payload.ops;
         const latency = payload.latency;
         const errors = payload.errors;
-        const allowCharts = !phaseUpper || phaseUpper === "WARMUP" || phaseUpper === "RUNNING";
+        const allowCharts = !phaseUpper || phaseUpper === "WARMUP" || phaseUpper === "RUNNING" || phaseUpper === "MEASUREMENT";
 
         const runData = payload.run || {};
         const workersActive = runData.workers_active;
@@ -1362,8 +1362,8 @@ function dashboard(opts) {
           this.metrics.target_workers = connections.target || 0;
         }
 
-        // Worker saturation detection - only during RUNNING phase
-        if (phaseUpper === "RUNNING" && connections && !this._saturationWarningShown) {
+        // Worker saturation detection - only during active benchmark phases
+        if ((phaseUpper === "RUNNING" || phaseUpper === "MEASUREMENT") && connections && !this._saturationWarningShown) {
           const target = connections.target || 0;
           const inflight = connections.active || 0;
           // Only check when we have meaningful target (> 50 to avoid noise on small tests)

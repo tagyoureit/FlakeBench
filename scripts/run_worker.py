@@ -1087,7 +1087,10 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     log_handler = TestLogQueueHandler(test_id=test_id_str, queue=log_queue)
     logging.getLogger().addHandler(log_handler)
 
+    _live_post_fail_count = 0
+
     async def _post_live_metrics(payload: dict[str, Any]) -> None:
+        nonlocal _live_post_fail_count
         if live_post_lock.locked():
             return
         async with live_post_lock:
@@ -1098,7 +1101,22 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                     payload,
                     timeout_seconds=live_post_timeout,
                 )
-            except Exception:
+                if _live_post_fail_count > 0:
+                    logger.info(
+                        "Live metrics POST recovered after %d failures (url=%s)",
+                        _live_post_fail_count,
+                        live_metrics_url,
+                    )
+                    _live_post_fail_count = 0
+            except Exception as exc:
+                _live_post_fail_count += 1
+                if _live_post_fail_count <= 3 or _live_post_fail_count % 60 == 0:
+                    logger.warning(
+                        "Live metrics POST failed (#%d, url=%s): %s",
+                        _live_post_fail_count,
+                        live_metrics_url,
+                        exc,
+                    )
                 return
 
     async def _drain_log_queue() -> None:

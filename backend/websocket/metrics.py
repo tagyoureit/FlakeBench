@@ -162,6 +162,21 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
     phases: list[str] = []
     snapshot_by_worker: dict[str, dict[str, Any]] = {}
 
+    # When WORKER_METRICS_SNAPSHOTS is empty (file-based logger defers bulk load),
+    # derive basic aggregate metrics from heartbeats so the dashboard isn't blank.
+    if not rows and heartbeat_rows:
+        for hb in heartbeat_rows:
+            hb_status = str(hb[2] or "").upper()
+            hb_phase = str(hb[3] or "").upper()
+            if hb_status == "DEAD":
+                continue
+            if hb_phase:
+                phases.append(hb_phase)
+            total_ops += _to_int(hb[7])      # QUERIES_PROCESSED
+            error_count += _to_int(hb[8])     # ERROR_COUNT
+            active_connections += _to_int(hb[5])  # ACTIVE_CONNECTIONS
+            target_connections += _to_int(hb[6])  # TARGET_CONNECTIONS
+
     for (
         elapsed,
         total_queries,
