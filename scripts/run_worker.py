@@ -310,6 +310,12 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     health = ConnectionHealthTracker(timeout_seconds=60.0)
     last_error: str | None = None
     live_metrics_url = _build_live_metrics_url(cfg.run_id)
+    logger.info(
+        "Live metrics POST URL: %s (APP_HOST=%s, APP_PORT=%s)",
+        live_metrics_url,
+        settings.APP_HOST,
+        settings.APP_PORT,
+    )
     live_post_lock = asyncio.Lock()
     live_post_timeout = float(
         getattr(settings, "LIVE_METRICS_POST_TIMEOUT_SECONDS", 0.5) or 0.5
@@ -1088,10 +1094,14 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     logging.getLogger().addHandler(log_handler)
 
     _live_post_fail_count = 0
+    _live_post_success_count = 0
+
+    _live_post_skipped_count = 0
 
     async def _post_live_metrics(payload: dict[str, Any]) -> None:
-        nonlocal _live_post_fail_count
+        nonlocal _live_post_fail_count, _live_post_success_count, _live_post_skipped_count
         if live_post_lock.locked():
+            _live_post_skipped_count += 1
             return
         async with live_post_lock:
             try:
@@ -1101,6 +1111,14 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                     payload,
                     timeout_seconds=live_post_timeout,
                 )
+                _live_post_success_count += 1
+                if _live_post_success_count == 1:
+                    logger.info(
+                        "First live metrics POST succeeded (url=%s, phase=%s, qps=%.1f)",
+                        live_metrics_url,
+                        payload.get("phase"),
+                        payload.get("metrics", {}).get("current_qps", 0),
+                    )
                 if _live_post_fail_count > 0:
                     logger.info(
                         "Live metrics POST recovered after %d failures (url=%s)",
@@ -1173,8 +1191,12 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 pass
         logging.getLogger().removeHandler(log_handler)
 
+    _metrics_callback_count = 0
+    _live_post_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-post")
+
     def _metrics_callback(metrics: Metrics) -> None:
-        nonlocal current_phase, stop_requested
+        nonlocal current_phase, stop_requested, _metrics_callback_count
+        _metrics_callback_count += 1
         if stop_requested:
             return
         custom = dict(metrics.custom_metrics or {})
@@ -1183,13 +1205,18 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
 
         # Buffer metrics locally for bulk loading (no Snowflake I/O during benchmark).
         # This is synchronous and fast - eliminates lock contention on WORKER_METRICS_SNAPSHOTS.
-        metrics_logger.append_metrics(
-            metrics,
-            phase=_normalize_phase(current_phase),
-            target_connections=current_target,
-        )
+        try:
+            metrics_logger.append_metrics(
+                metrics,
+                phase=_normalize_phase(current_phase),
+                target_connections=current_target,
+            )
+        except Exception as exc:
+            logger.warning("metrics_logger.append_metrics failed: %s", exc)
 
         # Post to LiveMetricsCache for real-time dashboard (HTTP POST, not Snowflake).
+        # CRITICAL: Submit the POST to a thread pool instead of using asyncio.create_task
+        # because this callback is synchronous and create_task doesn't work reliably here.
         live_payload = {
             "test_id": str(executor.test_id),
             "worker_id": cfg.worker_id,
@@ -1200,7 +1227,37 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
             "target_connections": int(current_target),
             "metrics": metrics.model_dump(mode="json"),
         }
-        _track_task(asyncio.create_task(_post_live_metrics(live_payload)))
+
+        def _do_post():
+            nonlocal _live_post_fail_count, _live_post_success_count
+            try:
+                _post_live_metrics_sync(
+                    live_metrics_url,
+                    live_payload,
+                    timeout_seconds=live_post_timeout,
+                )
+                _live_post_success_count += 1
+                if _live_post_success_count == 1:
+                    logger.info(
+                        "First live metrics POST succeeded (url=%s, phase=%s, qps=%.1f)",
+                        live_metrics_url,
+                        live_payload.get("phase"),
+                        live_payload.get("metrics", {}).get("current_qps", 0),
+                    )
+            except Exception as exc:
+                _live_post_fail_count += 1
+                if _live_post_fail_count <= 3 or _live_post_fail_count % 60 == 0:
+                    logger.warning(
+                        "Live metrics POST failed (#%d, url=%s): %s",
+                        _live_post_fail_count,
+                        live_metrics_url,
+                        exc,
+                    )
+
+        try:
+            _live_post_executor.submit(_do_post)
+        except Exception as exc:
+            logger.error("Failed to submit live metrics POST: %s", exc)
 
     executor.set_metrics_callback(_metrics_callback)
     metrics_task = asyncio.create_task(executor._collect_metrics())

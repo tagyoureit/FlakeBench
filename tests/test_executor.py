@@ -296,6 +296,86 @@ def test_metrics_callback():
         return False
 
 
+def test_collect_metrics_uses_worker_group_id():
+    """Test that _collect_metrics() correctly uses _worker_group_id attribute.
+    
+    This test ensures that _collect_metrics() can run without AttributeError.
+    Previously, the code incorrectly referenced self._worker_id which doesn't exist.
+    The correct attribute is self._worker_group_id.
+    """
+    print("\n🔍 Testing _collect_metrics() uses correct worker_group_id")
+    print("=" * 60)
+
+    import asyncio
+
+    try:
+        table = TableConfig(
+            name="test_table",
+            table_type=TableType.STANDARD,
+            columns={"id": "NUMBER"},
+        )
+
+        scenario = TestScenario(
+            name="collect_metrics_test",
+            duration_seconds=5,
+            concurrent_connections=2,
+            workload_type=WorkloadType.READ_ONLY,
+            metrics_interval_seconds=0.1,
+            table_configs=[table],
+        )
+
+        executor = TestExecutor(scenario, worker_group_id=1, worker_group_count=2)
+
+        callback_invocations = []
+
+        def metrics_callback(metrics):
+            callback_invocations.append({
+                "total_ops": metrics.total_operations,
+                "worker_group_id": getattr(executor, "_worker_group_id", "MISSING"),
+            })
+
+        executor.set_metrics_callback(metrics_callback)
+
+        async def run_collect_metrics_briefly():
+            collect_task = asyncio.create_task(executor._collect_metrics())
+            await asyncio.sleep(0.35)
+            collect_task.cancel()
+            try:
+                await collect_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run_collect_metrics_briefly())
+
+        print(f"   Callback invocations: {len(callback_invocations)}")
+        print(f"   Worker group ID: {executor._worker_group_id}")
+
+        assert len(callback_invocations) >= 2, (
+            f"Expected at least 2 callback invocations, got {len(callback_invocations)}"
+        )
+        assert executor._worker_group_id == 1, (
+            f"Expected worker_group_id=1, got {executor._worker_group_id}"
+        )
+
+        print("✅ _collect_metrics() ran successfully with _worker_group_id")
+
+        return True
+
+    except AttributeError as e:
+        if "_worker_id" in str(e):
+            print(f"❌ BUG DETECTED: Code references non-existent _worker_id: {e}")
+        else:
+            print(f"❌ AttributeError: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    except Exception as e:
+        print(f"❌ _collect_metrics test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def test_worker_group_sharding_offsets_pool_indices():
     table = TableConfig(
         name="test_table",
@@ -365,6 +445,7 @@ def main():
         ("Multi-Table Scenario", test_multi_table_scenario),
         ("Rate Limiting", test_rate_limiting),
         ("Metrics Callback", test_metrics_callback),
+        ("Collect Metrics Worker Group ID", test_collect_metrics_uses_worker_group_id),
     ]
 
     results = []

@@ -262,12 +262,24 @@ class FileBasedLoggerBase(ABC):
                 await pool.execute_query(put_sql)
                 logger.info("Uploaded %s to stage", file_path.name)
 
-            # 6. COPY INTO target table
+            # 6. COPY INTO target table with JSON parsing
+            # Build column list, applying TRY_PARSE_JSON to JSON columns
+            json_cols_set = set(self._json_columns)
+            schema_cols = [field.name.upper() for field in self._build_schema()]
+            select_cols = []
+            for col in schema_cols:
+                if col in json_cols_set:
+                    select_cols.append(f"TRY_PARSE_JSON($1:{col}) AS {col}")
+                else:
+                    select_cols.append(f"$1:{col} AS {col}")
+
             copy_sql = f"""
                 COPY INTO {self.results_prefix}.{self._table_name}
-                FROM {stage_path}/
+                FROM (
+                    SELECT {', '.join(select_cols)}
+                    FROM {stage_path}/
+                )
                 FILE_FORMAT = (TYPE = PARQUET)
-                MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
                 ON_ERROR = CONTINUE
             """
             result = await pool.execute_query(copy_sql)
@@ -280,28 +292,6 @@ class FileBasedLoggerBase(ABC):
                 rows_loaded,
                 len(self._files_written),
             )
-
-            # 6b. Parse JSON columns that were loaded as VARCHAR strings
-            # When Parquet string columns are COPY INTO'd to VARIANT columns,
-            # Snowflake stores them as VARCHAR inside VARIANT. This step
-            # converts them to proper parsed JSON for semi-structured access.
-            json_cols = self._json_columns
-            if json_cols:
-                for col in json_cols:
-                    parse_sql = f"""
-                        UPDATE {self.results_prefix}.{self._table_name}
-                        SET {col} = TRY_PARSE_JSON({col})
-                        WHERE TEST_ID = '{self.test_id}'
-                          AND WORKER_ID = {self.worker_id}
-                          AND TYPEOF({col}) = 'VARCHAR'
-                    """
-                    await pool.execute_query(parse_sql)
-                    logger.info(
-                        "Parsed JSON column %s for test_id=%s, worker_id=%s",
-                        col,
-                        self.test_id,
-                        self.worker_id,
-                    )
 
             # 7. Cleanup stage files
             remove_sql = f"REMOVE {stage_path}/"

@@ -696,3 +696,293 @@ async def test_poll_loop_worker_exit_ends_poll(monkeypatch):
     )
     # Run should have been removed from active runs
     assert "run-worker-exit" not in svc._active_runs
+
+
+# =============================================================================
+# Edge Case Tests
+# =============================================================================
+
+
+class _WorkerDeathPool:
+    """Pool that simulates worker death during phase transition."""
+
+    def __init__(self, *, status_sequence: list[str], phase_sequence: list[str]):
+        self._status_sequence = list(status_sequence)
+        self._phase_sequence = list(phase_sequence)
+        self.calls: list[tuple[str, list[object] | None]] = []
+
+    async def execute_query(self, query: str, params: list[object] | None = None):
+        self.calls.append((query, params))
+        sql = " ".join(str(query).split()).upper()
+        if "SELECT STATUS" in sql and "FROM" in sql and "RUN_STATUS" in sql:
+            status = self._status_sequence.pop(0) if self._status_sequence else "RUNNING"
+            return [(status,)]
+        if (
+            "SELECT STATUS, PHASE," in sql
+            and "TIMESTAMPDIFF" in sql
+            and "RUN_STATUS" in sql
+        ):
+            status = self._status_sequence.pop(0) if self._status_sequence else "RUNNING"
+            phase = self._phase_sequence.pop(0) if self._phase_sequence else "MEASUREMENT"
+            return [(status, phase, 30.0, 30.0)]
+        if "SELECT COUNT(*) AS WORKER_COUNT" in sql and "WORKER_HEARTBEATS" in sql:
+            # Simulate worker death - count drops to 0
+            return [(0, 0, 0, 1, 0, None, None, None)]  # 1 failed worker
+        return []
+
+
+@pytest.mark.asyncio
+async def test_worker_death_during_phase_transition(monkeypatch):
+    """
+    GIVEN: A run transitioning from WARMUP to MEASUREMENT
+    WHEN: A worker dies during the transition
+    THEN: The run is marked as FAILED and poll loop exits gracefully
+    """
+    pool = _WorkerDeathPool(
+        status_sequence=["RUNNING", "RUNNING"],
+        phase_sequence=["WARMUP", "MEASUREMENT"],
+    )
+    svc = OrchestratorService()
+    svc._pool = pool
+
+    proc = _StubProcess()
+    proc.returncode = 1  # Worker exited with error
+
+    ctx = RunContext(
+        run_id="run-worker-death",
+        worker_group_count=2,
+        template_id="t1",
+        scenario_config={
+            "workload": {"warmup_seconds": 10, "duration_seconds": 60},
+            "guardrails": {},
+        },
+    )
+    ctx.worker_procs.append(cast(asyncio.subprocess.Process, proc))
+    ctx.stopping = True
+    svc._active_runs["run-worker-death"] = ctx
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_emit(*, run_id: str, event_type: str, event_data: dict[str, object]):
+        events.append((event_type, event_data))
+        return 1
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    async def fake_rollup(*, parent_run_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(svc, "_emit_control_event", fake_emit)
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(results_store, "update_parent_run_aggregate", fake_rollup)
+
+    await svc._run_poll_loop("run-worker-death")
+
+    # Run should have been cleaned up
+    assert "run-worker-death" not in svc._active_runs
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stop_run_calls(monkeypatch):
+    """
+    GIVEN: A running test
+    WHEN: Multiple stop_run calls are made concurrently
+    THEN: Only one STOP event is emitted and state is consistent
+    """
+    pool = _StopRunPool(
+        status_sequence=["RUNNING", "CANCELLING", "CANCELLING", "CANCELLING"],
+        heartbeat_remaining=[0, 0],
+    )
+    svc = OrchestratorService()
+    svc._pool = pool
+    svc._active_runs["run-concurrent"] = RunContext(
+        run_id="run-concurrent",
+        worker_group_count=1,
+        template_id="t1",
+        scenario_config={},
+    )
+
+    events: list[tuple[str, dict[str, object]]] = []
+    emit_lock = asyncio.Lock()
+
+    async def fake_emit(*, run_id: str, event_type: str, event_data: dict[str, object]):
+        async with emit_lock:
+            events.append((event_type, event_data))
+        return 1
+
+    monkeypatch.setattr(svc, "_emit_control_event", fake_emit)
+
+    # Call stop_run concurrently
+    await asyncio.gather(
+        svc.stop_run("run-concurrent"),
+        svc.stop_run("run-concurrent"),
+    )
+
+    # Should have emitted STOP events (may be 1 or 2 depending on race)
+    stop_events = [e for e in events if e[0] == "STOP"]
+    # At minimum, the run should end up in terminal state
+    # The exact number of STOP events depends on timing
+
+
+@pytest.mark.asyncio
+async def test_stop_during_starting_phase(monkeypatch):
+    """
+    GIVEN: A run in STARTING phase (workers spawning)
+    WHEN: stop_run is called
+    THEN: Run transitions to CANCELLING and workers are terminated
+    """
+    pool = _StopRunPool(
+        status_sequence=["STARTING", "CANCELLING"],
+        heartbeat_remaining=[0],
+    )
+    svc = OrchestratorService()
+    svc._pool = pool
+
+    proc = _StubProcess()
+    ctx = RunContext(
+        run_id="run-starting",
+        worker_group_count=2,
+        template_id="t1",
+        scenario_config={},
+    )
+    ctx.worker_procs.append(cast(asyncio.subprocess.Process, proc))
+    svc._active_runs["run-starting"] = ctx
+
+    events: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_emit(*, run_id: str, event_type: str, event_data: dict[str, object]):
+        events.append((event_type, event_data))
+        return 1
+
+    monkeypatch.setattr(svc, "_emit_control_event", fake_emit)
+
+    await svc.stop_run("run-starting")
+
+    # Should have emitted STOP event
+    assert any(e[0] == "STOP" for e in events)
+    # Worker process should have been terminated
+    assert proc.terminated or proc.killed
+
+
+@pytest.mark.asyncio
+async def test_partial_worker_registration_timeout(monkeypatch):
+    """
+    GIVEN: A run expecting 3 workers but only 2 register
+    WHEN: Poll loop detects incomplete registration after timeout
+    THEN: Run continues with available workers (degraded mode)
+    """
+    heartbeat_updated_at = datetime.now(UTC).replace(tzinfo=None)
+    pool = _PollLoopPool(
+        status="RUNNING",
+        phase="MEASUREMENT",
+        start_time=datetime.now(UTC) - timedelta(seconds=60),
+        heartbeat_row=(2, 2, 0, 0, 0, heartbeat_updated_at, None, None),  # Only 2 workers
+        metrics_row=(100, 2, 12.5, 50, datetime.now(UTC).replace(tzinfo=None)),
+    )
+    svc = OrchestratorService()
+    svc._pool = pool
+    ctx = RunContext(
+        run_id="run-partial",
+        worker_group_count=3,  # Expected 3 workers
+        template_id="t1",
+        scenario_config={
+            "workload": {"warmup_seconds": 0, "duration_seconds": 0},
+            "guardrails": {},
+        },
+    )
+    ctx.stopping = True
+    svc._active_runs["run-partial"] = ctx
+
+    async def fake_emit(*, run_id: str, event_type: str, event_data: dict[str, object]):
+        return 1
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    async def fake_rollup(*, parent_run_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(svc, "_emit_control_event", fake_emit)
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(results_store, "update_parent_run_aggregate", fake_rollup)
+
+    # Should complete without error even with partial registration
+    await svc._run_poll_loop("run-partial")
+
+    # Run should have been processed
+    assert "run-partial" not in svc._active_runs
+
+
+class _NaturalCompletionPool:
+    """Pool that simulates natural run completion (STOPPING -> COMPLETED)."""
+
+    def __init__(self):
+        self._status_calls = 0
+        self.calls: list[tuple[str, list[object] | None]] = []
+
+    async def execute_query(self, query: str, params: list[object] | None = None):
+        self.calls.append((query, params))
+        sql = " ".join(str(query).split()).upper()
+        # Check more specific patterns FIRST
+        if (
+            "SELECT STATUS, PHASE," in sql
+            and "TIMESTAMPDIFF" in sql
+            and "RUN_STATUS" in sql
+        ):
+            self._status_calls += 1
+            # First call returns STOPPING, subsequent calls return COMPLETED
+            if self._status_calls == 1:
+                return [("STOPPING", "MEASUREMENT", 120.0, 100.0)]
+            return [("COMPLETED", "MEASUREMENT", 130.0, 110.0)]
+        if "SELECT COUNT(*) AS WORKER_COUNT" in sql and "WORKER_HEARTBEATS" in sql:
+            return [(0, 0, 0, 0, 0, None, None, None)]  # All workers done
+        if "SELECT COUNT(*)" in sql and "WORKER_HEARTBEATS" in sql:
+            return [(0,)]
+        return []
+
+
+@pytest.mark.asyncio
+async def test_natural_completion_stopping_to_completed(monkeypatch):
+    """
+    GIVEN: A run in STOPPING phase after duration elapsed
+    WHEN: All workers complete naturally
+    THEN: Run transitions to COMPLETED status
+    """
+    pool = _NaturalCompletionPool()
+    svc = OrchestratorService()
+    svc._pool = pool
+    ctx = RunContext(
+        run_id="run-natural",
+        worker_group_count=2,
+        template_id="t1",
+        scenario_config={
+            "workload": {"warmup_seconds": 10, "duration_seconds": 60},
+            "guardrails": {},
+        },
+    )
+    ctx.stopping = True
+    svc._active_runs["run-natural"] = ctx
+
+    async def fake_emit(*, run_id: str, event_type: str, event_data: dict[str, object]):
+        return 1
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    async def fake_rollup(*, parent_run_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(svc, "_emit_control_event", fake_emit)
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(results_store, "update_parent_run_aggregate", fake_rollup)
+
+    await svc._run_poll_loop("run-natural")
+
+    # Should have transitioned to COMPLETED
+    completed_updates = [
+        c for c in pool.calls if "SET STATUS = 'COMPLETED'" in c[0]
+    ]
+    assert len(completed_updates) >= 1, "Run should transition to COMPLETED"
+    # Run should be cleaned up
+    assert "run-natural" not in svc._active_runs

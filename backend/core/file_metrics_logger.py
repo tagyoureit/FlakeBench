@@ -143,7 +143,7 @@ class FileBasedMetricsLogger(FileBasedLoggerBase):
                 ("target_connections", pa.int64()),
                 ("cpu_percent", pa.float64()),
                 ("memory_percent", pa.float64()),
-                ("custom_metrics", pa.string()),  # JSON string -> VARIANT
+                ("custom_metrics", pa.string()),  # JSON string, parsed during COPY INTO
             ]
         )
 

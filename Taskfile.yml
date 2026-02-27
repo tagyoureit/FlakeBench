@@ -73,3 +73,98 @@ tasks:
         msg: "uv not found. Install from https://docs.astral.sh/uv/"
     cmds:
       - BASE_URL="{{.BASE_URL}}" uv run python scripts/run_variation_smoke.py --cleanup-only
+
+  # ==========================================================================
+  # E2E Tests (Real Database + WebSocket + Browser)
+  # ==========================================================================
+  
+  test:unit:
+    desc: "Run unit tests (mocked, fast)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - uv run pytest tests/ -v --ignore=tests/e2e -m "not e2e"
+
+  test:e2e:
+    desc: "Run all E2E tests (requires E2E schema setup + running server)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - E2E_TEST=1 uv run pytest tests/e2e/ -v --ignore=tests/e2e/browser -m "not browser"
+
+  test:e2e:api:
+    desc: "Run E2E API integration tests only"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - E2E_TEST=1 uv run pytest tests/e2e/test_run_lifecycle.py -v
+
+  test:e2e:websocket:
+    desc: "Run E2E WebSocket streaming tests only"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - E2E_TEST=1 uv run pytest tests/e2e/test_websocket_streaming.py -v
+
+  test:e2e:browser:
+    desc: "Run E2E browser tests with Playwright (requires playwright install)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - E2E_TEST=1 uv run pytest tests/e2e/browser/ -v --browser chromium
+
+  test:e2e:all:
+    desc: "Run complete E2E test suite (API + WebSocket + Browser)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - task: test:e2e
+      - task: test:e2e:browser
+
+  test:e2e:setup:
+    desc: "Set up E2E test schema in Snowflake"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - echo "Setting up E2E test schema..."
+      - uv run python -c "from backend.setup_schema import execute_sql_statements; import snowflake.connector; from backend.config import settings; conn = snowflake.connector.connect(account=settings.SNOWFLAKE_ACCOUNT, user=settings.SNOWFLAKE_USER, password=settings.SNOWFLAKE_PASSWORD, warehouse=settings.SNOWFLAKE_WAREHOUSE, role=settings.SNOWFLAKE_ROLE); cursor = conn.cursor(); sql = open('sql/schema/e2e_test_schema.sql').read(); execute_sql_statements(cursor, sql); cursor.close(); conn.close(); print('✅ E2E schema setup complete')"
+
+  test:e2e:cleanup:
+    desc: "Clean up E2E test data (reset between runs)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - uv run python -c "import snowflake.connector; from backend.config import settings; conn = snowflake.connector.connect(account=settings.SNOWFLAKE_ACCOUNT, user=settings.SNOWFLAKE_USER, password=settings.SNOWFLAKE_PASSWORD, warehouse=settings.SNOWFLAKE_WAREHOUSE, role=settings.SNOWFLAKE_ROLE, database='FLAKEBENCH', schema='E2E_TEST'); cursor = conn.cursor(); cursor.execute('CALL E2E_CLEANUP()'); print(cursor.fetchone()[0]); cursor.close(); conn.close()"
+
+  test:e2e:server:
+    desc: "Start server for E2E tests (port 8765, E2E_TEST schema)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - E2E_TEST=1 RESULTS_SCHEMA=E2E_TEST uv run uvicorn backend.main:app --host 127.0.0.1 --port 8765 --reload
+
+  test:e2e:quick:
+    desc: "Quick E2E smoke test (API only, no slow tests)"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - E2E_TEST=1 uv run pytest tests/e2e/test_run_lifecycle.py -v -m "not slow" -x
+
+  playwright:install:
+    desc: "Install Playwright browsers for E2E browser tests"
+    preconditions:
+      - sh: command -v uv
+        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - uv add playwright pytest-playwright
+      - uv run playwright install chromium

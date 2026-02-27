@@ -45,11 +45,17 @@ logging.getLogger("snowflake.connector.network").setLevel(logging.WARNING)
 
 
 class EndpointFilter(logging.Filter):
-    """Filter out high-frequency endpoints from access logs."""
+    """Filter out high-frequency endpoints from access logs (rate-limited)."""
+
+    _live_metrics_count = 0
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         if "/metrics/live" in msg:
+            self._live_metrics_count += 1
+            # Log first 5 and then every 120th (~ every 2 min at 1/s per worker)
+            if self._live_metrics_count <= 5 or self._live_metrics_count % 120 == 0:
+                return True
             return False
         return True
 

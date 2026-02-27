@@ -111,3 +111,67 @@ core/
 3. **Parallel development** - Multiple agents/developers can work simultaneously
 4. **Better testing** - Test modules in isolation
 5. **Clearer ownership** - Each module has single responsibility
+
+## SPCS Deployment Quick Reference
+
+**Full documentation:** See `spcs/README.md` for complete setup, networking, and troubleshooting.
+
+### Push Latest Image to SPCS
+
+```bash
+# Build, tag, login, and push (replace TAG with date-version like 20260227-v1)
+TAG=20260227-v1
+docker build --platform linux/amd64 -t flakebench:$TAG -f Dockerfile .
+docker tag flakebench:$TAG sfsenorthamerica-rgoldin-aws1.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:$TAG
+snow spcs image-registry login --connection default
+docker push sfsenorthamerica-rgoldin-aws1.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:$TAG
+```
+
+### Update SPCS Service
+
+```sql
+ALTER SERVICE SANDBOX.SPCS.FLAKEBENCH_SERVICE FROM SPECIFICATION $$
+spec:
+  containers:
+  - name: flakebench
+    image: /SANDBOX/SPCS/FLAKEBENCH_REPO/flakebench:<TAG>
+    env:
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8080"
+      APP_DEBUG: "false"
+      APP_RELOAD: "false"
+      SNOWFLAKE_WAREHOUSE: "COMPUTE_WH"
+      SNOWFLAKE_DATABASE: "FLAKEBENCH"
+      SNOWFLAKE_SCHEMA: "PUBLIC"
+      SNOWFLAKE_ROLE: "FLAKEBENCH_ROLE"
+      RESULTS_DATABASE: "FLAKEBENCH"
+      RESULTS_SCHEMA: "TEST_RESULTS"
+      LOG_LEVEL: "INFO"
+    resources:
+      requests:
+        memory: 2Gi
+        cpu: 1000m
+      limits:
+        memory: 4Gi
+        cpu: 2000m
+    readinessProbe:
+      port: 8080
+      path: /health
+  endpoints:
+  - name: flakebench-ui
+    port: 8080
+    public: true
+$$;
+```
+
+### Check Service Status
+
+```sql
+SELECT SYSTEM$GET_SERVICE_STATUS('SANDBOX.SPCS.FLAKEBENCH_SERVICE');
+```
+
+### View Service Logs
+
+```sql
+SELECT SYSTEM$GET_SERVICE_LOGS('SANDBOX.SPCS.FLAKEBENCH_SERVICE', 0, 'flakebench', 100);
+```

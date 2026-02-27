@@ -388,7 +388,7 @@ class ChartDataset(BaseModel):
     label: str
     data: list[Optional[float]]
     backgroundColor: str | list[str]
-    borderColor: Optional[str] = None
+    borderColor: Optional[str | list[str]] = None
     borderWidth: int = 1
 
 

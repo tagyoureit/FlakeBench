@@ -165,6 +165,21 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
     # When WORKER_METRICS_SNAPSHOTS is empty (file-based logger defers bulk load),
     # derive basic aggregate metrics from heartbeats so the dashboard isn't blank.
     if not rows and heartbeat_rows:
+        # Compute elapsed from RUN_STATUS for QPS approximation
+        try:
+            elapsed_rows = await pool.execute_query(
+                f"""
+                SELECT TIMESTAMPDIFF('SECOND', START_TIME, CURRENT_TIMESTAMP())
+                FROM {settings.RESULTS_DATABASE}.{settings.RESULTS_SCHEMA}.RUN_STATUS
+                WHERE RUN_ID = ? AND START_TIME IS NOT NULL
+                """,
+                params=[parent_run_id],
+            )
+            if elapsed_rows and elapsed_rows[0][0] is not None:
+                elapsed_seconds = max(1.0, float(elapsed_rows[0][0]))
+        except Exception:
+            elapsed_seconds = 0.0
+
         for hb in heartbeat_rows:
             hb_status = str(hb[2] or "").upper()
             hb_phase = str(hb[3] or "").upper()
@@ -176,6 +191,10 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
             error_count += _to_int(hb[8])     # ERROR_COUNT
             active_connections += _to_int(hb[5])  # ACTIVE_CONNECTIONS
             target_connections += _to_int(hb[6])  # TARGET_CONNECTIONS
+
+        # Approximate QPS from total operations / elapsed time
+        if elapsed_seconds > 0 and total_ops > 0:
+            qps = float(total_ops) / elapsed_seconds
 
     for (
         elapsed,
@@ -306,6 +325,7 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
     phase_order = {
         "PREPARING": 0,
         "WARMUP": 1,
+        "MEASUREMENT": 2,
         "RUNNING": 2,
         "PROCESSING": 3,
         "COMPLETED": 4,

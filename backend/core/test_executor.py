@@ -4545,7 +4545,7 @@ class TestExecutor:
                         self._postgres_pool_for_polling = pg_override
                         logger.info(
                             "[Worker %s] pg_stat_activity: using _postgres_pool_override",
-                            self._worker_id,
+                            self._worker_group_id,
                         )
                     else:
                         # Fall back to discovering from table managers.
@@ -4555,7 +4555,7 @@ class TestExecutor:
                                 self._postgres_pool_for_polling = pool
                                 logger.info(
                                     "[Worker %s] pg_stat_activity: using pool from table_managers",
-                                    self._worker_id,
+                                    self._worker_group_id,
                                 )
                                 break
 
@@ -4642,7 +4642,7 @@ class TestExecutor:
                                     }
                                     logger.debug(
                                         "[Worker %s] pg_stat_activity: active=%d tagged=%d",
-                                        self._worker_id,
+                                        self._worker_group_id,
                                         active,
                                         active_tagged,
                                     )
@@ -4847,7 +4847,7 @@ class TestExecutor:
                         fmc = self._find_max_controller_state
                         logger.debug(
                             "[Worker %s] Reporting find_max_controller: step=%s target=%s end_ms=%s",
-                            self._worker_id,
+                            self._worker_group_id,
                             fmc.get("current_step"),
                             fmc.get("target_workers"),
                             fmc.get("step_end_at_epoch_ms"),
@@ -5038,6 +5038,8 @@ class TestExecutor:
 
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.error(f"[CRITICAL] _collect_metrics crashed with error: {e}", exc_info=True)
 
     async def _build_result(self) -> TestResult:
         """Build test result from metrics."""

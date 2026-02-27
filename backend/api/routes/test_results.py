@@ -5459,14 +5459,15 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
 
 
 @router.get("/{test_id}/worker-metrics")
-async def get_worker_metrics(test_id: str) -> dict[str, Any]:
+async def get_worker_metrics(test_id: str, nocache: bool = False) -> dict[str, Any]:
     """
     Fetch per-worker time-series metrics snapshots for multi-worker runs.
     """
-    # Check cache first
-    cached = _worker_metrics_cache.get(test_id)
-    if cached is not None:
-        return cached
+    # Check cache first (skip if nocache=true)
+    if not nocache:
+        cached = _worker_metrics_cache.get(test_id)
+        if cached is not None:
+            return cached
     
     try:
         pool = snowflake_pool.get_default_pool()

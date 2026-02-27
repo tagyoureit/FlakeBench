@@ -57,6 +57,33 @@ class LiveMetricsUpdate(BaseModel):
     metrics: Metrics
 
 
+@router.get("/cache-status")
+async def get_cache_status() -> dict:
+    """Diagnostic: show what's in the LiveMetricsCache."""
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    runs = {}
+    for run_id, run in live_metrics_cache._runs.items():
+        workers = {}
+        for wid, snap in run.workers.items():
+            age = (now - snap.received_at).total_seconds()
+            workers[wid] = {
+                "phase": snap.phase,
+                "status": snap.status,
+                "age_seconds": round(age, 1),
+                "qps": snap.metrics.current_qps if snap.metrics else 0,
+                "total_ops": snap.metrics.total_operations if snap.metrics else 0,
+            }
+        runs[run_id] = {
+            "worker_count": len(run.workers),
+            "test_ids": sorted(run.test_ids),
+            "updated_at": run.updated_at.isoformat(),
+            "workers": workers,
+        }
+    return {"cache_runs": len(runs), "runs": runs, "ttl_seconds": live_metrics_cache._ttl_seconds}
+
+
 @router.post("/", response_model=RunCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_run(request: RunCreateRequest) -> RunCreateResponse:
     """
