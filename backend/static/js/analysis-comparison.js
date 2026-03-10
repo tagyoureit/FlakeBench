@@ -73,7 +73,7 @@ function tableTypeComparison() {
                 this.kpiCards = summary.kpi_cards || [];
                 this.comparisonTable = summary.comparison_table || { columns: [], rows: [] };
                 this.totals = summary.totals;
-                this.lastRefresh = new Date(summary.generated_at).toLocaleTimeString();
+                this.lastRefresh = new Date(_ensureUTC(summary.generated_at)).toLocaleTimeString();
                 
                 // Render charts after data is loaded - use setTimeout to ensure DOM is ready
                 this.$nextTick(() => {
@@ -421,7 +421,7 @@ function tableTypeComparison() {
 
         formatScatterStartTime(startedAt) {
             if (!startedAt) return 'Start: Unknown';
-            const parsed = new Date(startedAt);
+            const parsed = new Date(_ensureUTC(startedAt));
             if (Number.isNaN(parsed.getTime())) return `Start: ${startedAt}`;
             return `Start: ${parsed.toLocaleString()}`;
         },

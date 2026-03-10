@@ -1003,14 +1003,14 @@ function compareDetail() {
 
     formatSuggestionDate(iso) {
       if (!iso) return "Unknown date";
-      const d = new Date(iso);
+      const d = new Date(_ensureUTC(iso));
       if (Number.isNaN(d.getTime())) return "Unknown date";
       return d.toLocaleString();
     },
 
     formatRelativeAge(iso) {
       if (!iso) return "";
-      const d = new Date(iso);
+      const d = new Date(_ensureUTC(iso));
       if (Number.isNaN(d.getTime())) return "";
       const diffMs = Date.now() - d.getTime();
       const minute = 60 * 1000;

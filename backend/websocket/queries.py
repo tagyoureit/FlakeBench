@@ -7,6 +7,7 @@ from typing import Any
 
 from backend.config import settings
 from backend.connectors import snowflake_pool
+from backend.core.dt import utc_iso
 
 logger = logging.getLogger(__name__)
 
@@ -323,11 +324,7 @@ async def fetch_logs_since_seq(
                     "test_id": str(tid) if tid else test_id,
                     "worker_id": str(worker_id) if worker_id else None,
                     "seq": int(seq) if seq is not None else 0,
-                    "timestamp": ts.isoformat()
-                    if hasattr(ts, "isoformat")
-                    else str(ts)
-                    if ts
-                    else None,
+                    "timestamp": utc_iso(ts),
                     "level": str(level) if level else "INFO",
                     "logger": str(logger_name) if logger_name else "",
                     "message": str(message) if message else "",
@@ -390,11 +387,7 @@ async def fetch_logs_for_tests(
                     "test_id": str(tid) if tid else None,
                     "worker_id": str(worker_id) if worker_id else None,
                     "seq": int(seq) if seq is not None else 0,
-                    "timestamp": ts.isoformat()
-                    if hasattr(ts, "isoformat")
-                    else str(ts)
-                    if ts
-                    else None,
+                    "timestamp": utc_iso(ts),
                     "level": str(level) if level else "INFO",
                     "logger": str(logger_name) if logger_name else "",
                     "message": str(message) if message else "",

@@ -20,7 +20,7 @@ Cost Analysis:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -134,7 +134,7 @@ async def get_table_type_summary() -> TableTypeSummaryResponse:
     if not rows:
         # Return empty response if no data
         return TableTypeSummaryResponse(
-            generated_at=datetime.now(),
+            generated_at=datetime.now(UTC),
             kpi_cards=[],
             comparison_table=ComparisonTable(columns=[], rows=[]),
             totals=DashboardTotals(
@@ -207,7 +207,7 @@ async def get_table_type_summary() -> TableTypeSummaryResponse:
     )
     
     return TableTypeSummaryResponse(
-        generated_at=datetime.now(),
+        generated_at=datetime.now(UTC),
         kpi_cards=kpi_cards,
         comparison_table=comparison_table,
         totals=totals

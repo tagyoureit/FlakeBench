@@ -482,8 +482,8 @@ function testHistory() {
         let bVal = b[this.sortField];
 
         if (this.sortField === "created_at") {
-          aVal = new Date(aVal);
-          bVal = new Date(bVal);
+          aVal = new Date(_ensureUTC(aVal));
+          bVal = new Date(_ensureUTC(bVal));
         }
 
         if (this.sortDirection === "asc") {

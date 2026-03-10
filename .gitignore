@@ -117,3 +117,4 @@ AGENTS.md
 # Tailwind CSS build output (run 'task css:build' to generate)
 backend/static/css/tailwind.css
 .images.env.*
+.images/2026-03-04-124735-flakebench-home.jpg

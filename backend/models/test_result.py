@@ -9,6 +9,8 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 from uuid import UUID, uuid4
 
+from backend.core.dt import utc_iso
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -266,7 +268,7 @@ class TestResult(BaseModel):
         use_enum_values=True,
         populate_by_name=True,
         json_encoders={
-            datetime: lambda v: v.isoformat(),
+            datetime: lambda v: utc_iso(v),
             UUID: lambda v: str(v),
         },
     )
@@ -322,7 +324,7 @@ class TestRun(BaseModel):
     model_config = ConfigDict(
         use_enum_values=True,
         json_encoders={
-            datetime: lambda v: v.isoformat(),
+            datetime: lambda v: utc_iso(v),
             UUID: lambda v: str(v),
         },
     )

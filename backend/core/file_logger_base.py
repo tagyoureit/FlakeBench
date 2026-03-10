@@ -259,22 +259,41 @@ class FileBasedLoggerBase(ABC):
                     PUT file://{file_path} {stage_path}/
                     AUTO_COMPRESS=FALSE OVERWRITE=TRUE
                 """
-                await pool.execute_query(put_sql)
-                logger.info("Uploaded %s to stage", file_path.name)
+                put_result = await pool.execute_query(put_sql)
+                if not put_result:
+                    logger.error(
+                        "PUT returned empty result for %s -> %s "
+                        "(likely permission denied on stage %s)",
+                        file_path.name,
+                        stage_path,
+                        self._stage_name,
+                    )
+                    return {
+                        "rows_loaded": 0,
+                        "files_processed": 0,
+                        "total_rows_captured": self._total_rows,
+                        "error": f"PUT failed for {file_path.name}",
+                    }
+                logger.info("Uploaded %s to stage: %s", file_path.name, put_result)
 
             # 6. COPY INTO target table with JSON parsing
             # Build column list, applying TRY_PARSE_JSON to JSON columns
             json_cols_set = set(self._json_columns)
-            schema_cols = [field.name.upper() for field in self._build_schema()]
+            schema_fields = self._build_schema()
+            target_cols_list = []
             select_cols = []
-            for col in schema_cols:
-                if col in json_cols_set:
-                    select_cols.append(f"TRY_PARSE_JSON($1:{col}) AS {col}")
+            for field in schema_fields:
+                parquet_name = field.name
+                sf_name = parquet_name.upper()
+                target_cols_list.append(sf_name)
+                if sf_name in json_cols_set:
+                    select_cols.append(f"TRY_PARSE_JSON($1:{parquet_name}) AS {sf_name}")
                 else:
-                    select_cols.append(f"$1:{col} AS {col}")
+                    select_cols.append(f"$1:{parquet_name} AS {sf_name}")
 
+            target_cols = ', '.join(target_cols_list)
             copy_sql = f"""
-                COPY INTO {self.results_prefix}.{self._table_name}
+                COPY INTO {self.results_prefix}.{self._table_name} ({target_cols})
                 FROM (
                     SELECT {', '.join(select_cols)}
                     FROM {stage_path}/
@@ -283,6 +302,11 @@ class FileBasedLoggerBase(ABC):
                 ON_ERROR = CONTINUE
             """
             result = await pool.execute_query(copy_sql)
+            if not result:
+                logger.error(
+                    "COPY INTO %s returned empty result (likely permission error)",
+                    self._table_name,
+                )
 
             rows_loaded = self._parse_copy_result(result)
 

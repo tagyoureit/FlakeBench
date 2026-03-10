@@ -99,7 +99,7 @@ function templateAnalysis() {
 
         formatDate(val) {
             if (!val) return 'N/A';
-            return new Date(val).toLocaleDateString();
+            return new Date(_ensureUTC(val)).toLocaleDateString();
         },
 
         getStabilityClass(badge) {

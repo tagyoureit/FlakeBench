@@ -2,10 +2,10 @@
 Pydantic models for template API requests and responses.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TemplateConfig(BaseModel):
@@ -54,6 +54,17 @@ class TemplateResponse(BaseModel):
     tags: Optional[Dict[str, str]]
     usage_count: int
     last_used_at: Optional[datetime]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _stamp_naive_datetimes(cls, data: dict) -> dict:  # type: ignore[override]
+        if not isinstance(data, dict):
+            return data
+        for name in ("created_at", "updated_at", "last_used_at"):
+            val = data.get(name)
+            if isinstance(val, datetime) and val.tzinfo is None:
+                data[name] = val.replace(tzinfo=timezone.utc)
+        return data
 
 
 class AiPrepareResponse(BaseModel):

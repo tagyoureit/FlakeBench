@@ -185,7 +185,7 @@ function historyData() {
         formatTimestamp(v) {
             if (!v) return "";
             try {
-                return new Date(v).toLocaleString();
+                return new Date(_ensureUTC(v)).toLocaleString();
             } catch {
                 return String(v);
             }

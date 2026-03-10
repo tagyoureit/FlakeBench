@@ -605,7 +605,7 @@
                         <div class="text-xs text-gray-500 mt-1 flex items-center gap-3">
                             <span x-text="run.qps_avg ? formatCompact(run.qps_avg) + ' QPS' : ''"></span>
                             <span x-text="run.p95_avg ? 'P95: ' + run.p95_avg.toFixed(0) + 'ms' : ''"></span>
-                            <span x-text="run.created_at ? new Date(run.created_at).toLocaleDateString() : ''"></span>
+                            <span x-text="run.created_at ? new Date(_ensureUTC(run.created_at)).toLocaleDateString() : ''"></span>
                         </div>
                     </div>
                     <button

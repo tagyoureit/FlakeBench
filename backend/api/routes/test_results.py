@@ -32,6 +32,7 @@ from backend.core.results_store import update_parent_run_aggregate
 from backend.core.test_registry import registry
 from backend.core.cost_calculator import calculate_estimated_cost, calculate_cost_efficiency
 from backend.api.error_handling import http_exception
+from backend.core.dt import utc_iso
 from backend.api.routes.test_results_modules.comparison import build_compare_context
 from backend.api.routes.test_results_modules.comparison_prompts import (
     generate_comparison_prompt,
@@ -2696,7 +2697,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
                     "warehouse_size": cfg.get("warehouse_size"),
                     "status": running.status,
                     "phase": phase,
-                    "start_time": running.created_at.isoformat(),
+                    "start_time": utc_iso(running.created_at),
                     "end_time": None,
                     "duration_seconds": None
                     if load_mode == "FIND_MAX_CONCURRENCY"
@@ -2710,7 +2711,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
                         (running.scenario.duration_seconds or 0)
                         + (running.scenario.warmup_seconds or 0)
                     ),
-                    "created_at": running.created_at.isoformat(),
+                    "created_at": utc_iso(running.created_at),
                     "concurrent_connections": int(running.scenario.total_threads or 0),
                     "ops_per_sec": 0.0,
                     "p50_latency": 0.0,
@@ -3115,15 +3116,9 @@ async def get_test(test_id: str) -> dict[str, Any]:
             "warehouse_size": warehouse_size,
             "postgres_instance_size": template_cfg.get("postgres_instance_size") if isinstance(template_cfg, dict) else None,
             "status": status_live,
-            "start_time": start_time_live.isoformat()
-            if hasattr(start_time_live, "isoformat")
-            else str(start_time_live),
-            "created_at": start_time_live.isoformat()
-            if hasattr(start_time_live, "isoformat")
-            else str(start_time_live),
-            "end_time": end_time_live.isoformat()
-            if end_time_live and hasattr(end_time_live, "isoformat")
-            else None,
+            "start_time": utc_iso(start_time_live),
+            "created_at": utc_iso(start_time_live),
+            "end_time": utc_iso(end_time_live),
             # Use configured duration from template, not actual elapsed time
             "duration_seconds": int(
                 float(
@@ -3866,12 +3861,8 @@ async def list_query_executions(
                     "execution_id": execution_id,
                     "query_id": query_id,
                     "query_kind": query_kind,
-                    "start_time": start_time.isoformat()
-                    if hasattr(start_time, "isoformat")
-                    else str(start_time),
-                    "end_time": end_time.isoformat()
-                    if hasattr(end_time, "isoformat")
-                    else str(end_time),
+                    "start_time": utc_iso(start_time),
+                    "end_time": utc_iso(end_time),
                     "duration_ms": _to_float_or_none(duration_ms),
                     "app_elapsed_ms": _to_float_or_none(app_elapsed_ms),
                     "sf_execution_ms": _to_float_or_none(sf_execution_ms),
@@ -4235,7 +4226,7 @@ async def get_error_summary(test_id: str) -> ErrorSummaryResponse:
         for (source, summary, msg_norm, level, query_type), (n, earliest) in agg.items():
             earliest_str = None
             if earliest:
-                earliest_str = earliest.isoformat() if hasattr(earliest, "isoformat") else str(earliest)
+                earliest_str = utc_iso(earliest)
             out_rows.append(
                 ErrorSummaryRow(
                     source=source,
@@ -4392,9 +4383,7 @@ async def get_error_details(
         out_rows: list[ErrorDetailRow] = []
         for row in rows:
             exec_id, tid, worker_id, query_kind, warmup_val, error, start_time = row
-            timestamp_str = (
-                start_time.isoformat() if hasattr(start_time, "isoformat") else str(start_time)
-            )
+            timestamp_str = utc_iso(start_time)
             worker_label = worker_labels.get(str(tid), f"worker-{worker_id}" if worker_id else None)
 
             out_rows.append(
@@ -4700,9 +4689,7 @@ async def get_test_logs(
                         "test_id": test_id_db,
                         "worker_id": str(worker_id) if worker_id else None,
                         "seq": int(seq or 0),
-                        "timestamp": ts.isoformat()
-                        if hasattr(ts, "isoformat")
-                        else str(ts),
+                        "timestamp": utc_iso(ts),
                         "level": level,
                         "logger": logger_name,
                         "message": message,
@@ -4754,9 +4741,7 @@ async def get_test_logs(
                     "test_id": test_id_db,
                     "worker_id": str(worker_id) if worker_id else None,
                     "seq": int(seq or 0),
-                    "timestamp": ts.isoformat()
-                    if hasattr(ts, "isoformat")
-                    else str(ts),
+                    "timestamp": utc_iso(ts),
                     "level": level,
                     "logger": logger_name,
                     "message": message,
@@ -5298,9 +5283,7 @@ async def get_test_metrics(test_id: str) -> dict[str, Any]:
 
             snapshots.append(
                 {
-                    "timestamp": timestamp.isoformat()
-                    if hasattr(timestamp, "isoformat")
-                    else str(timestamp),
+                    "timestamp": utc_iso(timestamp),
                     "elapsed_seconds": float(elapsed or 0),
                     "ops_per_sec": float(ops_per_sec or 0),
                     "p50_latency": float(p50 or 0),
@@ -5587,9 +5570,7 @@ async def get_worker_metrics(test_id: str, nocache: bool = False) -> dict[str, A
             
             snapshots_list.append(
                 {
-                    "timestamp": timestamp.isoformat()
-                    if hasattr(timestamp, "isoformat")
-                    else str(timestamp),
+                    "timestamp": utc_iso(timestamp),
                     "elapsed_seconds": run_relative_elapsed,
                     "qps": float(qps or 0),
                     "p50_latency": float(p50 or 0),
@@ -5617,7 +5598,7 @@ async def get_worker_metrics(test_id: str, nocache: bool = False) -> dict[str, A
         first_data_timestamp: str | None = None
         if rows and rows[0] and rows[0][3]:
             ts = rows[0][3]
-            first_data_timestamp = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+            first_data_timestamp = utc_iso(ts)
 
         result = {
             "test_id": test_id,
@@ -5905,9 +5886,7 @@ async def get_warehouse_timeseries(test_id: str) -> dict[str, Any]:
 
             points.append(
                 {
-                    "timestamp": ts.isoformat()
-                    if hasattr(ts, "isoformat")
-                    else str(ts),
+                    "timestamp": utc_iso(ts),
                     "elapsed_seconds": float(elapsed or 0),
                     "active_clusters": best_clusters,
                     "queries_started": queries_started_i,
@@ -6153,9 +6132,7 @@ async def get_overhead_timeseries(test_id: str) -> dict[str, Any]:
 
             points.append(
                 {
-                    "timestamp": ts.isoformat()
-                    if hasattr(ts, "isoformat")
-                    else str(ts),
+                    "timestamp": utc_iso(ts),
                     "elapsed_seconds": float(elapsed or 0),
                     "total_queries": total_q_i,
                     "enriched_queries": enriched_q_i,

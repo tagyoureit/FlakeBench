@@ -1322,7 +1322,7 @@ function dashboard(opts) {
           this.updateLiveTransport();
         }
 
-        const ts = payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+        const ts = payload.timestamp ? new Date(_ensureUTC(payload.timestamp)).toLocaleTimeString() : new Date().toLocaleTimeString();
         const ops = payload.ops;
         const latency = payload.latency;
         const errors = payload.errors;

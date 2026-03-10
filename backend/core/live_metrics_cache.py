@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from backend.config import settings
+from backend.core.dt import utc_iso
 from backend.models.metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -316,9 +317,7 @@ def _aggregate_workers(
                 "status": status_upper or "UNKNOWN",
                 "phase": phase_value,
                 "health": _health_from(status_upper, age_seconds),
-                "last_heartbeat": (
-                    last_dt.isoformat() if isinstance(last_dt, datetime) else None
-                ),
+                "last_heartbeat": utc_iso(last_dt),
                 "last_heartbeat_ago_s": float(age_seconds),
                 "metrics": {
                     "qps": float(metrics.current_qps or 0.0),

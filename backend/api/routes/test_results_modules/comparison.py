@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from backend.config import settings
+from backend.core.dt import utc_iso
 
 from .statistics import (
     percentile,
@@ -672,8 +673,8 @@ def calculate_rolling_statistics(
         "rolling_median": rolling_median,
         "confidence_band": confidence_band,
         "weighted_qps_median": weighted_qps,
-        "oldest_date": oldest_date.isoformat() if oldest_date else None,
-        "newest_date": newest_date.isoformat() if newest_date else None,
+        "oldest_date": utc_iso(oldest_date),
+        "newest_date": utc_iso(newest_date),
     }
 
 
@@ -881,7 +882,7 @@ async def build_compare_context(
         vs_previous = {
             "test_id": previous.get("test_id"),
             "test_date": (
-                previous["start_time"].isoformat()
+                utc_iso(previous["start_time"])
                 if previous.get("start_time")
                 else None
             ),
@@ -965,7 +966,7 @@ async def build_compare_context(
             processed.append({
                 "test_id": candidate.get("test_id"),
                 "test_date": (
-                    candidate["start_time"].isoformat()
+                    utc_iso(candidate["start_time"])
                     if candidate.get("start_time")
                     else None
                 ),

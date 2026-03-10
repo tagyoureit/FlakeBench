@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel
 
 from backend.api.error_handling import http_exception
+from backend.core.dt import utc_iso
 from backend.core.live_metrics_cache import live_metrics_cache
 from backend.core.orchestrator import orchestrator
 from backend.core.test_registry import registry
@@ -78,7 +79,7 @@ async def get_cache_status() -> dict:
         runs[run_id] = {
             "worker_count": len(run.workers),
             "test_ids": sorted(run.test_ids),
-            "updated_at": run.updated_at.isoformat(),
+            "updated_at": utc_iso(run.updated_at),
             "workers": workers,
         }
     return {"cache_runs": len(runs), "runs": runs, "ttl_seconds": live_metrics_cache._ttl_seconds}

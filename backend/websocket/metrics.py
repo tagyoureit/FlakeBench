@@ -9,6 +9,7 @@ from typing import Any
 from backend.config import settings
 from backend.connectors import snowflake_pool
 from backend.core import results_store
+from backend.core.dt import utc_iso
 
 from .helpers import (
     _avg_dicts,
@@ -77,10 +78,8 @@ def build_run_snapshot(
         run_payload["workers_completed"] = run_status.get("workers_completed")
         start_time = _coerce_datetime(run_status.get("start_time"))
         end_time = _coerce_datetime(run_status.get("end_time"))
-        run_payload["start_time"] = (
-            start_time.isoformat() if start_time is not None else None
-        )
-        run_payload["end_time"] = end_time.isoformat() if end_time is not None else None
+        run_payload["start_time"] = utc_iso(start_time)
+        run_payload["end_time"] = utc_iso(end_time)
     return run_payload
 
 
@@ -385,9 +384,7 @@ async def aggregate_multi_worker_metrics(parent_run_id: str) -> dict[str, Any]:
                 "health": _health_from(
                     hb.get("status"), hb.get("last_heartbeat_ago_s")
                 ),
-                "last_heartbeat": (
-                    last_dt.isoformat() if isinstance(last_dt, datetime) else None
-                ),
+                "last_heartbeat": utc_iso(last_dt),
                 "last_heartbeat_ago_s": hb.get("last_heartbeat_ago_s"),
                 "metrics": {
                     "qps": snapshot.get("qps") or 0.0,

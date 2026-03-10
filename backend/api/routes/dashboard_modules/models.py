@@ -2,16 +2,29 @@
 Dashboard API Models - Pydantic response models for dashboard endpoints.
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class _UTCModel(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def _stamp_naive_datetimes(cls, data: dict) -> dict:  # type: ignore[override]
+        if not isinstance(data, dict):
+            return data
+        for name, field in cls.model_fields.items():
+            val = data.get(name)
+            if isinstance(val, datetime) and val.tzinfo is None:
+                data[name] = val.replace(tzinfo=timezone.utc)
+        return data
 
 
 # =============================================================================
 # Table Type Summary Models
 # =============================================================================
 
-class TableTypeKPI(BaseModel):
+class TableTypeKPI(_UTCModel):
     """KPI card data for a single table type."""
     
     table_type: str
@@ -98,7 +111,7 @@ class Recommendation(BaseModel):
     runner_up_rationale: Optional[str] = None
 
 
-class TableTypeSummaryResponse(BaseModel):
+class TableTypeSummaryResponse(_UTCModel):
     """Response for /api/dashboard/table-types/summary."""
     
     generated_at: datetime
@@ -150,7 +163,7 @@ class StabilityMetrics(BaseModel):
     trend_pct: Optional[float] = None
 
 
-class OutlierInfo(BaseModel):
+class OutlierInfo(_UTCModel):
     """Information about an outlier test run."""
     
     test_id: str
@@ -160,7 +173,7 @@ class OutlierInfo(BaseModel):
     reason: str  # e.g., "3.2σ above median"
 
 
-class TemplateSummary(BaseModel):
+class TemplateSummary(_UTCModel):
     """Summary for a template in list view."""
     
     template_id: str
@@ -313,7 +326,7 @@ class TrendResponse(BaseModel):
 # Template Runs Models
 # =============================================================================
 
-class TemplateRun(BaseModel):
+class TemplateRun(_UTCModel):
     """A single test run for a template."""
     
     test_id: str
@@ -328,7 +341,6 @@ class TemplateRun(BaseModel):
     credits_used: Optional[float] = None
     cost_per_1k_ops_usd: Optional[float] = None
     
-    # Outlier detection
     is_outlier: bool = False
     outlier_reason: Optional[str] = None
 

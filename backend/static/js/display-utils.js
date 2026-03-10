@@ -1,5 +1,15 @@
 // @ts-check
 
+// =============================================================================
+// Timezone Safety
+// =============================================================================
+
+function _ensureUTC(ts) {
+  if (!ts || typeof ts !== "string") return ts;
+  if (/[Zz]$/.test(ts) || /[+-]\d{2}:\d{2}$/.test(ts)) return ts;
+  return ts + "Z";
+}
+
 /**
  * Shared display utilities for formatting test configurations.
  *

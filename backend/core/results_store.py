@@ -559,6 +559,50 @@ async def update_parent_run_aggregate(*, parent_run_id: str) -> None:
         worker_avg,
     ) = metrics_rows[0] if metrics_rows else (None,) * 10
 
+    if worker_qps is None:
+        fallback_rows = await pool.execute_query(
+            f"""
+            SELECT
+                SUM(TOTAL_OPERATIONS) AS TOTAL_QUERIES,
+                SUM(READ_OPERATIONS) AS READ_COUNT,
+                SUM(WRITE_OPERATIONS) AS WRITE_COUNT,
+                SUM(ERROR_COUNT) AS ERROR_COUNT,
+                SUM(QPS) AS QPS,
+                MAX(DURATION_SECONDS) AS ELAPSED_SECONDS,
+                AVG(IFF(TOTAL_OPERATIONS > 0, P50_LATENCY_MS, NULL)) AS P50_LATENCY_MS,
+                MAX(IFF(TOTAL_OPERATIONS > 0, P95_LATENCY_MS, NULL)) AS P95_LATENCY_MS,
+                MAX(IFF(TOTAL_OPERATIONS > 0, P99_LATENCY_MS, NULL)) AS P99_LATENCY_MS,
+                CASE
+                    WHEN SUM(TOTAL_OPERATIONS) > 0
+                    THEN SUM(AVG_LATENCY_MS * TOTAL_OPERATIONS) / SUM(TOTAL_OPERATIONS)
+                    ELSE 0
+                END AS AVG_LATENCY_MS
+            FROM {prefix}.TEST_RESULTS
+            WHERE RUN_ID = ?
+              AND TEST_ID <> ?
+              AND STATUS = 'COMPLETED'
+            """,
+            params=[parent_run_id, parent_run_id],
+        )
+        if fallback_rows and fallback_rows[0]:
+            (
+                worker_total_queries,
+                worker_read_count,
+                worker_write_count,
+                worker_error_count,
+                worker_qps,
+                worker_elapsed,
+                worker_p50,
+                worker_p95,
+                worker_p99,
+                worker_avg,
+            ) = fallback_rows[0]
+            logger.info(
+                "Used child TEST_RESULTS fallback for parent %s (QPS=%s)",
+                parent_run_id,
+                worker_qps,
+            )
+
     # Use duration from TIMESTAMPDIFF calculated in Snowflake to avoid timezone issues.
     # Snowflake returns naive datetimes in session timezone (often Pacific), so
     # Python-based (end_time - start_time).total_seconds() causes ~8 hour discrepancy.

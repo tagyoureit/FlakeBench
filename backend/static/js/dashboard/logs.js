@@ -375,7 +375,7 @@ window.DashboardMixins.logs = {
   formatLogTimestamp(timestamp) {
     if (!timestamp) return "";
     try {
-      return new Date(timestamp).toLocaleTimeString();
+      return new Date(_ensureUTC(timestamp)).toLocaleTimeString();
     } catch (_) {
       return String(timestamp || "");
     }
@@ -419,7 +419,7 @@ window.DashboardMixins.logs = {
     if (!logs || logs.length === 0) return "";
     return logs
       .map((l) => {
-        const ts = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "";
+        const ts = l.timestamp ? new Date(_ensureUTC(l.timestamp)).toLocaleTimeString() : "";
         const lvl = String(l.level || "").toUpperCase();
         const logger = l.logger ? ` ${this.formatLogLogger(l.logger)}` : "";
         const worker = this._normalizeWorkerId(l.worker_id);

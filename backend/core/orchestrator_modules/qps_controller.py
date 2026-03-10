@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from backend.core.dt import utc_iso
+
 
 @dataclass
 class QPSControllerState:
@@ -61,9 +63,7 @@ class QPSControllerState:
             "over_target_streak": int(self.over_target_streak),
             "current_threads": int(self.current_threads),
             "last_observed_qps": float(self.last_observed_qps),
-            "last_scale_time": (
-                self.last_scale_time.isoformat() if self.last_scale_time else None
-            ),
+            "last_scale_time": utc_iso(self.last_scale_time),
         }
 
 

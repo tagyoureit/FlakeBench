@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Optional
 
+from backend.core.dt import utc_iso
+
 logger = logging.getLogger(__name__)
 
 
@@ -518,7 +520,7 @@ def _make_json_serializable(obj: Any) -> Any:
     if isinstance(obj, Decimal):
         return float(obj)
     elif isinstance(obj, datetime):
-        return obj.isoformat()
+        return utc_iso(obj)
     elif isinstance(obj, bytes):
         return obj.hex()
     elif isinstance(obj, dict):
@@ -532,7 +534,7 @@ def _make_json_serializable(obj: Any) -> Any:
 def snapshot_to_dict(snapshot: PgStatSnapshot) -> dict[str, Any]:
     """Convert snapshot to JSON-serializable dict for storage."""
     return _make_json_serializable({
-        "timestamp": snapshot.timestamp.isoformat(),
+        "timestamp": utc_iso(snapshot.timestamp),
         "settings": snapshot.settings,
         "stats": {str(k): v for k, v in snapshot.stats.items()},
     })
@@ -541,8 +543,8 @@ def snapshot_to_dict(snapshot: PgStatSnapshot) -> dict[str, Any]:
 def delta_to_dict(delta: PgStatDelta) -> dict[str, Any]:
     """Convert delta to JSON-serializable dict for storage."""
     return _make_json_serializable({
-        "before_timestamp": delta.before_timestamp.isoformat(),
-        "after_timestamp": delta.after_timestamp.isoformat(),
+        "before_timestamp": utc_iso(delta.before_timestamp),
+        "after_timestamp": utc_iso(delta.after_timestamp),
         "settings": delta.settings,
         "by_queryid": {str(k): v for k, v in delta.by_queryid.items()},
         "by_query_kind": delta.by_query_kind,

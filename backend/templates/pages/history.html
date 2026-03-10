@@ -440,8 +440,8 @@
                             </td>
                             <!-- Date -->
                             <td class="text-sm">
-                                <div x-text="new Date(test.created_at).toLocaleDateString()"></div>
-                                <div class="text-gray-500 text-xs" x-text="new Date(test.created_at).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})"></div>
+                                <div x-text="new Date(_ensureUTC(test.created_at)).toLocaleDateString()"></div>
+                                <div class="text-gray-500 text-xs" x-text="new Date(_ensureUTC(test.created_at)).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})"></div>
                             </td>
                             <!-- Results: QPS / Duration / P95 -->
                             <td>

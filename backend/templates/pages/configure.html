@@ -1267,7 +1267,7 @@
                                 <span class="text-gray-500">·</span>
                                 <span x-text="(info?.count || 0).toLocaleString() + ' values'"></span>
                                 <span class="text-gray-400 text-xs" x-show="info?.kind">(<span x-text="info?.kind"></span>)</span>
-                                <span class="text-gray-400 text-xs" x-show="info?.refreshed_at" x-text="'Updated ' + new Date(info?.refreshed_at).toLocaleDateString()"></span>
+                                <span class="text-gray-400 text-xs" x-show="info?.refreshed_at" x-text="'Updated ' + new Date(_ensureUTC(info?.refreshed_at)).toLocaleDateString()"></span>
                             </div>
                         </template>
                     </div>
@@ -1973,7 +1973,7 @@ function testConfiguration() {
 
         formatDateTime(val) {
             if (!val) return 'N/A';
-            return new Date(val).toLocaleString();
+            return new Date(_ensureUTC(val)).toLocaleString();
         },
 
         formatDuration(seconds) {

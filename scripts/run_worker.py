@@ -1649,7 +1649,6 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 await metrics_task
             except asyncio.CancelledError:
                 pass
-        await _stop_log_streaming()
 
     executor.status = exit_status
     executor.end_time = datetime.now(UTC)
@@ -1664,13 +1663,11 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
     except Exception as exc:
         logger.warning("Failed to update TEST_RESULTS final row: %s", exc)
 
-    # NOTE: Enrichment status (PENDING/SKIPPED) is set by the orchestrator in
-    # _mark_run_completed(), not by workers. This avoids race conditions when
-    # multiple workers complete around the same time.
-
-    # Finalize query logger: flush buffer, PUT to stage, COPY INTO, cleanup.
-    # This happens during PROCESSING phase after benchmark completes.
+    # Finalize file loggers BEFORE stopping log streaming so errors are visible.
     try:
+        logger.info(
+            "FileBasedQueryLogger pre-finalize stats: %s", query_logger.stats
+        )
         finalize_stats = await query_logger.finalize(snowflake_pool.get_default_pool())
         logger.info(
             "FileBasedQueryLogger finalized: %s",
@@ -1678,16 +1675,19 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 "rows_loaded": finalize_stats.get("rows_loaded"),
                 "files_processed": finalize_stats.get("files_processed"),
                 "total_rows_captured": finalize_stats.get("total_rows_captured"),
+                "error": finalize_stats.get("error"),
             },
         )
         health.record_success()
     except Exception as exc:
-        logger.warning("Failed to finalize FileBasedQueryLogger: %s", exc)
+        logger.error("Failed to finalize FileBasedQueryLogger: %s", exc, exc_info=True)
+        print(f"[FINALIZE ERROR] FileBasedQueryLogger: {exc}", flush=True)
         query_logger.cleanup_on_error()
 
-    # Finalize metrics logger: flush buffer, PUT to stage, COPY INTO, cleanup.
-    # This bulk loads WORKER_METRICS_SNAPSHOTS without lock contention.
     try:
+        logger.info(
+            "FileBasedMetricsLogger pre-finalize stats: %s", metrics_logger.stats
+        )
         metrics_stats = await metrics_logger.finalize(snowflake_pool.get_default_pool())
         logger.info(
             "FileBasedMetricsLogger finalized: %s",
@@ -1695,12 +1695,17 @@ async def _run_worker_control_plane(args: argparse.Namespace) -> int:
                 "rows_loaded": metrics_stats.get("rows_loaded"),
                 "files_processed": metrics_stats.get("files_processed"),
                 "total_rows_captured": metrics_stats.get("total_rows_captured"),
+                "error": metrics_stats.get("error"),
             },
         )
         health.record_success()
     except Exception as exc:
-        logger.warning("Failed to finalize FileBasedMetricsLogger: %s", exc)
+        logger.error("Failed to finalize FileBasedMetricsLogger: %s", exc, exc_info=True)
+        print(f"[FINALIZE ERROR] FileBasedMetricsLogger: {exc}", flush=True)
         metrics_logger.cleanup_on_error()
+
+    # Stop log streaming AFTER finalize so errors are captured
+    await _stop_log_streaming()
 
     # NOTE: Enrichment (QUERY_HISTORY matching) is handled centrally by the
     # orchestrator as a background task after all workers complete. Worker just

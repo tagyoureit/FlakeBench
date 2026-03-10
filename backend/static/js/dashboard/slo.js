@@ -186,16 +186,56 @@ window.DashboardMixins.slo = {
 
   stepSloObservedP95Ms(kind, step) {
     const n = this._stepKindMetric(step, kind, "p95_latency_ms");
-    return Number.isFinite(n) && n > 0 ? n : null;
+    if (Number.isFinite(n) && n > 0) return n;
+    const kindUpper = kind != null ? String(kind).toUpperCase() : "";
+    if (this.latencyByKind && typeof this.latencyByKind === "object") {
+      const liveData = this.latencyByKind[kindUpper];
+      if (liveData && typeof liveData === "object") {
+        const lv = Number(liveData.p95 || 0);
+        if (Number.isFinite(lv) && lv > 0) return lv;
+      }
+    }
+    const info = this.templateInfo;
+    if (!info) return null;
+    const k = this._kindKey(kind);
+    if (!k) return null;
+    const field = `${k}_p95_latency_ms`;
+    const v = Number(info[field] || 0);
+    return Number.isFinite(v) && v > 0 ? v : null;
   },
 
   stepSloObservedP99Ms(kind, step) {
     const n = this._stepKindMetric(step, kind, "p99_latency_ms");
-    return Number.isFinite(n) && n > 0 ? n : null;
+    if (Number.isFinite(n) && n > 0) return n;
+    const kindUpper = kind != null ? String(kind).toUpperCase() : "";
+    if (this.latencyByKind && typeof this.latencyByKind === "object") {
+      const liveData = this.latencyByKind[kindUpper];
+      if (liveData && typeof liveData === "object") {
+        const lv = Number(liveData.p99 || 0);
+        if (Number.isFinite(lv) && lv > 0) return lv;
+      }
+    }
+    const info = this.templateInfo;
+    if (!info) return null;
+    const k = this._kindKey(kind);
+    if (!k) return null;
+    const field = `${k}_p99_latency_ms`;
+    const v = Number(info[field] || 0);
+    return Number.isFinite(v) && v > 0 ? v : null;
   },
 
   stepSloObservedErrorPct(kind, step) {
-    return this._stepKindMetric(step, kind, "error_rate_pct");
+    const n = this._stepKindMetric(step, kind, "error_rate_pct");
+    if (n != null) return n;
+    const info = this.templateInfo;
+    if (!info) return null;
+    const k = this._kindKey(kind);
+    if (!k) return null;
+    const field = `${k}_error_rate_pct`;
+    const v = info[field];
+    if (v == null) return null;
+    const num = Number(v);
+    return Number.isFinite(num) ? num : null;
   },
 
   stepSloRowStatus(step, kind) {

@@ -283,7 +283,7 @@ window.DashboardMixins.historicalMetrics = {
         // Use run_start_at which is the first data timestamp from worker_metrics.
         let referenceTime = null;
         if (this._workerMetricsRunStartAt) {
-          referenceTime = new Date(this._workerMetricsRunStartAt).getTime();
+          referenceTime = new Date(_ensureUTC(this._workerMetricsRunStartAt)).getTime();
         }
         
         for (const worker of workerMetrics) {
@@ -292,7 +292,7 @@ window.DashboardMixins.historicalMetrics = {
             let bucket;
             if (referenceTime && snap.timestamp) {
               // Use absolute timestamp converted to run-relative seconds
-              const snapTime = new Date(snap.timestamp).getTime();
+              const snapTime = new Date(_ensureUTC(snap.timestamp)).getTime();
               bucket = Math.round((snapTime - referenceTime) / 1000);
             } else {
               // Fallback to per-worker elapsed_seconds (may be misaligned for multi-worker)

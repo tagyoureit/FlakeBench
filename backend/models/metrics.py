@@ -5,9 +5,10 @@ Defines Pydantic models for real-time performance metrics.
 """
 
 from typing import Optional, Dict, Any
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 
 from pydantic import BaseModel, Field
+from backend.core.dt import utc_iso
 
 
 class LatencyPercentiles(BaseModel):
@@ -155,7 +156,7 @@ class Metrics(BaseModel):
 
     class Config:
         json_encoders = {
-            datetime: lambda v: v.isoformat(),
+            datetime: lambda v: utc_iso(v),
         }
 
     @property
@@ -254,7 +255,7 @@ class MetricsSnapshot(BaseModel):
 
     class Config:
         json_encoders = {
-            datetime: lambda v: v.isoformat(),
+            datetime: lambda v: utc_iso(v),
         }
 
     @classmethod

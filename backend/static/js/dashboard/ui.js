@@ -290,8 +290,8 @@ window.DashboardMixins.ui = {
       return true;
     }).sort((a, b) => {
       // Sort by earliest_occurrence ascending (oldest first)
-      const timeA = a.earliest_occurrence ? new Date(a.earliest_occurrence).getTime() : Infinity;
-      const timeB = b.earliest_occurrence ? new Date(b.earliest_occurrence).getTime() : Infinity;
+      const timeA = a.earliest_occurrence ? new Date(_ensureUTC(a.earliest_occurrence)).getTime() : Infinity;
+      const timeB = b.earliest_occurrence ? new Date(_ensureUTC(b.earliest_occurrence)).getTime() : Infinity;
       return timeA - timeB;
     });
   },
@@ -328,8 +328,8 @@ window.DashboardMixins.ui = {
       const data = await resp.json();
       // Sort by timestamp ascending (oldest first)
       this.errorDetailRows = (data.rows || []).sort((a, b) => {
-        const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-        const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        const timeA = a.timestamp ? new Date(_ensureUTC(a.timestamp)).getTime() : 0;
+        const timeB = b.timestamp ? new Date(_ensureUTC(b.timestamp)).getTime() : 0;
         return timeA - timeB;
       });
     } catch (e) {
@@ -364,7 +364,7 @@ window.DashboardMixins.ui = {
     logSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
     setTimeout(() => {
-      const targetTime = new Date(timestamp).getTime();
+      const targetTime = new Date(_ensureUTC(timestamp)).getTime();
       const logLines = logSection.querySelectorAll('.log-line');
       let closest = null;
       let closestDiff = Infinity;
@@ -374,7 +374,7 @@ window.DashboardMixins.ui = {
         const tsEl = line.querySelector('.log-ts');
         const msgEl = line.querySelector('.log-msg');
         if (tsEl) {
-          const lineTime = new Date(tsEl.getAttribute('data-ts') || tsEl.textContent).getTime();
+          const lineTime = new Date(_ensureUTC(tsEl.getAttribute('data-ts') || tsEl.textContent)).getTime();
           const diff = Math.abs(lineTime - targetTime);
           
           if (errorMessage && msgEl) {
