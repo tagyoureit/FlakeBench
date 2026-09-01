@@ -72,11 +72,12 @@
             <span class="floating-toolbar-indicator" :class="{ 'active': alignmentMode === 'warmup_end' }">
                 <span x-text="getAlignmentIndicatorLabel()"></span>
             </span>
-            <div style="width: 100%; margin-top: 0.5rem; font-size: 0.7rem; color: #475569; line-height: 1.35; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">
+            <details style="width: 100%; margin-top: 0.5rem; font-size: 0.7rem; color: #475569; line-height: 1.35; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;">
+                <summary style="cursor: pointer; user-select: none;">Debug info</summary>
                 <div x-text="getDebugLineToggles()"></div>
                 <div x-text="getDebugLinePrimary()"></div>
                 <div x-text="getDebugLineSecondary()"></div>
-            </div>
+            </details>
         </div>
 
         <div class="dashboard-top-grid">
@@ -453,26 +454,26 @@
                             </tr>
                             <tr class="border-b">
                                 <td class="py-2 px-3 font-medium">Estimated Cost</td>
-                                <td class="text-right py-2 px-3" x-text="testA?.estimated_cost_usd != null ? '$' + testA.estimated_cost_usd.toFixed(4) : '—'"></td>
-                                <td class="text-right py-2 px-3" x-text="testB?.estimated_cost_usd != null ? '$' + testB.estimated_cost_usd.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testA?.cost_calculation_method === 'pending_enrichment' ? 'Pending (QMTH)' : (testA?.estimated_cost_usd > 0 ? '$' + testA.estimated_cost_usd.toFixed(4) : '—')"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.cost_calculation_method === 'pending_enrichment' ? 'Pending (QMTH)' : (testB?.estimated_cost_usd > 0 ? '$' + testB.estimated_cost_usd.toFixed(4) : '—')"></td>
                                 <td class="text-right py-2 px-3" :class="getDeltaClass(calcCostDelta(testA?.estimated_cost_usd, testB?.estimated_cost_usd), true)" x-text="formatCostDelta(calcCostDelta(testA?.estimated_cost_usd, testB?.estimated_cost_usd))"></td>
                             </tr>
                             <tr class="border-b">
                                 <td class="py-2 px-3 font-medium">Cost per 1K Ops</td>
-                                <td class="text-right py-2 px-3" x-text="testA?.cost_per_1k_ops != null ? '$' + testA.cost_per_1k_ops.toFixed(4) : '—'"></td>
-                                <td class="text-right py-2 px-3" x-text="testB?.cost_per_1k_ops != null ? '$' + testB.cost_per_1k_ops.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testA?.cost_calculation_method === 'pending_enrichment' ? 'Pending (QMTH)' : (testA?.cost_per_1k_ops > 0 ? '$' + testA.cost_per_1k_ops.toFixed(4) : '—')"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.cost_calculation_method === 'pending_enrichment' ? 'Pending (QMTH)' : (testB?.cost_per_1k_ops > 0 ? '$' + testB.cost_per_1k_ops.toFixed(4) : '—')"></td>
                                 <td class="text-right py-2 px-3" :class="getDeltaClass(calcCostDelta(testA?.cost_per_1k_ops, testB?.cost_per_1k_ops), true)" x-text="formatCostDelta(calcCostDelta(testA?.cost_per_1k_ops, testB?.cost_per_1k_ops))"></td>
                             </tr>
                             <tr class="border-b">
                                 <td class="py-2 px-3 font-medium">Credits Used</td>
-                                <td class="text-right py-2 px-3" x-text="testA?.credits_used != null ? testA.credits_used.toFixed(4) : '—'"></td>
-                                <td class="text-right py-2 px-3" x-text="testB?.credits_used != null ? testB.credits_used.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testA?.credits_used > 0 ? testA.credits_used.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.credits_used > 0 ? testB.credits_used.toFixed(4) : '—'"></td>
                                 <td class="text-right py-2 px-3 text-gray-500">—</td>
                             </tr>
                             <tr>
                                 <td class="py-2 px-3 font-medium">Credit Rate (cr/hr)</td>
-                                <td class="text-right py-2 px-3" x-text="testA?.credits_per_hour != null ? testA.credits_per_hour.toFixed(4) : '—'"></td>
-                                <td class="text-right py-2 px-3" x-text="testB?.credits_per_hour != null ? testB.credits_per_hour.toFixed(4) : '—'"></td>
+                                <td class="text-right py-2 px-3" x-text="testA?.credits_per_hour > 0 ? testA.credits_per_hour.toFixed(4) : (testA?.cost_calculation_method === 'pending_enrichment' ? 'Adaptive (per-query)' : '—')"></td>
+                                <td class="text-right py-2 px-3" x-text="testB?.credits_per_hour > 0 ? testB.credits_per_hour.toFixed(4) : (testB?.cost_calculation_method === 'pending_enrichment' ? 'Adaptive (per-query)' : '—')"></td>
                                 <td class="text-right py-2 px-3 text-gray-500">—</td>
                             </tr>
                         </tbody>

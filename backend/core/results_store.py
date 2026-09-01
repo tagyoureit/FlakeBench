@@ -48,36 +48,36 @@ async def fetch_warehouse_config_snapshot(
             return None
 
         row = results[0]
-        # SHOW WAREHOUSES column indices (0-based):
-        # 0=name, 1=state, 2=type, 3=size, 4=min_cluster_count, 5=max_cluster_count
-        # 6=started_clusters, 7=running, 8=queued, 9=is_default, 10=is_current
-        # 11=is_interactive, 12=auto_suspend, 13=auto_resume
-        # 23=enable_query_acceleration, 24=query_acceleration_max_scale_factor
-        # 31=scaling_policy, 33=resource_constraint (Gen1/Gen2)
-        return {
+        # SHOW WAREHOUSES column indices (0-based) — verified against live account output.
+        # New adaptive columns (34-36) were added at Adaptive Compute GA.
+        n = len(row)
+        wh_type = row[2] or ""
+        is_adaptive = wh_type.upper() == "ADAPTIVE"
+
+        snapshot: dict[str, Any] = {
             "name": row[0],
             "state": row[1],
-            "type": row[2],
+            "type": wh_type,
+            "is_adaptive": is_adaptive,
             "size": row[3],
-            "min_cluster_count": row[4] if row[4] else 1,
-            "max_cluster_count": row[5] if row[5] else 1,
-            "started_clusters": row[6] if row[6] else 0,
-            "running": row[7] if row[7] else 0,
-            "queued": row[8] if row[8] else 0,
-            "is_default": row[9] == "Y" if row[9] else False,
-            "is_current": row[10] == "Y" if row[10] else False,
-            "auto_suspend": row[12],
-            "auto_resume": row[13] == "true" if row[13] else False,
-            "scaling_policy": row[31] if len(row) > 31 and row[31] else "STANDARD",
-            "enable_query_acceleration": row[23] == "true"
-            if len(row) > 23 and row[23]
-            else False,
-            "query_acceleration_max_scale_factor": row[24]
-            if len(row) > 24 and row[24]
-            else 0,
-            "resource_constraint": row[33] if len(row) > 33 else None,
+            "min_cluster_count": int(row[4]) if row[4] else 1,
+            "max_cluster_count": int(row[5]) if row[5] else 1,
+            "started_clusters": int(row[6]) if row[6] else 0,
+            "running": int(row[7]) if row[7] else 0,
+            "queued": int(row[8]) if row[8] else 0,
+            "auto_suspend": row[11],
+            "auto_resume": str(row[12] or "").lower() == "true",
+            "scaling_policy": row[30] if n > 30 and row[30] else "STANDARD",
+            "enable_query_acceleration": str(row[22] or "").lower() == "true" if n > 22 else False,
+            "query_acceleration_max_scale_factor": int(row[23]) if n > 23 and row[23] else 0,
+            "resource_constraint": row[32] if n > 32 else None,
+            # Adaptive-specific fields
+            "max_query_performance_level": row[35] if n > 35 and is_adaptive else None,
+            "query_throughput_multiplier": int(row[34]) if n > 34 and row[34] is not None and is_adaptive else None,
+            "disabled_reasons": row[36] if n > 36 and is_adaptive else None,
             "captured_at": datetime.now(UTC).isoformat(),
         }
+        return snapshot
     except Exception:
         # Non-fatal: return None if we can't fetch warehouse details
         return None
@@ -111,7 +111,19 @@ async def insert_warehouse_poll_snapshot(
     started_clusters = _to_int(row[6] if len(row) > 6 else None)
     running = _to_int(row[7] if len(row) > 7 else None)
     queued = _to_int(row[8] if len(row) > 8 else None)
-    scaling_policy = row[31] if len(row) > 31 and row[31] else "STANDARD"
+    # Correct index: col 30 = scaling_policy (col 31 = owner_role_type)
+    scaling_policy = row[30] if len(row) > 30 and row[30] else "STANDARD"
+
+    # Adaptive-specific fields
+    wh_type = row[2] if len(row) > 2 else ""
+    is_adaptive = str(wh_type or "").upper() == "ADAPTIVE"
+    warehouse_state = row[1] if is_adaptive else None
+    max_query_performance_level = row[35] if len(row) > 35 and is_adaptive else None
+    query_throughput_multiplier = (
+        _to_int(row[34] if len(row) > 34 else None)
+        if is_adaptive and len(row) > 34 and row[34] is not None
+        else None
+    )
 
     query = f"""
     INSERT INTO {_results_prefix()}.WAREHOUSE_POLL_SNAPSHOTS (
@@ -126,10 +138,13 @@ async def insert_warehouse_poll_snapshot(
         MIN_CLUSTER_COUNT,
         MAX_CLUSTER_COUNT,
         SCALING_POLICY,
+        WAREHOUSE_STATE,
+        MAX_QUERY_PERFORMANCE_LEVEL,
+        QUERY_THROUGHPUT_MULTIPLIER,
         RAW_RESULT
     )
     SELECT
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?)
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?)
     """
 
     params = [
@@ -144,6 +159,9 @@ async def insert_warehouse_poll_snapshot(
         min_cluster_count,
         max_cluster_count,
         str(scaling_policy),
+        warehouse_state,
+        max_query_performance_level,
+        query_throughput_multiplier,
         _row_to_json(row),
     ]
 
@@ -164,7 +182,10 @@ async def fetch_latest_warehouse_poll_snapshot(*, run_id: str) -> dict[str, Any]
             QUEUED,
             MIN_CLUSTER_COUNT,
             MAX_CLUSTER_COUNT,
-            SCALING_POLICY
+            SCALING_POLICY,
+            WAREHOUSE_STATE,
+            MAX_QUERY_PERFORMANCE_LEVEL,
+            QUERY_THROUGHPUT_MULTIPLIER
         FROM {prefix}.WAREHOUSE_POLL_SNAPSHOTS
         WHERE RUN_ID = ?
         ORDER BY TIMESTAMP DESC
@@ -185,6 +206,9 @@ async def fetch_latest_warehouse_poll_snapshot(*, run_id: str) -> dict[str, Any]
         min_cluster_count,
         max_cluster_count,
         scaling_policy,
+        warehouse_state,
+        max_query_performance_level,
+        query_throughput_multiplier,
     ) = rows[0]
     return {
         "warehouse": str(warehouse or ""),
@@ -198,6 +222,9 @@ async def fetch_latest_warehouse_poll_snapshot(*, run_id: str) -> dict[str, Any]
         "min_cluster_count": int(min_cluster_count or 0),
         "max_cluster_count": int(max_cluster_count or 0),
         "scaling_policy": str(scaling_policy or "STANDARD"),
+        "warehouse_state": str(warehouse_state or "") if warehouse_state else None,
+        "max_query_performance_level": str(max_query_performance_level or "") if max_query_performance_level else None,
+        "query_throughput_multiplier": int(query_throughput_multiplier) if query_throughput_multiplier is not None else None,
     }
 
 
@@ -211,6 +238,9 @@ async def insert_test_start(
     table_type: str,
     warehouse: Optional[str],
     warehouse_size: Optional[str],
+    warehouse_type: Optional[str] = None,
+    max_query_performance_level: Optional[str] = None,
+    query_throughput_multiplier: Optional[int] = None,
     template_id: str,
     template_name: str,
     template_config: dict[str, Any],
@@ -237,6 +267,9 @@ async def insert_test_start(
         TABLE_TYPE,
         WAREHOUSE,
         WAREHOUSE_SIZE,
+        WAREHOUSE_TYPE,
+        MAX_QUERY_PERFORMANCE_LEVEL,
+        QUERY_THROUGHPUT_MULTIPLIER,
         STATUS,
         START_TIME,
         CONCURRENT_CONNECTIONS,
@@ -245,7 +278,7 @@ async def insert_test_start(
         QUERY_TAG
     )
     SELECT
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?), ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?), ?
     """
 
     params = [
@@ -257,6 +290,9 @@ async def insert_test_start(
         table_type,
         warehouse,
         warehouse_size,
+        warehouse_type,
+        max_query_performance_level,
+        query_throughput_multiplier,
         "RUNNING",
         now,
         scenario.total_threads,
@@ -278,6 +314,9 @@ async def insert_test_prepare(
     table_type: str,
     warehouse: Optional[str],
     warehouse_size: Optional[str],
+    warehouse_type: Optional[str] = None,
+    max_query_performance_level: Optional[str] = None,
+    query_throughput_multiplier: Optional[int] = None,
     template_id: str,
     template_name: str,
     template_config: dict[str, Any],
@@ -304,6 +343,9 @@ async def insert_test_prepare(
         TABLE_TYPE,
         WAREHOUSE,
         WAREHOUSE_SIZE,
+        WAREHOUSE_TYPE,
+        MAX_QUERY_PERFORMANCE_LEVEL,
+        QUERY_THROUGHPUT_MULTIPLIER,
         STATUS,
         START_TIME,
         CONCURRENT_CONNECTIONS,
@@ -312,7 +354,7 @@ async def insert_test_prepare(
         QUERY_TAG
     )
     SELECT
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?), ?
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, PARSE_JSON(?), PARSE_JSON(?), ?
     """
 
     params = [
@@ -324,6 +366,9 @@ async def insert_test_prepare(
         table_type,
         warehouse,
         warehouse_size,
+        warehouse_type,
+        max_query_performance_level,
+        query_throughput_multiplier,
         "PREPARED",
         now,
         scenario.total_threads,
@@ -2490,6 +2535,66 @@ async def cleanup_stale_enrichment(
     return (retried_count, skipped_count, retried_ids, skipped_ids)
 
 
+async def enrich_adaptive_warehouse_credits(
+    *,
+    test_id: str,
+    warehouse_name: str,
+    start_time: datetime,
+    end_time: datetime,
+) -> Optional[float]:
+    """
+    Fetch per-query credit consumption from QUERY_METERING_HISTORY for an Adaptive
+    Warehouse test and write the total to WAREHOUSE_CREDITS_USED.
+
+    QUERY_METERING_HISTORY has up to 1-hour latency, so this is called as part of
+    the delayed enrichment pipeline.
+
+    Returns the total credits written, or None if no data was available yet.
+    """
+    pool = snowflake_pool.get_default_pool()
+    prefix = _results_prefix()
+
+    # Add a small buffer to the time window to catch any boundary-straddling queries.
+    buffered_start = start_time - timedelta(minutes=5)
+    buffered_end = end_time + timedelta(minutes=10)
+
+    rows = await pool.execute_query(
+        """
+        SELECT SUM(credits_used_compute) AS total_credits
+        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_METERING_HISTORY
+        WHERE UPPER(warehouse_name) = UPPER(?)
+          AND start_time >= ?
+          AND end_time <= ?
+        """,
+        params=[
+            warehouse_name,
+            buffered_start.isoformat(),
+            buffered_end.isoformat(),
+        ],
+    )
+
+    total_credits = rows[0][0] if rows and rows[0][0] is not None else None
+    if total_credits is None:
+        return None
+
+    await pool.execute_query(
+        f"""
+        UPDATE {prefix}.TEST_RESULTS
+        SET WAREHOUSE_CREDITS_USED = ?,
+            UPDATED_AT = CURRENT_TIMESTAMP()
+        WHERE TEST_ID = ?
+          AND (WAREHOUSE_CREDITS_USED IS NULL OR WAREHOUSE_CREDITS_USED = 0)
+        """,
+        params=[float(total_credits), test_id],
+    )
+    logger.info(
+        "Adaptive credit enrichment for %s: %.6f credits from QUERY_METERING_HISTORY",
+        test_id,
+        total_credits,
+    )
+    return float(total_credits)
+
+
 async def _retry_enrichment_background(test_id: str) -> None:
     """Background task to retry enrichment for a single test."""
     try:
@@ -2503,6 +2608,34 @@ async def _retry_enrichment_background(test_id: str) -> None:
             poll_interval_seconds=10,
         )
         await update_test_overhead_percentiles(test_id=test_id)
+
+        # For Adaptive Warehouses, also enrich per-query credits from QUERY_METERING_HISTORY.
+        # QUERY_METERING_HISTORY has up to 1-hour latency, so this runs opportunistically
+        # after the standard QUERY_HISTORY enrichment (which already has a wait loop).
+        try:
+            pool = snowflake_pool.get_default_pool()
+            prefix = _results_prefix()
+            meta_rows = await pool.execute_query(
+                f"""
+                SELECT UPPER(COALESCE(WAREHOUSE_SIZE, '')), WAREHOUSE, START_TIME, END_TIME
+                FROM {prefix}.TEST_RESULTS
+                WHERE TEST_ID = ?
+                """,
+                params=[test_id],
+            )
+            if meta_rows:
+                wh_size, wh_name, start_time, end_time = meta_rows[0]
+                if wh_size == "ADAPTIVE" and wh_name and start_time and end_time:
+                    await enrich_adaptive_warehouse_credits(
+                        test_id=test_id,
+                        warehouse_name=str(wh_name),
+                        start_time=start_time if isinstance(start_time, datetime) else datetime.fromisoformat(str(start_time)),
+                        end_time=end_time if isinstance(end_time, datetime) else datetime.fromisoformat(str(end_time)),
+                    )
+        except Exception as adaptive_err:
+            # Non-fatal: adaptive credit enrichment failure doesn't block overall enrichment
+            logger.warning("Adaptive credit enrichment failed for %s: %s", test_id, adaptive_err)
+
         await update_enrichment_status(test_id=test_id, status="COMPLETED", error=None)
         logger.info(
             "Enrichment retry complete for %s: %d/%d queries (%.1f%%)",

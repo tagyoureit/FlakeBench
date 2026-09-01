@@ -41,6 +41,8 @@ from backend.core.test_log_stream import (
     TestLogQueueHandler,
 )
 from backend.core.table_managers import create_table_manager
+from backend.core.orchestrator_modules.preflight import generate_preflight_warnings
+from backend.core.warehouse_info import is_interactive_warehouse
 from backend.core.orchestrator_modules.qps_controller import (
     QPSControllerState,
     evaluate_qps_scaling,
@@ -347,116 +349,17 @@ class OrchestratorService:
         """
         Generate pre-flight warnings for a test configuration.
 
-        Checks for configurations that are likely to hit Snowflake limits,
-        particularly the 20-waiter lock limit on standard tables.
+        Delegates to ``orchestrator_modules.preflight``, which holds the single
+        implementation of the checks.
 
         Args:
             scenario_config: The full scenario configuration dict
 
         Returns:
-            List of warning dicts with keys: severity, title, message, recommendations
+            List of warning dicts with keys: severity, title, message,
+            recommendations, details
         """
-        warnings: list[dict[str, Any]] = []
-
-        # Extract relevant config values
-        table_type = str(scenario_config.get("table_type", "standard")).lower()
-        workload_cfg = scenario_config.get("workload", {})
-        custom_queries = workload_cfg.get("custom_queries", [])
-        total_threads = int(scenario_config.get("total_threads", 10))
-        table_name = str(scenario_config.get("table_name", ""))
-
-        # Calculate write percentage from CUSTOM query weights.
-        # Runtime is CUSTOM-only, but we tolerate legacy key names for old rows.
-        write_pct = 0.0
-        if isinstance(custom_queries, list):
-            for q in custom_queries:
-                if not isinstance(q, dict):
-                    continue
-                kind = str(q.get("query_kind") or q.get("kind") or "").upper()
-                raw_weight = q.get("weight_pct", q.get("weight", 0))
-                try:
-                    weight = float(raw_weight)
-                except (TypeError, ValueError):
-                    weight = 0.0
-                # weight_pct is stored as percentage points (0.00-100.00).
-                normalized_weight = max(0.0, min(weight / 100.0, 1.0))
-                operation_type = str(q.get("operation_type") or "").upper()
-                is_write = kind in ("INSERT", "UPDATE", "DELETE") or (
-                    kind == "GENERIC_SQL" and operation_type == "WRITE"
-                )
-                if is_write and normalized_weight > 0:
-                    write_pct += normalized_weight
-        write_pct = max(0.0, min(write_pct, 1.0))
-
-        # Calculate expected concurrent writers
-        expected_concurrent_writes = total_threads * write_pct
-
-        # Check for lock contention risk on standard tables
-        # Snowflake limit: 20 statements waiting for a table lock
-        LOCK_WAITER_LIMIT = 20
-
-        if table_type == "standard" and expected_concurrent_writes > LOCK_WAITER_LIMIT:
-            warnings.append(
-                {
-                    "severity": "high",
-                    "title": "Lock Contention Risk",
-                    "message": (
-                        f"Standard tables use TABLE-LEVEL LOCKING for writes. "
-                        f"With {total_threads} threads and ~{write_pct * 100:.0f}% writes, "
-                        f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
-                        f"Snowflake's lock waiter limit is {LOCK_WAITER_LIMIT} statements. "
-                        f"If any write takes >1 second, you WILL hit SF_LOCK_WAITER_LIMIT errors."
-                    ),
-                    "recommendations": [
-                        "Use a HYBRID table for concurrent write workloads (row-level locking)",
-                        f"Reduce concurrency to ≤{int(LOCK_WAITER_LIMIT / write_pct) if write_pct > 0 else total_threads} threads",
-                        "For read-only benchmarking, keep CUSTOM and set all WRITE operations to 0%",
-                    ],
-                    "details": {
-                        "table_type": table_type,
-                        "table_name": table_name,
-                        "total_threads": total_threads,
-                        "write_percentage": round(write_pct * 100, 1),
-                        "expected_concurrent_writes": round(
-                            expected_concurrent_writes, 1
-                        ),
-                        "lock_waiter_limit": LOCK_WAITER_LIMIT,
-                    },
-                }
-            )
-        elif (
-            table_type == "standard"
-            and expected_concurrent_writes > LOCK_WAITER_LIMIT * 0.5
-        ):
-            # Warning for approaching the limit (>50% of limit)
-            warnings.append(
-                {
-                    "severity": "medium",
-                    "title": "Potential Lock Contention",
-                    "message": (
-                        f"With {total_threads} threads and ~{write_pct * 100:.0f}% writes on a STANDARD table, "
-                        f"you may have ~{expected_concurrent_writes:.0f} concurrent write attempts. "
-                        f"This approaches Snowflake's {LOCK_WAITER_LIMIT}-waiter limit. "
-                        f"Slow writes could trigger SF_LOCK_WAITER_LIMIT errors."
-                    ),
-                    "recommendations": [
-                        "Monitor for SF_LOCK_WAITER_LIMIT errors during the run",
-                        "Consider using a HYBRID table for better write concurrency",
-                    ],
-                    "details": {
-                        "table_type": table_type,
-                        "table_name": table_name,
-                        "total_threads": total_threads,
-                        "write_percentage": round(write_pct * 100, 1),
-                        "expected_concurrent_writes": round(
-                            expected_concurrent_writes, 1
-                        ),
-                        "lock_waiter_limit": LOCK_WAITER_LIMIT,
-                    },
-                }
-            )
-
-        return warnings
+        return await generate_preflight_warnings(scenario_config)
 
     async def get_preflight_warnings(self, run_id: str) -> list[dict[str, Any]]:
         """
@@ -948,7 +851,9 @@ class OrchestratorService:
         self._background_tasks.add(drain_task)
         drain_task.add_done_callback(self._background_tasks.discard)
 
-        # 4. For Interactive/Hybrid tables, ensure the warehouse is running before spawning workers
+        # 4. Ensure the warehouse is running before spawning workers, for
+        # Interactive/Hybrid tables or any table on an interactive warehouse
+        # (zero-copy interactive analytics).
         target_cfg = scenario_config.get("target") or {}
         table_type = str(target_cfg.get("table_type") or "").strip().upper()
         warehouse_name = str(target_cfg.get("warehouse") or "").strip().upper()
@@ -957,15 +862,28 @@ class OrchestratorService:
             table_type,
             warehouse_name,
         )
-        if table_type in ("HYBRID", "INTERACTIVE") and warehouse_name:
+        needs_resume = table_type in ("HYBRID", "INTERACTIVE")
+        if warehouse_name and not needs_resume:
+            # A STANDARD table on an interactive warehouse still needs the
+            # warehouse running, so decide on warehouse type as well.
+            needs_resume = bool(
+                await is_interactive_warehouse(self._pool, warehouse_name)
+            )
+            if needs_resume:
+                logger.info(
+                    "Warehouse %s is INTERACTIVE - zero-copy scenario requires it running",
+                    warehouse_name,
+                )
+        if needs_resume and warehouse_name:
             logger.info(
-                "Detected Interactive/Hybrid table - ensuring warehouse %s is running...",
+                "Ensuring warehouse %s is running...",
                 warehouse_name,
             )
             await self._ensure_warehouse_running(ctx, warehouse_name)
         else:
             logger.info(
-                "Skipping warehouse resume: table_type=%s not in (HYBRID, INTERACTIVE) or no warehouse",
+                "Skipping warehouse resume: table_type=%s is not interactive/hybrid, "
+                "warehouse is not interactive, or no warehouse configured",
                 table_type,
             )
 

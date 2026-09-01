@@ -61,11 +61,11 @@ docker build --platform linux/amd64 -t flakebench:latest .
 
 # Tag for Snowflake registry
 docker tag flakebench:latest \
-  <account>.registry.snowflakecomputing.com/flakebench/public/flakebench_repo/flakebench:latest
+  <account>.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:latest
 
 # Push to Snowflake
 docker push \
-  <account>.registry.snowflakecomputing.com/flakebench/public/flakebench_repo/flakebench:latest
+  <account>.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:latest
 ```
 
 ## Deploy Service

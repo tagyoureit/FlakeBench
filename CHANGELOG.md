@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- feat(interactive): zero-copy interactive analytics support - standard tables can
+  be benchmarked directly on an interactive warehouse with no copy or conversion.
+  Warehouse resume, credit rates, and pre-flight checks now branch on warehouse
+  *type* rather than inferring it from table type.
+- feat(interactive): `backend/core/warehouse_info.py` resolves warehouse metadata
+  (type, state, size, attached tables) from `SHOW WAREHOUSES`. Returns `None` for
+  indeterminate lookups so callers never treat "unknown" as a negative.
+- feat(interactive): `InteractiveTableManager` gains real behaviour - interactive
+  table detection with standard-table fallback for zero-copy, `clustering_key` and
+  `is_interactive_table` in stats, `check_warehouse_attachment()`, and
+  `warm_cache()` probe-based cache warming.
+- feat(preflight): interactive and zero-copy warnings - warehouse type mismatch,
+  5-second query timeout exposure, missing clustering key, writes on the
+  interactive path, unsupported `CALL`/`->>` SQL, zero-copy opportunity, and the
+  provisioned billing model.
+- feat(cost): provisioned 24-hour cost comparison for interactive warehouses via
+  `calculate_interactive_breakeven()`. Reports `breakeven_standard_wh_hours` (how
+  long an equivalent standard warehouse must run to match 24h of the interactive
+  warehouse) as the headline, with 24-hour credit totals as supporting detail.
+  Break-even needs no uptime assumption; the 24-hour totals state theirs
+  explicitly. Unknown rates yield `NULL`, never a fabricated value.
+- feat(results): `TEST_RESULTS` columns `breakeven_standard_wh_hours`,
+  `iw_24h_credits`, `standard_wh_24h_credits`, and `credit_rate_basis`. Applied by
+  the existing `CREATE OR ALTER TABLE` declarative DDL; existing rows get `NULL`.
+  `credit_rate_basis` records the rate table version so a historical row that
+  disagrees with a fresh calculation is explainable.
+- docs(scenarios): `config/test_scenarios/interactive_analytics.yaml` documenting
+  the interactive-table and zero-copy variants, plus operator notes on the
+  5-second timeout, fallback warehouse, cache warming and the 10-table proactive
+  warming limit, 24-hour minimum auto-suspend, required `MANAGE ATTACHED TABLES`
+  privilege, unsupported SQL, and the provisioned cost model.
+
+### Fixed
+
+- fix(cost): interactive warehouse cost estimation defaulted an unknown warehouse
+  size to `MEDIUM`, silently reporting a fabricated credit rate. Interactive
+  warehouses always report a definite size in `SHOW WAREHOUSES` (unlike adaptive
+  warehouses, whose size is empty), so a missing size means the lookup failed. Now
+  reports `calculation_method="unavailable"` with a zero rate instead. Actual
+  credits from query history remain authoritative when present.
+- fix(executor): `_check_warehouse_state()` read `SHOW WAREHOUSES` column 3
+  (warehouse size) instead of column 1 (state), so warehouse state was never
+  detected correctly and suspended warehouses were not resumed.
+- fix(preflight): pre-flight checks read `table_type`, `table_name`, and thread
+  count from the top level of `SCENARIO_CONFIG`, but `create_run` nests them under
+  `target` and `workload`. Every check therefore ran against default values
+  (`table_type="standard"`, 10 threads). Config paths corrected with fallbacks for
+  legacy persisted rows.
+- refactor(preflight): removed the duplicate `generate_preflight_warnings`
+  implementation from `orchestrator.py`; it now delegates to
+  `orchestrator_modules.preflight`, which was previously exported but unused.
+
 - feat(connections): simplified connection model - removed database_name, schema_name,
   pool_size, max_overflow, pool_timeout fields from connections (these belong in
   template configuration).

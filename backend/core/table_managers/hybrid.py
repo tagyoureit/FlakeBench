@@ -103,7 +103,7 @@ class HybridTableManager(TableManager):
 
             return False
         except Exception as e:
-            logger.debug("Error checking object existence: %s", e)
+            self._record_exists_error(e)
             return False
 
     async def validate_schema(self) -> bool:

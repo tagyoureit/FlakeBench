@@ -82,6 +82,9 @@ WITH test_with_credits AS (
                         WHEN '2XLARGE' THEN 19.2 WHEN '2X-LARGE' THEN 19.2
                         ELSE 2.4  -- Default to MEDIUM
                     END
+                -- ADAPTIVE uses per-query billing; no size-based estimate possible.
+                -- Return NULL so COALESCE falls back to actual WAREHOUSE_CREDITS_USED only.
+                WHEN UPPER(COALESCE(WAREHOUSE_SIZE, '')) = 'ADAPTIVE' THEN NULL
                 -- STANDARD/HYBRID/others use standard warehouse rates
                 ELSE 
                     (DURATION_SECONDS / 3600.0) * 
@@ -240,6 +243,7 @@ WITH template_tests AS (
                         WHEN 'XLARGE' THEN 9.6 WHEN 'X-LARGE' THEN 9.6
                         ELSE 2.4
                     END
+                WHEN UPPER(COALESCE(WAREHOUSE_SIZE, '')) = 'ADAPTIVE' THEN NULL
                 ELSE 
                     (DURATION_SECONDS / 3600.0) * 
                     CASE UPPER(COALESCE(WAREHOUSE_SIZE, 'MEDIUM'))
@@ -463,6 +467,7 @@ WITH test_with_credits AS (
                         WHEN 'XLARGE' THEN 9.6 WHEN 'X-LARGE' THEN 9.6
                         ELSE 2.4
                     END
+                WHEN UPPER(COALESCE(WAREHOUSE_SIZE, '')) = 'ADAPTIVE' THEN NULL
                 ELSE 
                     (DURATION_SECONDS / 3600.0) * 
                     CASE UPPER(COALESCE(WAREHOUSE_SIZE, 'MEDIUM'))
@@ -583,6 +588,7 @@ SELECT
                     WHEN 'XLARGE' THEN 9.6 WHEN 'X-LARGE' THEN 9.6
                     ELSE 2.4
                 END
+            WHEN UPPER(COALESCE(WAREHOUSE_SIZE, '')) = 'ADAPTIVE' THEN NULL
             ELSE 
                 (DURATION_SECONDS / 3600.0) * 
                 CASE UPPER(COALESCE(WAREHOUSE_SIZE, 'MEDIUM'))

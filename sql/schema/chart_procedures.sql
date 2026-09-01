@@ -49,6 +49,10 @@ BEGIN
                 'test_name', TEST_NAME,
                 'table_type', TABLE_TYPE,
                 'warehouse_size', WAREHOUSE_SIZE,
+                'warehouse_type', WAREHOUSE_TYPE,
+                'is_adaptive', IFF(UPPER(COALESCE(WAREHOUSE_SIZE, WAREHOUSE_TYPE, '')) = 'ADAPTIVE', TRUE, FALSE),
+                'max_query_performance_level', MAX_QUERY_PERFORMANCE_LEVEL,
+                'query_throughput_multiplier', QUERY_THROUGHPUT_MULTIPLIER,
                 'created_at', TO_VARCHAR(START_TIME, 'YYYY-MM-DD"T"HH24:MI:SS.FF3"Z"'),
                 'ops_per_sec', QPS,
                 'p95_latency', P95_LATENCY_MS,
@@ -131,6 +135,10 @@ BEGIN
         'table_type', TABLE_TYPE,
         'warehouse', WAREHOUSE,
         'warehouse_size', WAREHOUSE_SIZE,
+        'warehouse_type', WAREHOUSE_TYPE,
+        'is_adaptive', IFF(UPPER(COALESCE(WAREHOUSE_SIZE, WAREHOUSE_TYPE, '')) = 'ADAPTIVE', TRUE, FALSE),
+        'max_query_performance_level', MAX_QUERY_PERFORMANCE_LEVEL,
+        'query_throughput_multiplier', QUERY_THROUGHPUT_MULTIPLIER,
         'status', STATUS,
         'start_time', START_TIME,
         'end_time', END_TIME,
@@ -937,15 +945,22 @@ BEGIN
         'run_id', run_id_val,
         'bucket_seconds', bucket_size,
         'source', 'WAREHOUSE_POLL_SNAPSHOTS',
+        -- is_adaptive: NULL cluster fields mean adaptive warehouse (no fixed clusters)
+        'is_adaptive', BOOLOR_AGG(IFF(UPPER(COALESCE(MAX_QUERY_PERFORMANCE_LEVEL, '')) != '', TRUE, FALSE)),
         'data', COALESCE(ARRAY_AGG(
             OBJECT_CONSTRUCT(
                 'elapsed_seconds', ELAPSED_SECONDS,
+                -- Adaptive warehouses: cluster fields are NULL (not applicable)
                 'started_clusters', STARTED_CLUSTERS,
                 'running', RUNNING,
                 'queued', QUEUED,
                 'min_cluster_count', MIN_CLUSTER_COUNT,
                 'max_cluster_count', MAX_CLUSTER_COUNT,
-                'scaling_policy', SCALING_POLICY
+                'scaling_policy', SCALING_POLICY,
+                -- Adaptive-specific fields (NULL for standard warehouses)
+                'warehouse_state', WAREHOUSE_STATE,
+                'max_query_performance_level', MAX_QUERY_PERFORMANCE_LEVEL,
+                'query_throughput_multiplier', QUERY_THROUGHPUT_MULTIPLIER
             ) ORDER BY ELAPSED_SECONDS
         ), ARRAY_CONSTRUCT())
     ) INTO result

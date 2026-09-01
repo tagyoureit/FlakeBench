@@ -239,6 +239,7 @@ function saveCostSettings(settings) {
 function getCreditsPerHour(warehouseSize) {
   if (!warehouseSize) return 0;
   const normalized = String(warehouseSize).toUpperCase().trim();
+  if (normalized === 'ADAPTIVE') return 0; // per-query billing; no hourly rate
   return WAREHOUSE_CREDITS_PER_HOUR[normalized] || 0;
 }
 
@@ -251,6 +252,7 @@ function getCreditsPerHour(warehouseSize) {
 function getCreditsPerHourForTableType(size, tableType) {
   if (!size) return 0;
   const normalized = String(size).toUpperCase().trim();
+  if (normalized === 'ADAPTIVE') return 0; // Adaptive: per-query billing via QUERY_METERING_HISTORY
   const category = getTableTypeCategory(tableType);
 
   if (category === "postgres") {
@@ -329,11 +331,14 @@ function formatCostForTableType(amount, tableType, calculationMethod) {
   if (amount !== null && amount !== undefined && Number.isFinite(amount) && amount > 0) {
     return formatCost(amount);
   }
-  // No cost available
+  // Adaptive warehouse credits are sourced from QUERY_METERING_HISTORY (up to 1hr latency)
+  if (calculationMethod === "pending_enrichment") {
+    return "Pending (QMTH)";
+  }
   if (calculationMethod === "unavailable") {
     return "—";
   }
-  return formatCost(amount);
+  return "—";
 }
 
 /**

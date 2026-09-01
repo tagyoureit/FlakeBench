@@ -304,7 +304,7 @@ async def root(request: Request):
     is_htmx = request.headers.get("HX-Request") == "true"
     template = "pages/templates.html" if not is_htmx else "pages/templates.html"
     return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx}
+        request, template, {"request": request, "is_htmx": is_htmx}
     )
 
 
@@ -316,7 +316,7 @@ async def dashboard(request: Request):
     is_htmx = request.headers.get("HX-Request") == "true"
     template = "pages/dashboard.html" if not is_htmx else "pages/dashboard.html"
     return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx}
+        request, template, {"request": request, "is_htmx": is_htmx}
     )
 
 
@@ -372,6 +372,7 @@ async def dashboard_test(request: Request, test_id: str):
                     is_htmx = request.headers.get("HX-Request") == "true"
                     template = "pages/dashboard.html"
                     return templates.TemplateResponse(
+                        request,
                         template,
                         {"request": request, "is_htmx": is_htmx, "test_id": test_id},
                     )
@@ -399,7 +400,7 @@ async def dashboard_test(request: Request, test_id: str):
     is_htmx = request.headers.get("HX-Request") == "true"
     template = "pages/dashboard.html" if not is_htmx else "pages/dashboard.html"
     return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx, "test_id": test_id}
+        request, template, {"request": request, "is_htmx": is_htmx, "test_id": test_id}
     )
 
 
@@ -417,7 +418,7 @@ async def dashboard_history_test(request: Request, test_id: str):
         else "pages/dashboard_history.html"
     )
     return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx, "test_id": test_id}
+        request, template, {"request": request, "is_htmx": is_htmx, "test_id": test_id}
     )
 
 
@@ -442,6 +443,7 @@ async def dashboard_history_data(request: Request, test_id: str):
         else "pages/dashboard_history_data.html"
     )
     return templates.TemplateResponse(
+        request,
         template,
         {
             "request": request,
@@ -461,6 +463,7 @@ async def configure(request: Request):
     is_htmx = request.headers.get("HX-Request") == "true"
     template = "pages/configure.html" if not is_htmx else "pages/configure.html"
     return templates.TemplateResponse(
+        request,
         template,
         {
             "request": request,
@@ -491,7 +494,7 @@ async def history(request: Request):
     is_htmx = request.headers.get("HX-Request") == "true"
     template = "pages/history.html" if not is_htmx else "pages/history.html"
     return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx}
+        request, template, {"request": request, "is_htmx": is_htmx}
     )
 
 
@@ -514,6 +517,7 @@ async def history_compare(request: Request):
         "pages/history_compare.html" if not is_htmx else "pages/history_compare.html"
     )
     return templates.TemplateResponse(
+        request,
         template,
         {
             "request": request,
@@ -533,7 +537,7 @@ async def templates_page(request: Request):
     is_htmx = request.headers.get("HX-Request") == "true"
     template = "pages/templates.html" if not is_htmx else "pages/templates.html"
     return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx}
+        request, template, {"request": request, "is_htmx": is_htmx}
     )
 
 
@@ -544,7 +548,7 @@ async def dashboard_comparison_page(request: Request):
     """
     is_htmx = request.headers.get("HX-Request") == "true"
     return templates.TemplateResponse(
-        "pages/dashboard_comparison.html", {"request": request, "is_htmx": is_htmx}
+        request, "pages/dashboard_comparison.html", {"request": request, "is_htmx": is_htmx}
     )
 
 
@@ -555,7 +559,7 @@ async def dashboard_templates_page(request: Request):
     """
     is_htmx = request.headers.get("HX-Request") == "true"
     return templates.TemplateResponse(
-        "pages/dashboard_templates.html", {"request": request, "is_htmx": is_htmx}
+        request, "pages/dashboard_templates.html", {"request": request, "is_htmx": is_htmx}
     )
 
 
@@ -567,7 +571,7 @@ async def settings_page(request: Request):
     is_htmx = request.headers.get("HX-Request") == "true"
     template = "pages/settings.html"
     return templates.TemplateResponse(
-        template, {"request": request, "is_htmx": is_htmx}
+        request, template, {"request": request, "is_htmx": is_htmx}
     )
 
 

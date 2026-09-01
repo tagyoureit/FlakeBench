@@ -150,22 +150,37 @@ POSTGRES_CREDITS_PER_HOUR: dict[str, float] = {
 }
 
 
-def get_table_type_category(table_type: Optional[str]) -> str:
+def get_table_type_category(
+    table_type: Optional[str], warehouse_type: Optional[str] = None
+) -> str:
     """
-    Determine the pricing category for a table type.
+    Determine the pricing category for a run.
+
+    Warehouse type takes precedence over table type. An interactive warehouse
+    bills at Table 1(d) rates regardless of which table type it queries, so a
+    STANDARD table queried zero-copy through an interactive warehouse is priced
+    as interactive.
 
     Args:
         table_type: Table type string (e.g., "HYBRID", "POSTGRES", "INTERACTIVE")
+        warehouse_type: Warehouse type from SHOW WAREHOUSES (e.g. "INTERACTIVE",
+            "STANDARD", "ADAPTIVE"). When omitted, only table type is used.
 
     Returns:
         Category string: "warehouse", "interactive", or "postgres"
     """
-    if not table_type:
-        return "warehouse"  # Default
-    normalized = table_type.upper().strip()
-    if normalized in POSTGRES_TABLE_TYPES:
+    normalized_table = (table_type or "").upper().strip()
+
+    # Postgres is a distinct compute product, not a warehouse workload.
+    if normalized_table in POSTGRES_TABLE_TYPES:
         return "postgres"
-    if normalized in INTERACTIVE_TABLE_TYPES:
+
+    if warehouse_type and warehouse_type.upper().strip() == "INTERACTIVE":
+        return "interactive"
+
+    if not normalized_table:
+        return "warehouse"  # Default
+    if normalized_table in INTERACTIVE_TABLE_TYPES:
         return "interactive"
     return "warehouse"
 
@@ -186,20 +201,124 @@ def get_postgres_credits_per_hour(instance_size: Optional[str]) -> float:
     return POSTGRES_CREDITS_PER_HOUR.get(normalized, 0.0)
 
 
+def is_adaptive_warehouse(warehouse_size: Optional[str]) -> bool:
+    """Return True when the warehouse size indicates an Adaptive Warehouse."""
+    return bool(warehouse_size and warehouse_size.upper().strip() == "ADAPTIVE")
+
+
+# Rate basis identifier, bumped when the credit tables above are revised. Stored
+# alongside persisted break-even figures so a historical row that disagrees with
+# a fresh calculation is explainable rather than mysterious.
+CREDIT_RATE_BASIS = "service-consumption-2026-02"
+
+# Interactive warehouses are provisioned to run continuously.
+PROVISIONED_HOURS_PER_DAY = 24
+
+
+def calculate_interactive_breakeven(
+    interactive_warehouse_size: Optional[str],
+    comparison_warehouse_size: Optional[str] = None,
+    dollars_per_credit: float = 4.00,
+) -> dict[str, Any]:
+    """
+    Compare provisioned interactive warehouse cost against a standard warehouse.
+
+    An interactive warehouse is a provisioned, always-on cache with a 24-hour
+    minimum auto-suspend; a standard warehouse is typically spun up per workload.
+    Comparing the credits billed during a short benchmark is therefore
+    apples-to-oranges. Instead this reports:
+
+    - the deterministic 24-hour cost of the interactive warehouse
+    - the deterministic 24-hour cost of an equivalent standard warehouse, valid
+      only under the stated assumption that it also runs 24/7
+    - break-even hours: how long the standard warehouse must run to match 24
+      hours of the interactive warehouse
+
+    Break-even is the headline figure because it needs no uptime assumption. The
+    operator compares it against their own workload's actual uptime.
+
+    Args:
+        interactive_warehouse_size: Size of the interactive warehouse.
+        comparison_warehouse_size: Standard warehouse size to compare against.
+            Defaults to the same size for a like-for-like comparison.
+        dollars_per_credit: Cost per Snowflake credit in dollars.
+
+    Returns:
+        Dict with 24-hour credit and dollar figures, break-even hours, the rate
+        basis, and the assumption text. Figures are None when a rate is unknown
+        (for example an adaptive warehouse, which bills per query).
+    """
+    result: dict[str, Any] = {
+        "interactive_warehouse_size": interactive_warehouse_size or "UNKNOWN",
+        "comparison_warehouse_size": (
+            comparison_warehouse_size or interactive_warehouse_size or "UNKNOWN"
+        ),
+        "interactive_credits_per_hour": None,
+        "standard_credits_per_hour": None,
+        "iw_24h_credits": None,
+        "iw_24h_cost_usd": None,
+        "standard_wh_24h_credits": None,
+        "standard_wh_24h_cost_usd": None,
+        "breakeven_standard_wh_hours": None,
+        "rate_basis": CREDIT_RATE_BASIS,
+        "assumption": (
+            "24-hour figures assume both warehouses run continuously. Break-even "
+            "hours make no uptime assumption."
+        ),
+    }
+
+    if not interactive_warehouse_size:
+        return result
+
+    iw_size = interactive_warehouse_size.upper().strip()
+    comparison_size = (
+        comparison_warehouse_size or interactive_warehouse_size
+    ).upper().strip()
+
+    iw_rate = INTERACTIVE_CREDITS_PER_HOUR.get(iw_size)
+    std_rate = WAREHOUSE_CREDITS_PER_HOUR.get(comparison_size)
+
+    if iw_rate:
+        result["interactive_credits_per_hour"] = iw_rate
+        iw_24h = iw_rate * PROVISIONED_HOURS_PER_DAY
+        result["iw_24h_credits"] = round(iw_24h, 4)
+        result["iw_24h_cost_usd"] = round(iw_24h * dollars_per_credit, 2)
+
+    if std_rate:
+        result["standard_credits_per_hour"] = std_rate
+        std_24h = std_rate * PROVISIONED_HOURS_PER_DAY
+        result["standard_wh_24h_credits"] = round(std_24h, 4)
+        result["standard_wh_24h_cost_usd"] = round(std_24h * dollars_per_credit, 2)
+
+    if iw_rate and std_rate:
+        # Hours the standard warehouse must run to match 24h of interactive.
+        result["breakeven_standard_wh_hours"] = round(
+            (iw_rate * PROVISIONED_HOURS_PER_DAY) / std_rate, 2
+        )
+
+    return result
+
+
 def get_credits_per_hour(warehouse_size: Optional[str]) -> float:
     """
     Get the credits consumed per hour for a given warehouse size.
 
+    Returns 0.0 for Adaptive Warehouses because their billing is per-query
+    (from QUERY_METERING_HISTORY) rather than per-hour by size.
+
     Args:
-        warehouse_size: Warehouse size string (e.g., "XSMALL", "MEDIUM", "2XLARGE")
+        warehouse_size: Warehouse size string (e.g., "XSMALL", "MEDIUM", "2XLARGE",
+                        or "ADAPTIVE")
 
     Returns:
-        Credits per hour, or 0 if warehouse size is unknown/None
+        Credits per hour, or 0 if warehouse size is unknown/None/ADAPTIVE
     """
     if not warehouse_size:
         return 0.0
 
     normalized = warehouse_size.upper().strip()
+    if normalized == "ADAPTIVE":
+        return 0.0  # billed per-query; use QUERY_METERING_HISTORY for actual credits
     return WAREHOUSE_CREDITS_PER_HOUR.get(normalized, 0.0)
 
 
@@ -236,6 +355,7 @@ def calculate_estimated_cost(
     actual_credits_used: Optional[float] = None,
     table_type: Optional[str] = None,
     postgres_instance_size: Optional[str] = None,
+    warehouse_type: Optional[str] = None,
 ) -> dict:
     """
     Calculate the estimated cost for a test run.
@@ -252,6 +372,10 @@ def calculate_estimated_cost(
         actual_credits_used: If available, use actual credits from query history
         table_type: Table type (e.g., "HYBRID", "POSTGRES", "INTERACTIVE")
         postgres_instance_size: For Postgres, the instance size (e.g., "STANDARD_M")
+        warehouse_type: Warehouse type from SHOW WAREHOUSES. When "INTERACTIVE",
+            Table 1(d) rates apply regardless of table type — this is what makes
+            a standard table queried zero-copy on an interactive warehouse price
+            correctly.
 
     Returns:
         Dictionary with cost breakdown:
@@ -273,8 +397,8 @@ def calculate_estimated_cost(
         "calculation_method": "unavailable",
     }
 
-    # Determine which pricing table to use
-    category = get_table_type_category(table_type)
+    # Determine which pricing table to use. Warehouse type wins over table type.
+    category = get_table_type_category(table_type, warehouse_type)
 
     if category == "postgres":
         # Postgres uses different instance family names (STANDARD_M, HIGHMEM_L, etc.)
@@ -293,11 +417,28 @@ def calculate_estimated_cost(
         return result
 
     elif category == "interactive":
-        # Interactive warehouses use lower credit rates
-        size = warehouse_size or "MEDIUM"
-        normalized = size.upper().strip()
+        # Interactive warehouses use lower credit rates.
+        # Interactive warehouses always report a definite size in SHOW WAREHOUSES
+        # (unlike adaptive warehouses, whose size is empty). A missing size here
+        # therefore means the lookup failed, not that a default applies — so do
+        # not substitute one, or the run reports a fabricated cost.
+        normalized = (warehouse_size or "").upper().strip()
         credits_per_hour = INTERACTIVE_CREDITS_PER_HOUR.get(normalized, 0.0)
         result["credits_per_hour"] = credits_per_hour
+        # Interactive warehouses are provisioned, not per-workload. The measured
+        # run cost below is what was billed for this run; the break-even view is
+        # the comparable figure against a standard warehouse.
+        result["provisioned_comparison"] = calculate_interactive_breakeven(
+            interactive_warehouse_size=normalized or None,
+            dollars_per_credit=dollars_per_credit,
+        )
+
+        if not credits_per_hour:
+            logger.warning(
+                "Unknown interactive warehouse size %r; cost is unavailable "
+                "rather than estimated",
+                warehouse_size,
+            )
 
         # Use actual credits if available
         if actual_credits_used is not None and actual_credits_used > 0:
@@ -315,6 +456,17 @@ def calculate_estimated_cost(
             result["estimated_cost_usd"] = credits_used * dollars_per_credit
             result["cost_per_hour"] = credits_per_hour * dollars_per_credit
             result["calculation_method"] = "estimated"
+        return result
+
+    elif is_adaptive_warehouse(warehouse_size):
+        # Adaptive Warehouses use per-query billing; no size-based estimate is meaningful.
+        # Actual credits come from QUERY_METERING_HISTORY enrichment (up to 1 hr latency).
+        if actual_credits_used is not None and actual_credits_used > 0:
+            result["credits_used"] = actual_credits_used
+            result["estimated_cost_usd"] = actual_credits_used * dollars_per_credit
+            result["calculation_method"] = "actual"
+        else:
+            result["calculation_method"] = "pending_enrichment"
         return result
 
     else:

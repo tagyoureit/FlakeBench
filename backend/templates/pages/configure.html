@@ -468,40 +468,62 @@
                 <strong>Warehouse Details:</strong><br>
                 <span x-show="selectedWarehouseDetails">
                     <strong>Name:</strong> <span x-text="selectedWarehouseDetails?.name || config.warehouse_name"></span><br>
-                    <strong>Size:</strong> <span x-text="selectedWarehouseDetails?.size"></span><br>
                     <strong>State:</strong> <span x-text="selectedWarehouseDetails?.state"></span><br>
                     <strong>Type:</strong> <span x-text="selectedWarehouseDetails?.type"></span><br>
-                    <strong>Generation:</strong> 
-                    <span x-text="selectedWarehouseDetails?.resource_constraint === 'STANDARD_GEN_2' ? 'Gen 2' : 'Gen 1'"></span><br>
-                    
-                    <!-- Multi-Cluster Warehouse Details -->
-                    <span x-show="selectedWarehouseDetails?.max_cluster_count > 1">
-                        <hr class="my-2">
-                        <strong>Multi-Cluster Configuration:</strong><br>
-                        &nbsp;&nbsp;• Min Clusters: <span x-text="selectedWarehouseDetails?.min_cluster_count"></span><br>
-                        &nbsp;&nbsp;• Max Clusters: <span x-text="selectedWarehouseDetails?.max_cluster_count"></span><br>
-                        &nbsp;&nbsp;• Scaling Policy: <span x-text="selectedWarehouseDetails?.scaling_policy"></span><br>
-                        &nbsp;&nbsp;• Currently Started: <span x-text="selectedWarehouseDetails?.started_clusters"></span> cluster(s)<br>
-                    </span>
-                    
-                    <!-- Single Cluster -->
-                    <span x-show="selectedWarehouseDetails?.max_cluster_count === 1">
-                        <strong>Multi-Cluster:</strong> <span class="text-muted">Not Enabled (Single Cluster)</span><br>
-                    </span>
-                    
-                    <!-- Query Acceleration Service (QAS) -->
-                    <hr class="my-2">
-                    <strong>Query Acceleration Service (QAS):</strong> 
-                    <span x-text="selectedWarehouseDetails?.enable_query_acceleration ? 'Enabled' : 'Disabled'"></span>
-                    <span x-show="selectedWarehouseDetails?.enable_query_acceleration">
-                        (Max Scale Factor: <span x-text="selectedWarehouseDetails?.query_acceleration_max_scale_factor"></span>)
-                    </span><br>
-                    
-                    <!-- Auto-Suspend/Resume Settings -->
-                    <hr class="my-2">
-                    <strong>Auto Settings:</strong><br>
-                    &nbsp;&nbsp;• Auto-Suspend: <span x-text="selectedWarehouseDetails?.auto_suspend ? selectedWarehouseDetails.auto_suspend + ' seconds' : 'Disabled'"></span><br>
-                    &nbsp;&nbsp;• Auto-Resume: <span x-text="selectedWarehouseDetails?.auto_resume ? 'Enabled' : 'Disabled'"></span><br>
+
+                    <!-- ── Adaptive Warehouse properties ── -->
+                    <template x-if="selectedWarehouseDetails?.is_adaptive">
+                        <span>
+                            <hr class="my-2">
+                            <strong>Max Query Performance Level:</strong>
+                            <span x-text="selectedWarehouseDetails?.max_query_performance_level || 'XLarge'"></span><br>
+                            <strong>Query Throughput Multiplier:</strong>
+                            <span x-text="selectedWarehouseDetails?.query_throughput_multiplier ?? 2"></span><br>
+                            <span x-show="selectedWarehouseDetails?.disabled_reasons" class="text-warning">
+                                <strong>Disabled Reasons:</strong>
+                                <span x-text="selectedWarehouseDetails?.disabled_reasons"></span><br>
+                            </span>
+                            <small class="text-muted">Size, MCW, and QAS are auto-managed — no manual configuration needed.</small>
+                        </span>
+                    </template>
+
+                    <!-- ── Standard / Gen1 / Gen2 properties ── -->
+                    <template x-if="!selectedWarehouseDetails?.is_adaptive">
+                        <span>
+                            <strong>Size:</strong> <span x-text="selectedWarehouseDetails?.size"></span><br>
+                            <strong>Generation:</strong>
+                            <span x-text="selectedWarehouseDetails?.resource_constraint === 'STANDARD_GEN_2' ? 'Gen 2' : 'Gen 1'"></span><br>
+
+                            <!-- Multi-Cluster Warehouse Details -->
+                            <span x-show="selectedWarehouseDetails?.max_cluster_count > 1">
+                                <hr class="my-2">
+                                <strong>Multi-Cluster Configuration:</strong><br>
+                                &nbsp;&nbsp;• Min Clusters: <span x-text="selectedWarehouseDetails?.min_cluster_count"></span><br>
+                                &nbsp;&nbsp;• Max Clusters: <span x-text="selectedWarehouseDetails?.max_cluster_count"></span><br>
+                                &nbsp;&nbsp;• Scaling Policy: <span x-text="selectedWarehouseDetails?.scaling_policy"></span><br>
+                                &nbsp;&nbsp;• Currently Started: <span x-text="selectedWarehouseDetails?.started_clusters"></span> cluster(s)<br>
+                            </span>
+
+                            <!-- Single Cluster -->
+                            <span x-show="selectedWarehouseDetails?.max_cluster_count === 1">
+                                <strong>Multi-Cluster:</strong> <span class="text-muted">Not Enabled (Single Cluster)</span><br>
+                            </span>
+
+                            <!-- Query Acceleration Service (QAS) -->
+                            <hr class="my-2">
+                            <strong>Query Acceleration Service (QAS):</strong>
+                            <span x-text="selectedWarehouseDetails?.enable_query_acceleration ? 'Enabled' : 'Disabled'"></span>
+                            <span x-show="selectedWarehouseDetails?.enable_query_acceleration">
+                                (Max Scale Factor: <span x-text="selectedWarehouseDetails?.query_acceleration_max_scale_factor"></span>)
+                            </span><br>
+
+                            <!-- Auto-Suspend/Resume Settings -->
+                            <hr class="my-2">
+                            <strong>Auto Settings:</strong><br>
+                            &nbsp;&nbsp;• Auto-Suspend: <span x-text="selectedWarehouseDetails?.auto_suspend ? selectedWarehouseDetails.auto_suspend + ' seconds' : 'Disabled'"></span><br>
+                            &nbsp;&nbsp;• Auto-Resume: <span x-text="selectedWarehouseDetails?.auto_resume ? 'Enabled' : 'Disabled'"></span><br>
+                        </span>
+                    </template>
                 </span>
             </div>
         </div>
@@ -2199,10 +2221,17 @@ function testConfiguration() {
         },
 
         formatWarehouseOption(wh) {
-            // Format: WH_NAME (Gen1/2, Size, MCW 1-X?, QAS?)
+            // Adaptive: show MXPL + QTM instead of Gen/Size/MCW/QAS
+            if (wh.is_adaptive) {
+                const mxpl = wh.max_query_performance_level || 'XLarge';
+                const qtm = wh.query_throughput_multiplier ?? 2;
+                return `${wh.name} (Adaptive, MXPL: ${mxpl}, QTM: ${qtm})`;
+            }
+
+            // Standard: Format: WH_NAME (Gen1/2, Size, MCW 1-X?, QAS?)
             const gen = wh.resource_constraint === 'STANDARD_GEN_2' ? 'Gen2' : 'Gen1';
             let parts = [gen, wh.size];
-            
+
             // Add MCW only if multi-cluster is enabled (max > 1)
             if (wh.max_cluster_count > 1) {
                 parts.push(`MCW ${wh.min_cluster_count}-${wh.max_cluster_count}`);
@@ -2981,25 +3010,32 @@ function testConfiguration() {
                 );
                 if (response.ok) {
                     this.selectedWarehouseDetails = await response.json();
-                    
-                    // Normalize warehouse size from Snowflake format (e.g., "X-Large") to our format (e.g., "XLARGE")
-                    const sizeMap = {
-                        'X-Small': 'XSMALL',
-                        'Small': 'SMALL',
-                        'Medium': 'MEDIUM',
-                        'Large': 'LARGE',
-                        'X-Large': 'XLARGE',
-                        '2X-Large': '2XLARGE',
-                        '3X-Large': '3XLARGE',
-                        '4X-Large': '4XLARGE'
-                    };
-                    
+
                     // Auto-populate warehouse configuration
-                    this.config.warehouse_size = sizeMap[this.selectedWarehouseDetails.size] || this.selectedWarehouseDetails.size;
-                    this.config.multi_cluster = this.selectedWarehouseDetails.max_cluster_count > 1;
-                    this.config.min_clusters = this.selectedWarehouseDetails.min_cluster_count;
-                    this.config.max_clusters = this.selectedWarehouseDetails.max_cluster_count;
-                    this.config.scaling_policy = this.selectedWarehouseDetails.scaling_policy || 'STANDARD';
+                    if (this.selectedWarehouseDetails.is_adaptive) {
+                        this.config.warehouse_size = 'ADAPTIVE';
+                        this.config.multi_cluster = false;
+                        this.config.min_clusters = null;
+                        this.config.max_clusters = null;
+                        this.config.scaling_policy = null;
+                    } else {
+                        // Normalize warehouse size from Snowflake format (e.g., "X-Large") to our format (e.g., "XLARGE")
+                        const sizeMap = {
+                            'X-Small': 'XSMALL',
+                            'Small': 'SMALL',
+                            'Medium': 'MEDIUM',
+                            'Large': 'LARGE',
+                            'X-Large': 'XLARGE',
+                            '2X-Large': '2XLARGE',
+                            '3X-Large': '3XLARGE',
+                            '4X-Large': '4XLARGE'
+                        };
+                        this.config.warehouse_size = sizeMap[this.selectedWarehouseDetails.size] || this.selectedWarehouseDetails.size;
+                        this.config.multi_cluster = this.selectedWarehouseDetails.max_cluster_count > 1;
+                        this.config.min_clusters = this.selectedWarehouseDetails.min_cluster_count;
+                        this.config.max_clusters = this.selectedWarehouseDetails.max_cluster_count;
+                        this.config.scaling_policy = this.selectedWarehouseDetails.scaling_policy || 'STANDARD';
+                    }
                 } else {
                     console.error('Failed to load warehouse details');
                 }

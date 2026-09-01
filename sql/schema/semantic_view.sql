@@ -126,7 +126,7 @@ CREATE OR REPLACE SEMANTIC VIEW BENCHMARK_ANALYTICS
 
     TEST_RESULTS.WAREHOUSE_CREDITS_USED AS warehouse_credits_used 
       WITH SYNONYMS = ('credits', 'cost') 
-      COMMENT = 'Snowflake credits used (NULL for PostgreSQL)',
+      COMMENT = 'Snowflake credits used. For Adaptive Warehouses populated from QUERY_METERING_HISTORY (up to 1hr latency); NULL means enrichment is still pending.',
 
     TEST_RESULTS.WRITE_OPERATIONS AS write_operations 
       WITH SYNONYMS = ('writes', 'inserts', 'updates') 
@@ -197,7 +197,19 @@ CREATE OR REPLACE SEMANTIC VIEW BENCHMARK_ANALYTICS
 
     TEST_RESULTS.WAREHOUSE_SIZE AS warehouse_size 
       WITH SYNONYMS = ('size', 'compute size', 'instance size') 
-      COMMENT = 'Compute size: XSMALL/SMALL/MEDIUM/LARGE/XLARGE',
+      COMMENT = 'Compute size: XSMALL/SMALL/MEDIUM/LARGE/XLARGE or ADAPTIVE for Adaptive Warehouses',
+
+    TEST_RESULTS.WAREHOUSE_TYPE AS warehouse_type
+      WITH SYNONYMS = ('warehouse kind', 'compute type')
+      COMMENT = 'Warehouse type from Snowflake: STANDARD, ADAPTIVE, SNOWPARK-OPTIMIZED, etc.',
+
+    TEST_RESULTS.MAX_QUERY_PERFORMANCE_LEVEL AS max_query_performance_level
+      WITH SYNONYMS = ('MXPL', 'performance level', 'adaptive performance level')
+      COMMENT = 'Adaptive Warehouses only: upper bound on per-query performance (XSMALL–X4LARGE). NULL for standard warehouses.',
+
+    TEST_RESULTS.QUERY_THROUGHPUT_MULTIPLIER AS query_throughput_multiplier
+      WITH SYNONYMS = ('QTM', 'throughput multiplier', 'adaptive concurrency')
+      COMMENT = 'Adaptive Warehouses only: scale factor controlling max concurrent query work. NULL for standard warehouses.',
 
     -- Worker Metrics Dimensions
     WORKER_METRICS.PHASE AS phase 

@@ -1,0 +1,194 @@
+# ============================================================================
+# TEMPLATE METADATA
+# ============================================================================
+name: "Interactive Analytics Workload"
+description: "Low-latency, high-concurrency serving workload on an interactive warehouse"
+version: "1.0"
+category: "INTERACTIVE"
+
+# ============================================================================
+# Interactive Analytics Workload Template
+#
+# Two variants are documented below:
+#   A) Interactive table  — CREATE INTERACTIVE TABLE, requires CLUSTER BY
+#   B) Zero-copy          — a STANDARD table queried directly on an interactive
+#                           warehouse, no copy or conversion (Public Preview)
+#
+# Snowflake documents standard tables as performing comparably to interactive
+# tables on an interactive warehouse, and lists standard tables as the "best
+# default". Variant B is therefore the recommended starting point; variant A is
+# for maximum latency consistency.
+#
+# NOTE: This file is an informational template. Table creation is disabled in
+# this app, and runtime uses CUSTOM workload mode with templates stored in
+# Snowflake. The sections below document intent and operator guidance.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# VARIANT A: Interactive table
+# ----------------------------------------------------------------------------
+table:
+  name: "orders_interactive"
+  table_type: "INTERACTIVE"
+  schema: "PUBLIC"
+  # NOTE: Table creation is disabled. This table must already exist.
+
+  columns:
+    o_orderkey: "NUMBER"
+    o_custkey: "NUMBER"
+    o_orderstatus: "STRING"
+    o_totalprice: "NUMBER(12,2)"
+    o_orderdate: "DATE"
+
+  # CLUSTER BY is REQUIRED by CREATE INTERACTIVE TABLE and is the single biggest
+  # factor in staying inside the 5-second query timeout. Cluster on the columns
+  # that appear in the WHERE clauses of your most latency-critical queries.
+  clustering_keys:
+    - "o_orderkey"
+
+  initial_row_count: 150000000
+
+# ----------------------------------------------------------------------------
+# VARIANT B: Zero-copy — standard table on an interactive warehouse
+# ----------------------------------------------------------------------------
+# Swap the `table` block above for this one to benchmark the zero-copy path.
+# Everything else in this file stays the same: the warehouse does the work.
+#
+# zero_copy_variant:
+#   table:
+#     name: "orders"
+#     table_type: "STANDARD"     # no conversion to an interactive table
+#     schema: "PUBLIC"
+#     clustering_keys:
+#       - "o_orderkey"           # still critical: no pruning means timeouts
+#
+# Supported table types on an interactive warehouse, per Snowflake:
+#   standard   — best default, same performance as interactive tables
+#   dynamic    — similar to standard, supports dynamic updates
+#   interactive— best for consistent latency
+#   iceberg    — most flexible, worse query performance than the others
+#   hybrid     — supported for data portability only, not for production
+
+# Warehouse configuration
+warehouse:
+  name: "IW_BENCH"
+  type: "INTERACTIVE"          # must be an interactive warehouse
+  size: "XSMALL"
+
+  # Minimum permitted AUTO_SUSPEND for an interactive warehouse is 86400 (24h).
+  # A lower value is silently raised to 86400 by Snowflake.
+  auto_suspend: 86400
+  auto_resume: true
+
+  # Queries exceeding the fixed 5-second timeout are transparently retried here.
+  # Must be a NON-interactive warehouse. Size it the same or larger.
+  fallback_warehouse: "STD_FALLBACK_WH"
+
+  # Multi-cluster for concurrency. Use MIN_CLUSTER_COUNT for base concurrency
+  # and MAX_CLUSTER_COUNT for unpredictable spikes.
+  multi_cluster:
+    enabled: true
+    min_clusters: 1
+    max_clusters: 3
+    scaling_policy: "STANDARD"
+
+# Workload configuration
+workload:
+  type: "INTERACTIVE"
+  read_weight: 1.0             # reads only, see operator notes on writes
+  write_weight: 0.0
+
+  point_lookup_weight: 0.7     # selective WHERE on the clustering key
+  aggregation_weight: 0.3      # simple GROUP BY
+
+# Load pattern - high concurrency, short queries
+load_pattern:
+  type: "CONSTANT"
+  target_ops_per_second: 500
+
+# Test parameters
+test:
+  duration_seconds: 300
+  concurrent_connections: 50
+  warmup_seconds: 120         # cache warming dominates early results
+  think_time_ms: 0
+
+  targets:
+    min_ops_per_second: 200
+    max_p95_latency_ms: 500
+    max_p99_latency_ms: 1000
+    max_error_rate_percent: 1.0
+
+# Connection pool settings
+connection_pool:
+  pool_size: 50
+  max_overflow: 10
+  timeout_seconds: 30
+
+# Reporting
+report:
+  save_results: true
+  generate_charts: true
+  export_format: "CSV"
+  include_query_profile: true
+
+# ============================================================================
+# OPERATOR NOTES
+# ============================================================================
+#
+# 5-SECOND QUERY TIMEOUT
+#   STATEMENT_TIMEOUT_IN_SECONDS on an interactive warehouse is fixed at a
+#   default AND maximum of 5 seconds. Setting a higher value is capped at 5.
+#   Queries exceeding it are cancelled, or transparently retried on the fallback
+#   warehouse. Retried time appears as fault_handling_time in the query profile.
+#   Consistent timeouts mean the workload is not suited to interactive serving.
+#
+# FALLBACK WAREHOUSE
+#   ALTER WAREHOUSE IW_BENCH SET FALLBACK_WAREHOUSE = STD_FALLBACK_WH;
+#   Must be started or set to auto-resume. Standard credit rates apply to it
+#   once active. The querying role needs USAGE on BOTH warehouses.
+#   Note: FALLBACK_WAREHOUSE is not exposed as a SHOW WAREHOUSES column on every
+#   account, so this app cannot always verify it is configured.
+#
+# CACHE WARMING
+#   Attaching a table tells Snowflake to proactively keep it in cache:
+#     ALTER WAREHOUSE IW_BENCH ADD TABLES (DB.SCHEMA.ORDERS);
+#     ALTER WAREHOUSE IW_BENCH DROP TABLES (DB.SCHEMA.ORDERS);
+#   Requires MANAGE ATTACHED TABLES or MODIFY on the warehouse. Any table type
+#   may be attached. Unattached tables are still queryable and cache on demand.
+#   Proactive warming is capped at 10 tables per warehouse.
+#   An X-Small warehouse warms at roughly 300-400 MB/s; larger warms faster.
+#   Queries are slow until the cache is warm, so benchmark with a warmup period
+#   and treat the first measurements as cold-cache outliers.
+#   Monitor the remote read percentage in the query profile: a warm cache is
+#   close to 0%.
+#
+# WRITES
+#   Interactive tables do not support UPDATE or DELETE. INSERT OVERWRITE is the
+#   only permitted DML. The recommended pattern is an auto-refresh interactive
+#   table (TARGET_LAG) with DML applied to the source table instead.
+#
+# UNSUPPORTED SQL
+#   CALL (stored procedures) cannot run on an interactive warehouse.
+#   The ->> pipe operator cannot be used, because it uses stored procedures
+#   internally.
+#
+# COST MODEL
+#   Interactive warehouses bill at Table 1(d) rates, which are lower per hour
+#   than standard Table 1(a) rates, and apply to ANY table type queried through
+#   the warehouse — including zero-copy standard tables.
+#   Minimum billable period is one hour, then per-second. Resuming a suspended
+#   interactive warehouse starts a NEW minimum billable hour, so avoid repeated
+#   suspend/resume cycles while benchmarking.
+#   An interactive warehouse is designed to run continuously, so its per-run cost
+#   is NOT comparable to a standard warehouse spun up per workload. Compare
+#   provisioned 24-hour cost, and use the reported break-even hours: how long an
+#   equivalent standard warehouse must run to match 24h of the interactive one.
+#   Example, X-Small: 0.6 credits/hr x 24 = 14.4 credits/day, versus a standard
+#   X-Small at 1 credit/hr, so break-even is 14.4 hours of standard uptime.
+#
+# REPLICATION
+#   Interactive warehouses and tables replicate, but Snowflake does not validate
+#   interactive warehouse support in the target region. Cache is not replicated,
+#   so target-region performance is not guaranteed unless the warehouse is kept
+#   running.

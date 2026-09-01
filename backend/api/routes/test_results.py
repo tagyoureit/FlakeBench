@@ -91,19 +91,22 @@ def _build_cost_fields(
     qps: float = 0.0,
     table_type: str | None = None,
     postgres_instance_size: str | None = None,
+    actual_credits_used: float | None = None,
 ) -> dict[str, Any]:
     """
     Build cost-related fields for API responses.
 
     Args:
         duration_seconds: Test duration in seconds
-        warehouse_size: Warehouse size string (e.g., "XSMALL", "MEDIUM")
+        warehouse_size: Warehouse size string (e.g., "XSMALL", "MEDIUM", "ADAPTIVE")
         total_operations: Total operations executed (for efficiency metrics)
         qps: Queries per second (for efficiency metrics)
         table_type: Table type (e.g., "HYBRID", "POSTGRES")
                    Postgres uses instance-based pricing, not warehouse credits
         postgres_instance_size: For Postgres, explicit instance size override.
                                If not provided, looks up from configured Postgres host.
+        actual_credits_used: Actual credits from DB (WAREHOUSE_CREDITS_USED column),
+                             overrides size-based estimation when non-None and > 0.
 
     Returns:
         Dictionary with cost fields to merge into response
@@ -127,6 +130,7 @@ def _build_cost_fields(
         duration_seconds=duration_seconds,
         warehouse_size=warehouse_size,
         dollars_per_credit=settings.COST_DOLLARS_PER_CREDIT,
+        actual_credits_used=actual_credits_used if actual_credits_used and actual_credits_used > 0 else None,
         table_type=table_type,
         postgres_instance_size=effective_postgres_size,
     )
@@ -2560,7 +2564,8 @@ async def get_test(test_id: str) -> dict[str, Any]:
             FIND_MAX_RESULT,
             FAILURE_REASON,
             ENRICHMENT_STATUS,
-            ENRICHMENT_ERROR
+            ENRICHMENT_ERROR,
+            WAREHOUSE_CREDITS_USED
         FROM {_prefix()}.TEST_RESULTS
         WHERE TEST_ID = ?
         """
@@ -2935,6 +2940,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
             failure_reason,
             enrichment_status,
             enrichment_error,
+            warehouse_credits_used_db,
         ) = rows[0]
 
         is_parent_run = bool(run_id) and str(run_id) == str(test_id)
@@ -3295,6 +3301,7 @@ async def get_test(test_id: str) -> dict[str, Any]:
                 qps=float(qps or 0),
                 table_type=table_type,
                 postgres_instance_size=cfg.get("template_config", {}).get("postgres_instance_size") if isinstance(cfg, dict) else None,
+                actual_credits_used=warehouse_credits_used_db,
             ),
         }
 
@@ -8017,7 +8024,8 @@ async def ai_analysis(
                 QPS, TOTAL_OPERATIONS, FAILED_OPERATIONS,
                 P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS,
                 READ_OPERATIONS, WRITE_OPERATIONS,
-                TEST_CONFIG, FIND_MAX_RESULT, WAREHOUSE_CREDITS_USED
+                TEST_CONFIG, FIND_MAX_RESULT, WAREHOUSE_CREDITS_USED,
+                WAREHOUSE_TYPE, MAX_QUERY_PERFORMANCE_LEVEL, QUERY_THROUGHPUT_MULTIPLIER
             FROM {prefix}.TEST_RESULTS
             WHERE TEST_ID = ?
             """,
@@ -8045,6 +8053,12 @@ async def ai_analysis(
         test_config = row[15]
         find_max_result_raw = row[16]
         warehouse_credits_used = float(row[17] or 0) if row[17] is not None else None
+        warehouse_type = str(row[18] or "") if len(row) > 18 else ""
+        max_query_performance_level = str(row[19] or "") if len(row) > 19 and row[19] else None
+        query_throughput_multiplier = int(row[20]) if len(row) > 20 and row[20] is not None else None
+        is_adaptive = warehouse_type.upper() == "ADAPTIVE" or (
+            warehouse_size or ""
+        ).upper() == "ADAPTIVE"
 
         if isinstance(test_config, str):
             test_config = json.loads(test_config)

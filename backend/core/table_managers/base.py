@@ -36,6 +36,24 @@ class TableManager(ABC):
         # "TABLE" / "VIEW" / None
         self.object_type: str | None = None
         self._stats: dict[str, Any] = {}
+        # Specific reason the last setup() call failed (None if setup succeeded or
+        # has not run). Surfaced to the UI so "setup failed" is actionable.
+        self.setup_error: str | None = None
+        # Underlying error from the last table_exists() lookup, if the lookup
+        # itself failed rather than genuinely finding nothing. Set by subclasses
+        # via _record_exists_error() so setup() can distinguish "absent" from
+        # "could not check".
+        self._exists_error: str | None = None
+
+    def _record_exists_error(self, exc: Exception) -> None:
+        """
+        Record that a table_exists() lookup failed rather than returned empty.
+
+        Args:
+            exc: Exception raised while checking for the object
+        """
+        self._exists_error = str(exc)
+        logger.debug("Error checking object existence: %s", exc)
 
     @abstractmethod
     async def get_table_stats(self) -> dict[str, Any]:
@@ -74,21 +92,38 @@ class TableManager(ABC):
         Returns:
             bool: True if successful
         """
+        self.setup_error = None
+        self._exists_error = None
+        full_name = self.get_full_table_name()
+
         try:
             logger.info(f"Setting up table: {self.table_name}")
 
             exists = await self.table_exists()
             if not exists:
-                logger.error(
-                    "Table creation is disabled. Missing table/view: %s",
-                    self.get_full_table_name(),
-                )
+                if self._exists_error:
+                    # The lookup itself failed — do not claim the object is absent.
+                    self.setup_error = self._classify_setup_exception(
+                        RuntimeError(self._exists_error)
+                    )
+                else:
+                    self.setup_error = (
+                        f"{full_name} does not exist (or the current role cannot see "
+                        "it). FlakeBench never creates tables — check the name in your "
+                        "test configuration, or create the object first."
+                    )
+                logger.error(self.setup_error)
                 return False
 
-            logger.info("Using existing table/view: %s", self.get_full_table_name())
+            logger.info("Using existing table/view: %s", full_name)
 
             if not await self.validate_schema():
-                logger.error(f"Schema validation failed: {self.table_name}")
+                self.setup_error = (
+                    f"{full_name} exists but its schema does not match the test "
+                    "configuration (missing or mistyped columns). See the log for the "
+                    "column-level detail."
+                )
+                logger.error(self.setup_error)
                 return False
 
             self._stats = await self.get_table_stats()
@@ -97,8 +132,38 @@ class TableManager(ABC):
             return True
 
         except Exception as e:
+            self.setup_error = self._classify_setup_exception(e)
             logger.error(f"Error setting up table {self.table_name}: {e}")
             return False
+
+    def _classify_setup_exception(self, exc: Exception) -> str:
+        """
+        Turn a raw driver exception into an actionable setup error message.
+
+        Snowflake collapses "missing object" and "no privilege" into a single
+        "does not exist or not authorized" error, so both are reported together.
+
+        Args:
+            exc: Exception raised during setup
+
+        Returns:
+            str: Human-readable failure reason
+        """
+        full_name = self.get_full_table_name()
+        text = str(exc).lower()
+
+        if "not authorized" in text or "insufficient privileges" in text:
+            return (
+                f"{full_name} does not exist or the current role is not authorized "
+                f"to access it. Verify the name and grants. ({exc})"
+            )
+        if "does not exist" in text or "invalid identifier" in text:
+            return f"{full_name} could not be resolved: {exc}"
+        if "suspended" in text or "no active warehouse" in text:
+            return (
+                f"No usable warehouse while setting up {full_name}: {exc}"
+            )
+        return f"Could not set up {full_name}: {exc}"
 
     async def teardown(self) -> bool:
         """

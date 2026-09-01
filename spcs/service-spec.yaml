@@ -45,7 +45,7 @@ spec:
       #   secretKeyRef: POSTGRES_PASSWORD
       #   envVarName: POSTGRES_PASSWORD
   endpoints:
-  - name: flakebench-ui
+  - name: app
     port: 8080
     public: true
   # External Access Integrations for outbound connections

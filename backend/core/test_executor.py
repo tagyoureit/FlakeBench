@@ -36,6 +36,7 @@ from backend.connectors import snowflake_pool
 from backend.core.mode_config import ModeConfig
 from backend.core.table_managers import create_table_manager, TableManager, PostgresTableManager
 from backend.core.worker_pool import WorkerPool
+from backend.core.warehouse_info import is_interactive_warehouse
 from backend.core.table_profiler import (
     TableProfile,
     profile_snowflake_table,
@@ -389,6 +390,35 @@ class TestExecutor:
                 return True
         return False
 
+    async def _requires_warehouse_resume(
+        self, pool: Any, warehouse_name: str
+    ) -> bool:
+        """Check whether the benchmark warehouse must be running before setup.
+
+        Table type alone is not sufficient: a STANDARD table queried through an
+        interactive warehouse (zero-copy) also needs the warehouse running,
+        because an interactive warehouse must be resumed and cache-warmed before
+        it can serve queries.
+
+        Args:
+            pool: Connection pool used to inspect the warehouse.
+            warehouse_name: Benchmark warehouse name.
+
+        Returns:
+            True when the warehouse should be resumed if suspended.
+        """
+        if self._requires_interactive_warehouse():
+            return True
+
+        is_interactive = await is_interactive_warehouse(pool, warehouse_name)
+        if is_interactive:
+            logger.info(
+                "Warehouse %s is INTERACTIVE; treating standard table as zero-copy "
+                "interactive analytics and ensuring the warehouse is running",
+                warehouse_name,
+            )
+        return bool(is_interactive)
+
     async def _check_warehouse_state(
         self, pool: Any, warehouse_name: str
     ) -> str | None:
@@ -404,12 +434,33 @@ class TestExecutor:
             )
             if results:
                 for row in results:
-                    if len(row) >= 4 and str(row[0]).upper() == warehouse_name.upper():
-                        return str(row[3]).upper()
+                    # SHOW WAREHOUSES: index 1 is state, index 3 is size.
+                    if len(row) >= 2 and str(row[0]).upper() == warehouse_name.upper():
+                        return str(row[1]).upper()
             return None
         except Exception as e:
             logger.warning(f"Failed to check warehouse state for {warehouse_name}: {e}")
             return None
+
+    @staticmethod
+    def _describe_setup_failure(manager: Any) -> str:
+        """
+        Build an actionable setup failure message for a table manager.
+
+        Prefers the specific reason recorded by TableManager.setup() (missing
+        object, schema mismatch, not authorized) and falls back to the generic
+        message only when no reason was captured.
+
+        Args:
+            manager: Table manager whose setup() returned False
+
+        Returns:
+            str: Failure message suitable for display in the UI
+        """
+        reason = getattr(manager, "setup_error", None)
+        if reason:
+            return f"Table setup failed: {reason}"
+        return f"Failed to setup table {manager.table_name}"
 
     async def _resume_warehouse(self, pool: Any, warehouse_name: str) -> bool:
         """Resume a suspended warehouse. Returns True if successful."""
@@ -845,12 +896,15 @@ class TestExecutor:
                     sf_pool = pool
                     break
 
-            # For Interactive/Hybrid tables, ensure the warehouse is running.
+            # For Interactive/Hybrid tables, or any table on an interactive
+            # warehouse (zero-copy), ensure the warehouse is running.
             # Track whether we resumed it so we can suspend it on teardown.
             if (
                 self._benchmark_warehouse_name
                 and sf_pool
-                and self._requires_interactive_warehouse()
+                and await self._requires_warehouse_resume(
+                    sf_pool, self._benchmark_warehouse_name
+                )
             ):
                 state = await self._check_warehouse_state(
                     sf_pool, self._benchmark_warehouse_name
@@ -907,9 +961,7 @@ class TestExecutor:
                         )
                         ok = await manager.setup()
                         if not ok:
-                            self._setup_error = (
-                                f"Failed to setup table {manager.table_name}"
-                            )
+                            self._setup_error = self._describe_setup_failure(manager)
                             logger.error(self._setup_error)
                             return False
             else:
@@ -924,8 +976,8 @@ class TestExecutor:
                         logger.error(self._setup_error)
                         return False
                     elif not result:
-                        self._setup_error = (
-                            f"Failed to setup table {self.table_managers[i].table_name}"
+                        self._setup_error = self._describe_setup_failure(
+                            self.table_managers[i]
                         )
                         logger.error(self._setup_error)
                         return False

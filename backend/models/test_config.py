@@ -133,12 +133,18 @@ class ScalingPolicy(str, Enum):
 class WarehouseConfig(BaseModel):
     """
     Configuration for a Snowflake warehouse.
+
+    For Adaptive Warehouses, ``size`` is None and the adaptive-specific fields
+    ``max_query_performance_level`` and ``query_throughput_multiplier`` apply.
+    MCW fields (min/max_cluster_count, scaling_policy) are not applicable for
+    adaptive warehouses.
     """
 
     name: str = Field(..., description="Warehouse name")
-    size: WarehouseSize = Field(..., description="Warehouse size")
+    # None for Adaptive Warehouses; required for all other warehouse types.
+    size: Optional[WarehouseSize] = Field(None, description="Warehouse size (None for adaptive)")
 
-    # Multi-cluster settings
+    # Multi-cluster settings (standard warehouses only)
     min_cluster_count: int = Field(1, ge=1, le=10, description="Min clusters")
     max_cluster_count: int = Field(1, ge=1, le=10, description="Max clusters")
     scaling_policy: ScalingPolicy = Field(
@@ -154,10 +160,27 @@ class WarehouseConfig(BaseModel):
     # Resource monitor
     resource_monitor: Optional[str] = Field(None, description="Resource monitor name")
 
+    # Adaptive Warehouse properties (only set when size is None / type is ADAPTIVE)
+    max_query_performance_level: Optional[str] = Field(
+        None, description="Max query performance level (Adaptive only, e.g. 'XLarge')"
+    )
+    query_throughput_multiplier: Optional[int] = Field(
+        None, description="Query throughput multiplier (Adaptive only)"
+    )
+
+    @property
+    def is_adaptive(self) -> bool:
+        """True when this is an Adaptive Warehouse configuration."""
+        return self.size is None or str(self.size).upper() == "ADAPTIVE"
+
     @field_validator("max_cluster_count")
     @classmethod
     def validate_cluster_count(cls, v, info):
-        """Validate max >= min cluster count."""
+        """Validate max >= min cluster count (only enforced for standard warehouses)."""
+        # Adaptive warehouses have size=None; skip MCW validation for them.
+        size = info.data.get("size")
+        if size is None:
+            return v
         min_count = info.data.get("min_cluster_count", 1)
         if v < min_count:
             raise ValueError("max_cluster_count must be >= min_cluster_count")

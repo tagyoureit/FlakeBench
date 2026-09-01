@@ -707,23 +707,36 @@
         class="card"
         x-show="templateInfo && isFinalMetricsReady() && (templateInfo?.table_type || '').toLowerCase() !== 'postgres'"
     >
-        <div class="card-title">Warehouse Queueing + MCW (post-processed)</div>
+        <!-- Title adapts: adaptive warehouses don't have MCW -->
+        <div class="card-title" x-text="(templateInfo?.warehouse_size || '').toUpperCase() === 'ADAPTIVE' ? 'Warehouse Queueing (post-processed)' : 'Warehouse Queueing + MCW (post-processed)'"></div>
         <div style="color: #6b7280; margin-top: -0.25rem;">
             Derived from <code>INFORMATION_SCHEMA.QUERY_HISTORY</code> after the run completes.
         </div>
 
+        <!-- Adaptive Warehouse configuration summary -->
+        <template x-if="(templateInfo?.warehouse_size || '').toUpperCase() === 'ADAPTIVE'">
+            <div class="alert alert-info" style="margin-top: 0.75rem; font-size: 0.875rem;">
+                <strong>Adaptive Compute:</strong> no fixed size or cluster count.
+                Size, scaling, and QAS are auto-managed.
+                Credits are reported from <code>QUERY_METERING_HISTORY</code> (up to 1 hr latency).
+            </div>
+        </template>
+
         <div x-show="templateInfo && templateInfo.warehouse_metrics_available" style="margin-top: 1rem;">
             <div class="metrics-grid">
-                <div class="metric-card">
-                    <div class="metric-label">
-                        <span>Clusters Used</span>
-                        <span
-                            class="info-icon"
-                            title="Clusters used: number of active clusters observed for the warehouse during the run (post-processed from QUERY_HISTORY)."
-                        >i</span>
+                <!-- Clusters Used — hidden for Adaptive Warehouses -->
+                <template x-if="(templateInfo?.warehouse_size || '').toUpperCase() !== 'ADAPTIVE'">
+                    <div class="metric-card">
+                        <div class="metric-label">
+                            <span>Clusters Used</span>
+                            <span
+                                class="info-icon"
+                                title="Clusters used: number of active clusters observed for the warehouse during the run (post-processed from QUERY_HISTORY)."
+                            >i</span>
+                        </div>
+                        <div class="metric-value" x-text="formatInt(templateInfo?.warehouse_metrics?.clusters_used)"></div>
                     </div>
-                    <div class="metric-value" x-text="formatInt(templateInfo?.warehouse_metrics?.clusters_used)"></div>
-                </div>
+                </template>
                 <div class="metric-card">
                     <div class="metric-label">
                         <span>Queued (Overload)</span>

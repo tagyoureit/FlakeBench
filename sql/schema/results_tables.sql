@@ -34,7 +34,10 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     table_name VARCHAR(500) NOT NULL,
     table_type VARCHAR(50) NOT NULL,
     warehouse VARCHAR(500),
-    warehouse_size VARCHAR(50),
+    warehouse_size VARCHAR(50),          -- 'ADAPTIVE' for Adaptive Warehouses, else standard size
+    warehouse_type VARCHAR(50),          -- 'ADAPTIVE', 'STANDARD', etc. (mirrors SHOW WAREHOUSES type col)
+    max_query_performance_level VARCHAR(50), -- Adaptive only, e.g. 'XLarge'
+    query_throughput_multiplier INTEGER,    -- Adaptive only, e.g. 2
     
     -- Execution metadata
     status VARCHAR(50) NOT NULL,
@@ -73,6 +76,18 @@ CREATE OR ALTER TABLE TEST_RESULTS (
     warehouse_credits_used FLOAT,
     avg_cpu_percent FLOAT,
     avg_memory_mb FLOAT,
+
+    -- Interactive warehouse provisioned-cost comparison.
+    -- Interactive warehouses are always-on provisioned caches (24h minimum
+    -- auto-suspend, 1h minimum billable period), so per-run cost is not
+    -- comparable to a standard warehouse spun up per workload. Break-even hours
+    -- is the headline: how long an equivalent standard warehouse must run to
+    -- match 24h of the interactive warehouse. NULL for non-interactive runs and
+    -- for adaptive warehouses (which bill per query).
+    breakeven_standard_wh_hours FLOAT,
+    iw_24h_credits FLOAT,               -- deterministic: IW rate x 24
+    standard_wh_24h_credits FLOAT,      -- assumes standard WH also runs 24/7
+    credit_rate_basis VARCHAR(50),      -- rate table version used for the above
     
     -- Errors and issues
     error_count INTEGER DEFAULT 0,
@@ -427,11 +442,16 @@ CREATE OR ALTER TABLE WAREHOUSE_POLL_SNAPSHOTS (
     started_clusters INTEGER,
     running INTEGER,
     queued INTEGER,
-    
-    -- Scaling State
+
+    -- Scaling State (standard warehouses)
     min_cluster_count INTEGER,
     max_cluster_count INTEGER,
     scaling_policy VARCHAR(50),
+
+    -- Adaptive Warehouse properties (NULL for standard warehouses)
+    warehouse_state VARCHAR(20),            -- ENABLED/DISABLED (adaptive) or NULL (standard)
+    max_query_performance_level VARCHAR(50),
+    query_throughput_multiplier INTEGER,
     
     -- Raw SHOW WAREHOUSES row (for debugging)
     raw_result VARIANT,

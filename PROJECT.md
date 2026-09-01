@@ -116,25 +116,33 @@ core/
 
 **Full documentation:** See `spcs/README.md` for complete setup, networking, and troubleshooting.
 
-### Push Latest Image to SPCS
+> **CRITICAL FOR AI AGENTS: Always read `spcs/service-spec.yaml` and use it verbatim for ALTER SERVICE.**
+> Never hand-type or reconstruct the spec — the file is the canonical source.
+> The gateway `FLAKEBENCH_GATEWAY` targets endpoint `app` (not `flakebench-ui`).
+> `externalAccessIntegrations` is NOT valid inside ALTER SERVICE spec body — it is already set on the service; omit it from ALTER calls.
+> Network policy on `SFSENORTHAMERICA-RGOLDIN_AWS1` blocks non-VPN IPs — must be on Snowflake VPN for registry push.
+
+### Build & Push Latest Image
 
 ```bash
-# Build, tag, login, and push (replace TAG with date-version like 20260227-v1)
-TAG=20260227-v1
-docker build --platform linux/amd64 -t flakebench:$TAG -f Dockerfile .
-docker tag flakebench:$TAG sfsenorthamerica-rgoldin-aws1.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:$TAG
-snow spcs image-registry login --connection default
-docker push sfsenorthamerica-rgoldin-aws1.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:$TAG
+# Must be on VPN. Build for linux/amd64 (required for SPCS).
+docker build --platform linux/amd64 --load -t flakebench:latest .
+docker tag flakebench:latest sfsenorthamerica-rgoldin-aws1.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:latest
+snow spcs image-registry login --connection sfsenorthamerica-rgoldin_aws1
+docker push sfsenorthamerica-rgoldin-aws1.registry.snowflakecomputing.com/sandbox/spcs/flakebench_repo/flakebench:latest
 ```
 
 ### Update SPCS Service
 
+Read `spcs/service-spec.yaml`, strip the `externalAccessIntegrations` block, then run:
+
 ```sql
+-- Use EXACTLY the spec from spcs/service-spec.yaml (minus externalAccessIntegrations)
 ALTER SERVICE SANDBOX.SPCS.FLAKEBENCH_SERVICE FROM SPECIFICATION $$
 spec:
   containers:
   - name: flakebench
-    image: /SANDBOX/SPCS/FLAKEBENCH_REPO/flakebench:<TAG>
+    image: /SANDBOX/SPCS/FLAKEBENCH_REPO/flakebench:latest
     env:
       APP_HOST: "0.0.0.0"
       APP_PORT: "8080"
@@ -158,7 +166,7 @@ spec:
       port: 8080
       path: /health
   endpoints:
-  - name: flakebench-ui
+  - name: app         # MUST be 'app' — gateway FLAKEBENCH_GATEWAY targets FLAKEBENCH_SERVICE!app
     port: 8080
     public: true
 $$;
