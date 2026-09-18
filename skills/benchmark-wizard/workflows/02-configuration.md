@@ -1,5 +1,10 @@
 # Phase 2: Configuration Generation
 
+> **API target:** all `curl` examples use `${BASE_URL}` and `-H "$AUTH"`, which
+> target the SPCS deployment. Export both as shown in
+> `workflows/03-execution.md` ("Execution target must be SPCS") before running them.
+
+
 ## Purpose
 
 Transform gathered requirements into a valid test configuration JSON that can be submitted to the backend API.
@@ -19,7 +24,7 @@ This step is NOT optional. Even if the user provides detailed requirements, exis
 ### Fetch Existing Templates
 
 ```bash
-curl -sL "http://127.0.0.1:8000/api/templates/" | jq '.templates'
+curl -sL "${BASE_URL}/api/templates/" | jq '.templates'
 ```
 
 ### REQUIRED: Score and Present Matches
@@ -852,7 +857,7 @@ The template API requires a **nested `config` object** - all configuration field
 
 **CORRECT (nested config structure):**
 ```bash
-curl -sL -X POST "http://127.0.0.1:8000/api/templates/" \
+curl -sL -X POST "${BASE_URL}/api/templates/" \
   -H "Content-Type: application/json" \
   -d '{
     "template_name": "benchmark-wizard-20260213-143022",

@@ -201,9 +201,25 @@ SET ALLOWED_IP_LIST = (
 
 ## Update Service
 
+> **Pushing an image does not deploy it.** SPCS resolves the image tag to a digest
+> **once**, when the service is created or upgraded, and freezes that digest into the
+> stored spec:
+>
+> ```
+> image: ".../flakebench:latest"
+> sha256: "@sha256:799e06e7…"    <- frozen at the last ALTER SERVICE
+> ```
+>
+> `docker push …:latest` only moves the registry label — the service keeps running the
+> old digest. **Suspend/resume does not help**, because resume restarts on the recorded
+> digest. Only `ALTER SERVICE … FROM SPECIFICATION` re-resolves the tag.
+
 When you push a new image version:
 
 ```sql
+-- Note: the live service is SANDBOX.SPCS.FLAKEBENCH_SERVICE (image repo SANDBOX.SPCS.FLAKEBENCH_REPO).
+-- Use spcs/service-spec.yaml verbatim, minus the externalAccessIntegrations block
+-- (EAIs are service properties set at creation, not part of the ALTER spec body).
 ALTER SERVICE FLAKEBENCH.TEST_RESULTS.FLAKEBENCH_SERVICE FROM SPECIFICATION $$
 spec:
   containers:
@@ -222,6 +238,28 @@ spec:
     port: 8080
     public: true
 $$;
+```
+
+### Verify the upgrade actually landed
+
+`ALTER SERVICE` returning `Statement executed successfully` only means the spec was
+accepted — not that containers came up on the new image. Always confirm:
+
+```sql
+SHOW SERVICE CONTAINERS IN SERVICE SANDBOX.SPCS.FLAKEBENCH_SERVICE;
+-- image_digest must match the new tag's digest, and start_time must be recent.
+-- A stale container gives it away: old start_time with restart_count = 0.
+
+SHOW IMAGES IN IMAGE REPOSITORY SANDBOX.SPCS.FLAKEBENCH_REPO;
+-- Compare the digest of the tag you just pushed against image_digest above.
+```
+
+The rollout takes roughly 30-60s; the old container reports `TERMINATING` first.
+
+To prove the built artifact contains a specific change:
+
+```bash
+docker run --rm --entrypoint sh <image-id> -c "grep -c '<new symbol>' /app/backend/..."
 ```
 
 ## Endpoint URL

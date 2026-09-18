@@ -40,8 +40,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   5-second timeout, fallback warehouse, cache warming and the 10-table proactive
   warming limit, 24-hour minimum auto-suspend, required `MANAGE ATTACHED TABLES`
   privilege, unsupported SQL, and the provisioned cost model.
+- feat(skills): new `spcs-benchmark-runner` skill for running benchmark matrices
+  against the SPCS deployment. `scripts/spcs_auth.py` mints an SPCS ingress OAuth
+  token via key-pair JWT exchange, resolving credentials from
+  `~/.snowflake/connections.toml`, flags, or `SNOWFLAKE_*` env vars.
+  `scripts/run_sequence.py` runs templates sequentially, polling each to a
+  terminal state and re-minting tokens per run so multi-hour matrices survive
+  token expiry. Supports Latin-square ordering so cache warmth cannot alias onto
+  a single configuration.
+- docs(skills): `references/methodology.md` records measured constraints for valid
+  comparisons - run-order rotation, the ~6% CV noise floor, metric selection by
+  load point, warm-up requirements, why baseline-relative stop conditions are not
+  comparable across runs, and holding clustering constant when comparing table
+  types.
+- docs(interactive): `docs/interactive-zero-copy-benchmark-report.html` - shareable
+  report on zero-copy interactive analytics vs dedicated interactive tables. 18
+  fixed-concurrency runs across two orderings plus four concurrency ramps, with 12
+  charts and a methodology diagram. Finds interactive tables and clustered standard
+  tables statistically indistinguishable (3.4%, p about 0.38) while clustering is
+  worth +19% throughput and -30% p50. Fully standalone: every chart is hand-built
+  inline SVG with no external libraries, scripts, or network access, so the file
+  opens in any browser and renders offline.
+- docs(interactive): server-side SQL execution times added to that report as a new
+  "Server-side execution time" section with four more charts (17 total). Pooled from
+  `QUERY_EXECUTIONS.SF_EXECUTION_MS` over 6,006,727 enriched query rows. Server-side
+  the unclustered table is 6.7x slower at p50 and 7.7x at p95, a gap end-to-end
+  timings compress to 1.4x and 1.0x; actual execution is only ~7 ms of a ~72 ms
+  request, behind 27 ms of compilation and ~37 ms of client and network time. Also
+  records that `QUERY_EXECUTIONS` is keyed by the per-worker `TEST_ID`, so per-query
+  rows must be reached by joining the aggregate run to its three
+  `CONCURRENT_CONNECTIONS = 15` worker rows on `RUN_ID`.
+- docs(skills): `spcs-benchmark-runner` 1.1.0 documents separating server-side SQL
+  execution time from end-to-end latency, including the `QUERY_EXECUTIONS` per-worker
+  `TEST_ID` keying trap, that client overhead scales with throughput and so
+  understates the better configuration, and the integer-millisecond resolution of
+  `SF_EXECUTION_MS`.
+- docs(interactive): `docs/build-interactive-report.py` regenerates that report from
+  its source values, with `docs/_report_body.html` as the prose template. Re-run
+  after refreshing the underlying queries listed in the report's embedded metadata
+  block.
 
 ### Fixed
+
+- fix(skills): `benchmark-wizard` told agents to poll `GET /api/runs/{run_id}/` to
+  translate a run ID into a test ID. That route does not exist in
+  `backend/api/routes/runs.py`, and the translation is unnecessary because
+  `test_id` and `run_id` are the same UUID. Polling now uses
+  `GET /api/tests/{run_id}`.
+- fix(skills): every `benchmark-wizard` API example hardcoded
+  `http://127.0.0.1:8000`. Because runs execute client-side, that silently
+  generated load from the local machine instead of SPCS, producing results not
+  comparable with SPCS-executed runs. Examples now use `${BASE_URL}` and
+  `-H "$AUTH"` against the SPCS endpoint.
+
+- fix(warehouses): interactive warehouses were shown with a fabricated
+  `Generation: Gen 1` and a `Query Acceleration Service: Disabled` row. Neither
+  applies: `CREATE INTERACTIVE WAREHOUSE` accepts no `GENERATION`,
+  `RESOURCE_CONSTRAINT` or `ENABLE_QUERY_ACCELERATION`, and `SHOW WAREHOUSES`
+  returns those columns empty. The frontend collapsed that empty value into a
+  positive claim via `resource_constraint === 'STANDARD_GEN_2' ? 'Gen2' : 'Gen1'`.
+  `_parse_warehouse_row` now has a dedicated interactive branch that reports
+  `generation`, `resource_constraint` and both QAS fields as `None` while keeping
+  size and cluster counts, and the Configure detail panel hides the Generation and
+  QAS rows entirely for interactive warehouses.
+- fix(warehouses): standard warehouses with no explicit generation were also
+  labelled `Gen1`. The default generation for standard warehouses is now Gen2
+  (BCR-2250), so a blank column is evidence of nothing. Such warehouses now read
+  `Not set (account default)` rather than asserting a generation in either
+  direction.
+- fix(warehouses): read the authoritative `generation` column (`SHOW WAREHOUSES`
+  index 33, values `'1'`/`'2'`) instead of inferring generation by string-matching
+  `resource_constraint`. The column was previously skipped entirely - the index map
+  jumped from `resource_constraint` (32) to `query_throughput_multiplier` (34).
+  `resource_constraint` is retained as a fallback for cached payloads.
+- fix(dashboard): adaptive warehouses rendered as `Gen1` with an empty size in the
+  dashboard warehouse label. `display.js`'s `formatWarehouseOption` had no adaptive
+  branch, unlike its counterpart in `configure.html`; it now reports
+  `(Adaptive, max <MXPL>, QTM <n>)`. Both copies route their generation token
+  through a shared `warehouseGenerationLabel()` helper, and `task test:js`
+  asserts the two implementations agree.
+
+- fix(templates): quoted identifiers broke GENERIC_SQL placeholder column
+  extraction, so `/ai/prepare` ("Update Table Metadata") generated no parameter
+  specs and every query failed at warmup with `GENERIC_SQL query has placeholders
+  but no parameters configuration`. `_extract_placeholder_columns` matched the
+  column with a bare `(\w+)`, which cannot reach the operator past a closing
+  double quote - and quoted identifiers are the house style for generated SQL, so
+  any generic query written the way the app writes SQL silently produced zero
+  parameters. The identifier pattern now accepts bare, `"quoted"` and
+  `[bracketed]` names including a qualified `alias."Col"` prefix. Fixed a second
+  latent defect in the same pattern: the operator alternation listed `>` and `<`
+  before `>=` and `<=`, so leftmost-first matching consumed `>` and left `= ?`,
+  dropping `>=` and `<=` placeholders even on unquoted SQL.
+- fix(templates): `/ai/prepare` reported success while leaving GENERIC_SQL
+  `parameters` empty or short, deferring the failure to run warmup. Three silent
+  skips (no columns identified, column not resolvable against the main or joined
+  tables, sampling INSERT failed) now collect messages into the existing
+  `AiPrepareResponse.warnings`, and `updateTableMetadata()` surfaces them as a
+  warning toast instead of an unconditional success toast.
+- fix(templates): a GENERIC_SQL entry whose `parameters` count disagrees with its
+  placeholder count is now rejected on save. An *empty* `parameters` list stays
+  saveable: it is the legitimate pre-prepare state, and because
+  `/ai/prepare` is `POST /{template_id}/ai/prepare` and needs an already-saved
+  template, blocking it would deadlock every new generic entry.
+
+- fix(templates): template save accepted custom SQL whose shape did not match its
+  query kind, producing an opaque `Bind variable ? not set` driver error once per
+  query at run time. POINT_LOOKUP and RANGE_SCAN are fixed-arity kinds -
+  POINT_LOOKUP binds exactly one parameter and RANGE_SCAN one or two - but
+  validation checked SQL presence only, never shape. New
+  `templates_modules/sql_shape.py` enforces the contract on both the server
+  (`config_normalizer`) and the client (`configure.html` `_saveTemplate`):
+  POINT_LOOKUP requires exactly one placeholder with an equality predicate and no
+  range operator, RANGE_SCAN requires one or two placeholders with a range
+  predicate. Comments and single-quoted literals are stripped before inspection,
+  so a literal containing `?` cannot inflate the placeholder count and a comment
+  mentioning `BETWEEN` cannot trigger a false match. Validation is gated on
+  `weight_pct > 0`, so an unused zero-weight field cannot block a save. Messages
+  name the offending construct, point at the correct field, and point at Generic
+  SQL for arbitrary placeholder counts. Audited all 44 saved template SQL fields:
+  none are rejected, so no existing template needs migration.
+- fix(templates): config validation errors surfaced as
+  `500 INTERNAL_ERROR: "create template failed."` because both save paths caught
+  bare `Exception` and `http_exception` has no `ValueError` branch. Added an
+  explicit `except ValueError` returning `400` with
+  `detail={"error": "invalid_config", "message": ...}`, matching the existing
+  PgBouncer 400 pattern. This also un-swallows the pre-existing
+  weights-must-sum-to-100 message.
+- fix(templates): `create_template` lacked the `except HTTPException: raise` guard
+  that the update path has, so deliberate 400s raised inside the `try` block -
+  including the existing PgBouncer checks - were re-wrapped as 500s.
 
 - fix(cost): interactive warehouse cost estimation defaulted an unknown warehouse
   size to `MEDIUM`, silently reporting a fabricated credit rate. Interactive

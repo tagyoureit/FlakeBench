@@ -1,7 +1,7 @@
 ---
 name: benchmark-wizard
 description: Interactive wizard to design, execute, and analyze Snowflake/Postgres performance benchmarks. Guides through table type selection, workload configuration, test execution, and result analysis via Cortex Agent. Triggers on "benchmark", "performance test", "help me test", "compare tables", "load test".
-version: 1.0.0
+version: 1.1.0
 ---
 
 # Benchmark Wizard
@@ -267,8 +267,11 @@ ask_user_question:
 ## Prerequisites
 
 **Required:**
-- Backend server running (`uv run python -m backend.main`)
+- SPCS deployment reachable, and `BASE_URL` + `AUTH` exported (see
+  `workflows/03-execution.md` → "Execution target must be SPCS"). Runs execute
+  client-side, so the API target decides where load is generated — always SPCS.
 - Active Snowflake connection configured in CoCo
+- Key-pair auth configured for the user, for SPCS ingress tokens
 - Target table(s) exist in Snowflake or Postgres
 
 **For Postgres tests:**
@@ -295,6 +298,13 @@ ask_user_question:
 1. **Test Configuration**: JSON config saved as template in Snowflake
 2. **Test Execution**: Run ID with dashboard URL for live monitoring
 3. **Analysis**: Natural language insights from Cortex Agent
+
+## Related Skills
+
+- **`spcs-benchmark-runner`** — use for multi-trial matrices and A/B comparisons.
+  It handles SPCS authentication, sequential execution, Latin-square run ordering,
+  and documents the statistical methodology (noise floor, metric selection by load
+  point). Design templates here, then execute the matrix there.
 
 ## Workflow (Progressive Disclosure)
 
@@ -381,6 +391,7 @@ Progressively increase concurrency to find maximum sustainable throughput.
 | `/api/runs/{id}/preflight` | GET | Get pre-flight warnings |
 | `/api/runs/{id}/start` | POST | Start test execution |
 | `/api/runs/{id}/stop` | POST | Stop running test |
+| `/api/tests/{id}` | GET | Poll run status (`test_id` == `run_id`; there is no `GET /api/runs/{id}/`) |
 | `/api/tests/{id}/comparison-context` | GET | Get regression status + optimization hints (see below) |
 | `/api/tests/compare/ai-analysis` | POST | AI comparison of two tests |
 | `/api/tests/{id}/ai-analysis` | POST | AI analysis of single test |

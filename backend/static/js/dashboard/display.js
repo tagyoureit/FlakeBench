@@ -57,10 +57,38 @@ window.DashboardMixins.display = {
     return String(max || min || "");
   },
 
+  // Generation applies only to standard warehouses. Adaptive and interactive
+  // warehouses have no generation, and a blank value on a standard warehouse
+  // means "not set" -- never infer Gen1 from an empty column.
+  warehouseGenerationLabel(wh) {
+    if (!wh) return "";
+    if (wh.is_adaptive || wh.is_interactive) return "";
+    if (wh.generation === "2") return "Gen2";
+    if (wh.generation === "1") return "Gen1";
+    const constraint = wh.resource_constraint || "";
+    if (constraint === "STANDARD_GEN_2") return "Gen2";
+    if (constraint === "STANDARD_GEN_1") return "Gen1";
+    return constraint || "";
+  },
+
   formatWarehouseOption(wh) {
     if (!wh) return "";
-    const gen = wh.resource_constraint === "STANDARD_GEN_2" ? "Gen2" : "Gen1";
-    const parts = [gen, wh.size];
+    if (wh.is_adaptive) {
+      const parts = [
+        "Adaptive",
+        wh.max_query_performance_level ? `max ${wh.max_query_performance_level}` : null,
+        wh.query_throughput_multiplier ? `QTM ${wh.query_throughput_multiplier}` : null,
+      ];
+      return `${wh.name} (${parts.filter(Boolean).join(", ")})`;
+    }
+
+    const parts = [];
+    if (wh.is_interactive) {
+      parts.push("Interactive");
+    } else {
+      parts.push(this.warehouseGenerationLabel(wh));
+    }
+    parts.push(wh.size);
 
     const maxClusters = Number(wh.max_cluster_count || 0);
     if (Number.isFinite(maxClusters) && maxClusters > 1) {
@@ -281,12 +309,7 @@ window.DashboardMixins.display = {
   },
 
   resourceConstraintDisplay() {
-    const details = this.warehouseDetails;
-    if (!details) return "";
-    const constraint = details.resource_constraint || "";
-    if (constraint === "STANDARD_GEN_2") return "Gen2";
-    if (constraint === "STANDARD_GEN_1" || constraint === "STANDARD") return "Gen1";
-    return constraint ? constraint : "";
+    return this.warehouseGenerationLabel(this.warehouseDetails);
   },
 
   boundsStatusText() {

@@ -122,3 +122,270 @@ Two defects in the same code path:
   knowing when testing manually.
 - Related follow-up filed as ISSUE-005: the connection pool returns `[]` on
   network failure, which can still make a present table look absent.
+
+---
+
+## ISSUE-006: Toast close button barely visible and pushed outside the card on long messages
+
+| Field | Details |
+|---|---|
+| **ID** | ISSUE-006 |
+| **Title** | Toast close button barely visible and pushed outside the card on long messages |
+| **Date Reported** | 2026-09-01 |
+| **Date Resolved** | 2026-09-01 |
+| **Status** | Resolved |
+| **Severity** | Medium |
+| **Component** | backend/static/css/input.css (`.toast__close`, `.toast__content`) |
+| **Environment** | SPCS (mxp7lf-sfsenorthamerica-rgoldin-aws1.snowflakecomputing.app) |
+
+### Symptoms
+- The "×" dismiss button on toast notifications was barely visible on the right side.
+- On the long error toast from ISSUE-004, the button was pushed **completely outside**
+  the card and was effectively unreachable.
+- Severity is raised by `toast.js` `durationFor()`: error and warning toasts return
+  `null` (sticky, never auto-dismiss), so the × is the *only* way to clear them.
+
+### Root Cause
+Two separate defects:
+
+1. **Low contrast / tiny target.** `.toast__close` was styled
+   `text-gray-900/70 text-xl leading-none p-0` with no width or height, giving a
+   faint glyph and roughly a 20px hit area with no hover affordance.
+2. **Flex overflow (the "invisible" case).** `.toast__content` was `flex-1` with no
+   `min-width: 0`. A flex item's default `min-width: auto` refuses to shrink below its
+   content's intrinsic minimum, and the unbreakable token
+   `UNISTORE_BENCHMARK.PUBLIC.TPCH_SF100_ORDERS_INT_STATIC` made that minimum wider
+   than the available column — so the content box pushed `.toast__close` past the
+   card's right edge. `break-words` alone does not help, because the overflow happens
+   during flex sizing, before wrapping is considered.
+
+### Evidence
+Measured in a browser against the compiled CSS, before the fix:
+
+| Toast | Close btn x-range | Card right edge | Result |
+|---|---|---|---|
+| error (long message) | 648–676 | 652 | **overflowed by 24px** |
+| success (short) | 611–639 | 652 | inside (13px inset) |
+| confirm (dark) | 611–639 | 652 | inside (13px inset) |
+
+Hovering the overflowed button scrolled the container horizontally and clipped the
+left edge of every line of the message text.
+
+After the fix, all three toasts measure identically — button 611–639 inside a card
+ending at 652 (13px inset), and for the error toast `content.right` = 599 vs
+`close.left` = 611, a 12px gap with no overlap. Computed
+`.toast__content { min-width: 0px }` and `.toast__close { flex-shrink: 0 }`.
+
+### Resolution
+In `backend/static/css/input.css`:
+- `.toast__content` — added `min-w-0` so the flex item can shrink and long tokens
+  wrap inside the card instead of forcing the button out.
+- `.toast__close` — added `shrink-0`, `self-start`, an explicit `h-7 w-7` grid-centred
+  box, `-mr-1` optical inset, `text-gray-900` (full contrast, up from `/70`),
+  `text-2xl`, a `hover:bg-gray-900/10` rounded affordance, and a
+  `focus-visible:ring-2` for keyboard users.
+- `.toast--confirm .toast__close` — raised to full `text-gray-50` with a
+  `hover:bg-white/15` and a light focus ring for the dark variant.
+- Rebuilt the compiled stylesheet with `task css:build`.
+
+### Regression Test
+- **Check:** the close button stays inside the card even with an unbreakable long token
+- **Command:** render a `.toast--error` whose message contains
+  `UNISTORE_BENCHMARK.PUBLIC.TPCH_SF100_ORDERS_INT_STATIC`, then in the browser console:
+  ```js
+  const t = document.querySelector('.toast--error');
+  const c = t.querySelector('.toast__content').getBoundingClientRect();
+  const x = t.querySelector('.toast__close').getBoundingClientRect();
+  console.log(c.right <= x.left, x.right <= t.getBoundingClientRect().right);
+  ```
+- **Expected:** `true true` — content does not reach the button, button does not exit the card
+- **Check:** compiled CSS contains the fix (editing `input.css` alone changes nothing)
+- **Command:** `grep -o '\.toast__content{[^}]*}' backend/static/css/tailwind.css`
+- **Expected:** includes `min-width:0`
+
+### Notes
+- `backend/static/css/tailwind.css` is **gitignored** but IS baked into the image via
+  `COPY backend/ ./backend/` (no `.dockerignore` exclusion). You must run
+  `task css:build` before `docker build`, or the container ships stale CSS.
+- A mojibake `Ã—` seen during testing was an artifact of the bare `python -m http.server`
+  harness, not a product bug — `base.html` has `<meta charset="UTF-8">`.
+- Separately repaired: `.venv/bin/tailwindcss` had a dangling shebang pointing at
+  `/Users/rgoldin/Programming/unistore_performance_analysis/.venv/bin/python3`, which no
+  longer exists, so `task css:build` failed with "Failed to spawn: tailwindcss". Fixed by
+  `uv pip install --force-reinstall pytailwindcss` (0.3.0 → 0.3.1). Guarded permanently by
+  a new internal `css:ensure-tailwind` Taskfile task that all three `css:*` tasks depend
+  on: it probes `uv run tailwindcss --help` and force-reinstalls only when the probe fails.
+- Deployed to SPCS 2026-09-04: image digest
+  `sha256:36be9e40a09c9285c5f5c35f21ddb355a6e22e1a5c33e176933aeebe2074c063`,
+  container start 2026-09-04T17:00:25Z. Registry push initially failed `UNAUTHORIZED`
+  because the Docker registry token had expired — `snow spcs image-registry login -c default`
+  resolves it (the `snow` CLI connection itself was fine).
+
+## ISSUE-007: Template save accepts SQL whose shape does not match its query kind
+
+| Field | Details |
+|---|---|
+| **ID** | ISSUE-007 |
+| **Title** | Template save accepts SQL whose shape does not match its query kind |
+| **Date Reported** | 2026-09-15 |
+| **Date Resolved** | 2026-09-15 |
+| **Status** | Resolved |
+| **Severity** | High |
+| **Component** | `backend/api/routes/templates_modules/config_normalizer.py` |
+| **Environment** | Local + SPCS |
+
+### Symptoms
+- A benchmark run against `UNISTORE_BENCHMARK.PUBLIC.TPCH_SF100_ORDERS_INT`
+  failed every POINT_LOOKUP query during warmup with
+  `002049 (42601): SQL compilation error: Bind variable ? not set.`
+- The failure repeated once per query rather than aborting the run.
+
+### Root Cause
+Save-time validation checked SQL *presence* only, never *shape*.
+`config_normalizer.py:150-158` required non-empty SQL when a weight exceeded
+zero and nothing more.
+
+POINT_LOOKUP and RANGE_SCAN are fixed-arity kinds. `test_executor.py:3999-4001`
+binds exactly one parameter for POINT_LOOKUP with no placeholder count at all:
+
+```python
+elif query_kind == "POINT_LOOKUP":
+    target_id = _choose_id()
+    params = [target_id]
+```
+
+`RANGE_SCAN` (`test_executor.py:4004-4046`) counts placeholders but its `else`
+branch hardcodes two. The saved point-lookup SQL had three placeholders
+(`WHERE "O_ORDERDATE" = ? AND "O_CUSTKEY" BETWEEN ? AND ? + 2399`), so one value
+was bound and the driver rejected the statement.
+
+### Evidence
+- `SQL_ERROR_SAMPLE` log line: `"params": {"count": 1, "items": ["265997249"]}`
+  against a three-placeholder query.
+- The bound value was an `O_ORDERKEY`-magnitude integer headed for an
+  `O_ORDERDATE` predicate, confirming the single shared key pool.
+- Audit of all 44 saved template SQL fields: zero would be rejected by the new
+  rules, so no existing template needed migration.
+
+### Resolution
+Added `backend/api/routes/templates_modules/sql_shape.py` with
+`count_placeholders()` and `validate_query_shape()`, enforcing:
+
+| Kind | Placeholders | Predicate |
+|---|---|---|
+| POINT_LOOKUP | exactly 1 | equality bound to the placeholder, no range operator |
+| RANGE_SCAN | 1 or 2 | at least one range predicate |
+
+Comments and single-quoted literals are stripped before inspection so a literal
+containing `?` cannot inflate the count and a comment mentioning `BETWEEN`
+cannot trigger a false match. Wired into `config_normalizer.py` (gated on
+`pct > 0`, so unused zero-weight fields cannot block a save) and mirrored as a
+client-side hard block in `configure.html` `_saveTemplate`. Error messages name
+the offending construct, point at the correct field, and point at Generic SQL as
+the escape hatch for arbitrary placeholder counts.
+
+### Regression Test
+- **Check:** mismatched SQL cannot be saved, and all shipped defaults still can
+- **Command:** `uv run pytest tests/test_sql_shape.py -q`
+- **Expected:** 38 passed. Cases live in `tests/fixtures/query_shape_cases.json`.
+
+### Notes
+- The executor's fixed arities were deliberately left unchanged. Arbitrary
+  placeholder counts with per-placeholder types belong to GENERIC_SQL, which has
+  its own spec mechanism at `test_executor.py:3766-3970`.
+- Related open **ISSUE-005**: the underlying SQL compilation error was reported
+  as `Network error during query execution` by `snowflake_pool`, which slowed
+  triage. Not fixed here.
+- The JS mirror in `configure.html` duplicates the Python regexes, following the
+  existing `// Match server validation:` convention. Keep both in sync with the
+  shared fixture.
+
+## ISSUE-008: Config validation errors surface as a generic 500, losing the message
+
+| Field | Details |
+|---|---|
+| **ID** | ISSUE-008 |
+| **Title** | Config validation errors surface as a generic 500, losing the message |
+| **Date Reported** | 2026-09-15 |
+| **Date Resolved** | 2026-09-15 |
+| **Status** | Resolved |
+| **Severity** | High |
+| **Component** | `backend/api/routes/templates.py` |
+| **Environment** | Local + SPCS |
+
+### Symptoms
+- Saving a template with an invalid config returned
+  `500 INTERNAL_ERROR: "create template failed."`
+- The specific, user-actionable validation message was never shown.
+
+### Root Cause
+`_normalize_template_config` raises `ValueError`. Both save paths caught bare
+`Exception` and routed through `http_exception`
+(`backend/api/error_handling.py:74`), which has no `ValueError` branch and falls
+through to a 500 at `:115-118`. Every config validation message was discarded,
+including the pre-existing weights-must-sum-to-100 error.
+
+### Evidence
+- `templates.py:1899-1900` (create) and `:1987-1988` (update) both ended in
+  `except Exception as e: raise http_exception(...)`.
+- No `ValueError` exception handler exists in `backend/main.py`.
+
+### Resolution
+Added an explicit `except ValueError` branch ahead of the bare `except Exception`
+in both `create_template` and `_update_template_internal`, raising
+`HTTPException(400, detail={"error": "invalid_config", "message": str(e)})`.
+This matches the existing structured-400 pattern from
+`_check_pgbouncer_requirements` (`templates.py:1765-1776`), and the client
+already extracts `detail.message` at `configure.html:3525`.
+
+### Regression Test
+- **Check:** invalid config returns 400 with the specific message, not a 500
+- **Command:** `uv run pytest tests/test_sql_shape.py -k "returns_400 or weight_sum" -q`
+- **Expected:** 3 passed, including the un-swallowed `sum to 100.00` message
+
+### Notes
+- This was a prerequisite for ISSUE-007: without it the new server-side shape
+  messages would have been invisible.
+
+## ISSUE-009: create_template re-wraps deliberate HTTPExceptions as 500
+
+| Field | Details |
+|---|---|
+| **ID** | ISSUE-009 |
+| **Title** | create_template re-wraps deliberate HTTPExceptions as 500 |
+| **Date Reported** | 2026-09-15 |
+| **Date Resolved** | 2026-09-15 |
+| **Status** | Resolved |
+| **Severity** | Medium |
+| **Component** | `backend/api/routes/templates.py:1899` |
+| **Environment** | Local + SPCS |
+
+### Symptoms
+- Deliberate 400 responses raised inside `create_template` were returned to the
+  client as 500 `INTERNAL_ERROR`.
+
+### Root Cause
+`create_template` caught bare `Exception` without the `except HTTPException:
+raise` guard that `_update_template_internal` has at `templates.py:1985-1986`.
+Because `HTTPException` subclasses `Exception`, any intentional status code
+raised inside the `try` block was swallowed and re-wrapped.
+
+### Evidence
+- The pre-existing PgBouncer 400s from `_check_pgbouncer_requirements`
+  (`templates.py:1765-1776`, `:1793-1805`) were already affected on the create
+  path, while the update path handled them correctly.
+
+### Resolution
+Added `except HTTPException: raise` as the first handler in `create_template`,
+matching the update path.
+
+### Regression Test
+- **Check:** a deliberate 400 from within create_template reaches the client
+- **Command:** `uv run pytest tests/test_sql_shape.py::test_create_template_returns_400_with_message -q`
+- **Expected:** 1 passed, `status_code == 400`
+
+### Notes
+- Found while implementing ISSUE-008; independent of it, since it affects any
+  intentional status code, not just `ValueError`-derived ones.
+
+> Continued in ISSUES_COMPLETED-2.md

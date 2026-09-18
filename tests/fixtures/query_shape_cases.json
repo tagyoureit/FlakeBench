@@ -1,0 +1,119 @@
+{
+  "_comment": "Shared cases for SQL shape validation. Consumed by tests/test_sql_shape.py. The JS mirror in backend/templates/pages/configure.html must agree with these; keep both in sync.",
+  "cases": [
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE id = ?",
+      "valid": true,
+      "reason": "shipped Snowflake default"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE id = $1",
+      "valid": true,
+      "reason": "shipped Postgres default"
+    },
+    {
+      "kind": "RANGE_SCAN",
+      "sql": "SELECT * FROM {table} WHERE id BETWEEN ? AND ? + 100",
+      "valid": true,
+      "reason": "shipped Snowflake default"
+    },
+    {
+      "kind": "RANGE_SCAN",
+      "sql": "SELECT * FROM {table} WHERE id BETWEEN $1 AND $2 LIMIT 100",
+      "valid": true,
+      "reason": "shipped Postgres default"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT \"O_ORDERKEY\" FROM {table} WHERE \"O_ORDERDATE\" = ? AND \"O_CUSTKEY\" BETWEEN ? AND ? + 2399",
+      "valid": false,
+      "reason": "reported failure: 3 placeholders in a point lookup"
+    },
+    {
+      "kind": "RANGE_SCAN",
+      "sql": "SELECT \"O_ORDERKEY\" FROM {table} WHERE \"O_ORDERDATE\" = ? AND \"O_CUSTKEY\" BETWEEN ? AND ? + 999999",
+      "valid": false,
+      "reason": "3 placeholders exceeds the range scan maximum of 2"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE ts >= ?",
+      "valid": false,
+      "reason": "range predicate in a point lookup"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE id BETWEEN ? AND ?",
+      "valid": false,
+      "reason": "range scan pasted into the point lookup field"
+    },
+    {
+      "kind": "RANGE_SCAN",
+      "sql": "SELECT * FROM {table} WHERE id = ?",
+      "valid": false,
+      "reason": "point lookup pasted into the range scan field"
+    },
+    {
+      "kind": "RANGE_SCAN",
+      "sql": "SELECT * FROM {table} WHERE ts BETWEEN ? AND '1998-01-01'",
+      "valid": true,
+      "reason": "one placeholder is valid for the single-param cutoff form"
+    },
+    {
+      "kind": "RANGE_SCAN",
+      "sql": "SELECT * FROM {table} WHERE ts >= ?",
+      "valid": true,
+      "reason": "single-param time cutoff"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE id = ? -- lookup, not BETWEEN",
+      "valid": true,
+      "reason": "BETWEEN inside a line comment must not trigger a range match"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} /* range: BETWEEN a AND b */ WHERE id = ?",
+      "valid": true,
+      "reason": "BETWEEN inside a block comment must not trigger a range match"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE label = 'a?b' AND id = ?",
+      "valid": true,
+      "reason": "a literal containing ? must not inflate the placeholder count"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE a > b AND id = ?",
+      "valid": true,
+      "reason": "inequality between two columns is not a placeholder-bound range"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE id <= ?",
+      "valid": false,
+      "reason": "<= must be detected as a range operator, not equality"
+    },
+    {
+      "kind": "POINT_LOOKUP",
+      "sql": "SELECT * FROM {table} WHERE id != ?",
+      "valid": false,
+      "reason": "!= is not an equality predicate for a point lookup"
+    },
+    {
+      "kind": "INSERT",
+      "sql": "INSERT INTO {table} VALUES (?, ?, ?, ?)",
+      "valid": true,
+      "reason": "unvalidated kind: INSERT sizes its own binds"
+    },
+    {
+      "kind": "GENERIC_SQL",
+      "sql": "SELECT * FROM {table} WHERE a = ? AND b BETWEEN ? AND ?",
+      "valid": true,
+      "reason": "unvalidated kind: GENERIC_SQL validates against its param specs"
+    }
+  ]
+}

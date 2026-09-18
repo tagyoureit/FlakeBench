@@ -1896,6 +1896,15 @@ async def create_template(template: TemplateCreate):
 
         return await get_template(template_id)
 
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # Config validation failures carry a user-actionable message; surface it
+        # instead of letting http_exception collapse it into a generic 500.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_config", "message": str(e)},
+        ) from e
     except Exception as e:
         raise http_exception("create template", e)
 
@@ -1984,6 +1993,13 @@ async def _update_template_internal(
 
     except HTTPException:
         raise
+    except ValueError as e:
+        # Config validation failures carry a user-actionable message; surface it
+        # instead of letting http_exception collapse it into a generic 500.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_config", "message": str(e)},
+        ) from e
     except Exception as e:
         raise http_exception("update template", e)
 
@@ -2035,13 +2051,25 @@ def _extract_placeholder_columns(sql: str) -> list[dict[str, Any]]:
     - JOIN ... ON alias.col = ?
     - AND col IN (?, ?, ?)
     - WHERE col > ? AND col2 < ?
+    - WHERE "Quoted_Col" = ?  /  WHERE [Bracketed] = ?
     
     Returns list of column info: [{"column": "O_CUSTKEY", "position": 0}, ...]
     """
     columns: list[dict[str, Any]] = []
     placeholder_idx = 0
     
-    col_pattern = r'(?:[\w]+\.)?(\w+)\s*(=|>|<|>=|<=|!=|<>|BETWEEN|IN|LIKE)\s*'
+    # The column identifier may be bare, "double-quoted" (Snowflake) or
+    # [bracketed]. Quoted identifiers are the house style for generated SQL, and
+    # a bare \w+ pattern cannot match them because the closing quote sits between
+    # the name and the operator.
+    # Multi-character operators must precede their single-character prefixes in
+    # the alternation, or ">=" matches as ">" and leaves "=" before the "?",
+    # causing the placeholder to be missed.
+    col_pattern = (
+        r'(?:(?:"[^"]+"|\[[^\]]+\]|\w+)\s*\.\s*)?'
+        r'("[^"]+"|\[[^\]]+\]|\w+)'
+        r'\s*(>=|<=|!=|<>|=|>|<|BETWEEN|IN|LIKE)\s*'
+    )
     
     lines = sql.upper().split('\n')
     for line in lines:
@@ -2055,7 +2083,7 @@ def _extract_placeholder_columns(sql: str) -> list[dict[str, Any]]:
             if not match:
                 break
             
-            col_name = match.group(1)
+            col_name = match.group(1).strip('"[]')
             operator = match.group(2).upper()
             match_end = offset + match.end()
             
@@ -2728,6 +2756,11 @@ async def prepare_ai_template(template_id: str):
         # ------------------------------------------------------------------
         generic_sql_pools_created: dict[str, int] = {}
         auto_generated_params: dict[str, list[dict]] = {}
+        # Placeholders that could not be resolved to a sampleable column. These used
+        # to be skipped silently, so prepare reported success while leaving
+        # `parameters` empty or short - the run then failed at warmup with
+        # "GENERIC_SQL query has placeholders but no parameters configuration".
+        generic_param_warnings: list[str] = []
         
         if isinstance(generic_queries, list):
             for q_idx, gq in enumerate(generic_queries):
@@ -2823,6 +2856,15 @@ async def prepare_ai_template(template_id: str):
                 
                 placeholder_cols = _extract_placeholder_columns(sql)
                 if not placeholder_cols:
+                    generic_param_warnings.append(
+                        f"Generic SQL '{gq.get('id', q_idx)}': found "
+                        f"{sql.count('?')} placeholder(s) but could not identify "
+                        f"a column for any of them, so no parameters were "
+                        f"generated. This run will fail. Supported forms are "
+                        f"col = ?, col BETWEEN ? AND ?, col IN (?, ?) and the "
+                        f"comparison operators; the column may be bare, "
+                        f'"quoted" or [bracketed].'
+                    )
                     continue
                 
                 logger.info(
@@ -2842,6 +2884,28 @@ async def prepare_ai_template(template_id: str):
                     col_name = pc["column"].upper()
                     source_table = full_name  # Default to main table
                     col_found_in_main = col_name in col_types
+                    pc_operator = str(pc.get("operator") or "").upper()
+
+                    # The upper bound of a BETWEEN must be tied to the lower
+                    # bound, not sampled independently: two unrelated draws give a
+                    # random band width and an empty range whenever the second
+                    # draw falls below the first. Repeat the previous value and
+                    # let the SQL's own "+ N" define the width.
+                    if pc_operator == "BETWEEN_END" and params_config:
+                        # Depend on the previous spec by NAME, not position:
+                        # _resolve_dep_value treats a numeric depends_on as
+                        # 1-based when >= 1, so a 0-based position would resolve
+                        # to the wrong parameter.
+                        prev_name = str(params_config[-1].get("name") or "").strip()
+                        if prev_name:
+                            params_config.append({
+                                "position": pc["position"],
+                                "name": f"{col_name.lower()}_end",
+                                "strategy": "offset_from_previous",
+                                "depends_on": prev_name,
+                                "offset": 0,
+                            })
+                            continue
                     
                     if not col_found_in_main:
                         # Column not in main table - check joined tables
@@ -2893,9 +2957,22 @@ async def prepare_ai_template(template_id: str):
                     
                     # Skip GENERIC_SQL sampling if column already has KEY or RANGE pool.
                     # Runtime will fall back to those pools for this column.
+                    #
+                    # The RANGE pool is deliberately recency-biased because it
+                    # exists for ">= ?" cutoff semantics. Reusing it for an
+                    # equality predicate samples only the newest values, which on
+                    # a table that has been written to by INSERT workloads means
+                    # matching a handful of synthetic rows out of millions. So
+                    # reuse RANGE only for range operators; an equality predicate
+                    # on the time column gets its own distribution-wide pool.
                     key_col_u = key_col.upper() if key_col else None
                     time_col_u = time_col.upper() if time_col else None
-                    if col_name == key_col_u or col_name == time_col_u:
+                    _range_ops = {">", ">=", "<", "<=", "BETWEEN_START", "BETWEEN_END"}
+                    reuse_key_pool = col_name == key_col_u
+                    reuse_range_pool = (
+                        col_name == time_col_u and pc_operator in _range_ops
+                    )
+                    if reuse_key_pool or reuse_range_pool:
                         logger.info(
                             "GENERIC_SQL[%d] column %s already in KEY/RANGE pool; skipping duplicate sampling",
                             q_idx, col_name
@@ -2907,9 +2984,16 @@ async def prepare_ai_template(template_id: str):
                             "strategy": "sample_from_table",
                             "column": col_name,
                             "pool_id": pool_id,
-                            "fallback_pool_kind": "KEY" if col_name == key_col_u else "RANGE",
+                            "fallback_pool_kind": "KEY" if reuse_key_pool else "RANGE",
                         })
                         continue
+                    if col_name == time_col_u:
+                        logger.info(
+                            "GENERIC_SQL[%d] column %s is the time column but the "
+                            "predicate is %s; sampling a dedicated pool instead of "
+                            "reusing the recency-biased RANGE pool",
+                            q_idx, col_name, pc_operator or "=",
+                        )
                     
                     if col_name not in sampled_columns:
                         target_n = max(5000, concurrency * 50)
@@ -2982,6 +3066,22 @@ async def prepare_ai_template(template_id: str):
                     logger.info(
                         "GENERIC_SQL[%d] auto-generated %d parameter configs",
                         q_idx, len(params_config)
+                    )
+                    expected = sql.count("?")
+                    if len(params_config) != expected:
+                        generic_param_warnings.append(
+                            f"Generic SQL '{query_id}': generated "
+                            f"{len(params_config)} parameter(s) for {expected} "
+                            f"placeholder(s). Some columns could not be resolved "
+                            f"or sampled, so this run will fail on a parameter "
+                            f"count mismatch."
+                        )
+                else:
+                    generic_param_warnings.append(
+                        f"Generic SQL '{query_id}': no parameters could be "
+                        f"generated for its {sql.count('?')} placeholder(s) "
+                        f"because none of the columns could be sampled. This run "
+                        f"will fail."
                     )
 
         # ------------------------------------------------------------------
@@ -3094,6 +3194,7 @@ async def prepare_ai_template(template_id: str):
             domain_label=domain_label,
             pools=column_pools,
             message=msg,
+            warnings=generic_param_warnings,
         )
 
     except HTTPException:

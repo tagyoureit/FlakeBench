@@ -1,5 +1,10 @@
 # Phase 1: Requirements Gathering
 
+> **API target:** all `curl` examples use `${BASE_URL}` and `-H "$AUTH"`, which
+> target the SPCS deployment. Export both as shown in
+> `workflows/03-execution.md` ("Execution target must be SPCS") before running them.
+
+
 ## Purpose
 
 Interactively gather benchmark requirements through structured questions. This phase determines WHAT to test and HOW to measure it.
@@ -121,7 +126,7 @@ D) Compare multiple table types (side-by-side comparison)
 
 **Step 1: List available Postgres connections from backend:**
 ```bash
-curl -sL "http://127.0.0.1:8000/api/connections/"
+curl -sL "${BASE_URL}/api/connections/"
 ```
 
 This returns stored connections with their IDs:
@@ -164,7 +169,7 @@ Or provide new connection details:
 **Step 3: Verify connection works:**
 ```bash
 # Test connection via backend
-curl -sL "http://127.0.0.1:8000/api/connections/{connection_id}/test"
+curl -sL "${BASE_URL}/api/connections/{connection_id}/test"
 ```
 
 **IMPORTANT: PgBouncer Connection Limitations**

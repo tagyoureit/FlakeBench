@@ -1,5 +1,10 @@
 # Phase 4: Result Analysis
 
+> **API target:** all `curl` examples use `${BASE_URL}` and `-H "$AUTH"`, which
+> target the SPCS deployment. Export both as shown in
+> `workflows/03-execution.md` ("Execution target must be SPCS") before running them.
+
+
 ## Purpose
 
 Hand off completed test results to the Cortex Agent for AI-powered analysis, or provide direct SQL queries for manual analysis.
@@ -107,7 +112,7 @@ D) **Export Data**
 
 **For comparing two tests:**
 ```bash
-curl -sL -X POST "http://127.0.0.1:8000/api/tests/compare/ai-analysis" \
+curl -sL -X POST "${BASE_URL}/api/tests/compare/ai-analysis" \
   -H "Content-Type: application/json" \
   -d '{
     "primary_id": "<run_id_1>",
@@ -118,7 +123,7 @@ curl -sL -X POST "http://127.0.0.1:8000/api/tests/compare/ai-analysis" \
 
 **For single test analysis:**
 ```bash
-curl -sL -X POST "http://127.0.0.1:8000/api/tests/<run_id>/ai-analysis" \
+curl -sL -X POST "${BASE_URL}/api/tests/<run_id>/ai-analysis" \
   -H "Content-Type: application/json" \
   -d '{"question": "What was the max sustainable throughput?"}'
 ```
@@ -141,7 +146,7 @@ cortex analyst query "Compare latency across all tests from today" \
 This API aggregates complex, multi-step logic (SQL fingerprinting, statistical scoring, historical lookups) into a single JSON payload. It saves the agent from running 5+ SQL queries and doing math in context.
 
 ```bash
-curl -sL "http://127.0.0.1:8000/api/tests/<test_id>/comparison-context?min_similarity=0.55"
+curl -sL "${BASE_URL}/api/tests/<test_id>/comparison-context?min_similarity=0.55"
 ```
 
 **The API returns TWO distinct types of comparison. You must distinguish between them:**
@@ -598,13 +603,13 @@ After analysis, present the final summary with **required identifiers**:
 
 **Test 1: postgres-tpch-findmax**
 - **Run ID:** d1f890a0-2ac3-4115-8a95-20fc4345b43c
-- **Dashboard:** http://127.0.0.1:8000/dashboard/d1f890a0-2ac3-4115-8a95-20fc4345b43c
+- **Dashboard:** ${BASE_URL}/dashboard/d1f890a0-2ac3-4115-8a95-20fc4345b43c
 - **Peak QPS:** 552.2
 - **Max Concurrency:** 65 threads
 
 **Test 2: interactive-orders-findmax**
 - **Run ID:** 034894f4-9349-4761-81e6-4ab7ed4189ba
-- **Dashboard:** http://127.0.0.1:8000/dashboard/034894f4-9349-4761-81e6-4ab7ed4189ba
+- **Dashboard:** ${BASE_URL}/dashboard/034894f4-9349-4761-81e6-4ab7ed4189ba
 - **Peak QPS:** 105.6
 - **Max Concurrency:** 15 threads
 
@@ -629,7 +634,7 @@ D) Exit wizard
 **⛔ REQUIRED in every summary:**
 1. **Test Name** - Descriptive name for each test
 2. **Run ID** - UUID for each test
-3. **Dashboard URL** - `http://127.0.0.1:8000/dashboard/{run_id}`
+3. **Dashboard URL** - `${BASE_URL}/dashboard/{run_id}`
 4. **Key Metrics** - Peak QPS, max concurrency, etc.
 
 ## Error Handling

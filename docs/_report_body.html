@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="snowflake-source" content="cortex-agent-authored" />
+<title>Interactive Warehouses: Zero-Copy vs Interactive Tables</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-09-18",
+  "intent": "Determine whether zero-copy interactive analytics (standard tables on an interactive warehouse) matches dedicated interactive tables, and isolate the contribution of clustering.",
+  "dataSources": [
+    { "type": "table", "name": "FLAKEBENCH.TEST_RESULTS.TEST_RESULTS",
+      "notes": "FlakeBench aggregate run results. Filter CONCURRENT_CONNECTIONS = 45 for the aggregate row; lower values are per-worker rows." },
+    { "type": "table", "name": "FLAKEBENCH.TEST_RESULTS.CONTROLLER_STEP_HISTORY",
+      "notes": "Per-step ramp detail for FIND_MAX_CONCURRENCY runs." },
+    { "type": "table", "name": "UNISTORE_BENCHMARK.PUBLIC.TPCH_SF100_ORDERS",
+      "notes": "150,001,854-row TPCH SF100 orders table. Variants: _INT (interactive), _STD_CLUSTERED (clustered standard)." }
+  ],
+  "sections": [
+    { "id": "background", "title": "Background",
+      "dataSources": [{ "type": "doc", "url": "https://docs.snowflake.com/en/user-guide/interactive" }],
+      "producerNotes": "Feature behaviour verified against Snowflake docs and by direct SQL probing of the account." },
+    { "id": "table-layout", "title": "Table layout",
+      "dataSources": [{ "type": "query", "sql": "SELECT SYSTEM$CLUSTERING_INFORMATION('UNISTORE_BENCHMARK.PUBLIC.TPCH_SF100_ORDERS','(O_ORDERDATE, O_CUSTKEY)')" }],
+      "producerNotes": "Clustering depth and partition counts inlined from SYSTEM$CLUSTERING_INFORMATION per table." },
+    { "id": "single-query", "title": "Single-query measurements",
+      "dataSources": [{ "type": "query", "sql": "SELECT total_elapsed_time, execution_time, compilation_time, bytes_scanned FROM TABLE(UNISTORE_BENCHMARK.INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 30))" }, { "type": "query", "sql": "SELECT operator_statistics:pruning FROM TABLE(GET_QUERY_OPERATOR_STATS('<query_id>')) WHERE operator_type='TableScan'" }],
+      "producerNotes": "USE_CACHED_RESULT = FALSE. Cold vs warm measured by running the identical query twice." },
+    { "id": "find-max", "title": "Ramp results",
+      "dataSources": [{ "type": "query", "sql": "SELECT TARGET_WORKERS, QPS, P95_LATENCY_MS, OUTCOME, STOP_REASON FROM FLAKEBENCH.TEST_RESULTS.CONTROLLER_STEP_HISTORY WHERE RUN_ID IN (...) ORDER BY STEP_NUMBER" }],
+      "producerNotes": "Best QPS per worker count where a step was repeated after back-off." },
+    { "id": "results", "title": "Fixed-concurrency results",
+      "dataSources": [{ "type": "query", "sql": "SELECT TABLE_NAME, START_TIME, QPS, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS WHERE START_TIME >= '2026-09-17 22:50:00' AND CONCURRENT_CONNECTIONS = 45 AND TEST_NAME ILIKE 'Interactive%' ORDER BY TABLE_NAME, START_TIME" }],
+      "producerNotes": "18 runs: two 9-run matrices, second one in rotated Latin-square order. Re-run the query to refresh all chart values." },
+    { "id": "server-latency", "title": "Server-side execution time",
+      "dataSources": [{ "type": "query", "sql": "WITH runs AS (SELECT TEST_ID AS run_id, TABLE_NAME FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS WHERE START_TIME >= '2026-09-17 22:50:00' AND CONCURRENT_CONNECTIONS = 45 AND TEST_NAME ILIKE 'Interactive%'), workers AS (SELECT w.TEST_ID AS worker_id, r.TABLE_NAME FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS w JOIN runs r ON r.run_id = w.RUN_ID WHERE w.CONCURRENT_CONNECTIONS = 15) SELECT w.TABLE_NAME, PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY e.SF_EXECUTION_MS), PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY e.SF_EXECUTION_MS), PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY e.SF_EXECUTION_MS), PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY e.SF_COMPILATION_MS), PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY e.APP_ELAPSED_MS - e.SF_TOTAL_ELAPSED_MS) FROM workers w JOIN FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS e ON e.TEST_ID = w.worker_id WHERE COALESCE(e.WARMUP, FALSE) = FALSE AND e.SUCCESS = TRUE GROUP BY w.TABLE_NAME" }],
+      "producerNotes": "SF_EXECUTION_MS is QUERY_HISTORY.EXECUTION_TIME. QUERY_EXECUTIONS is keyed by the per-worker TEST_ID, so the aggregate run must be joined to its three CONCURRENT_CONNECTIONS = 15 worker rows on RUN_ID. Integer-millisecond resolution." },
+    { "id": "methodology", "title": "Methodology",
+      "producerNotes": "Constraints derived from the measurements in this report; mirrors skills/spcs-benchmark-runner/references/methodology.md." }
+  ]
+}
+</script>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
+    max-width: 1000px; width: 100%; box-sizing: border-box;
+    margin: 0 auto; padding: clamp(16px, 4vw, 28px);
+    color: light-dark(#1f2937, #e5e7eb);
+    line-height: 1.6;
+  }
+  h1 { font-size: clamp(1.6rem, 4.5vw, 2.2rem); margin-bottom: 4px; }
+  h2 {
+    font-size: clamp(1.2rem, 3.2vw, 1.5rem); margin-top: 44px;
+    padding-bottom: 6px; border-bottom: 2px solid light-dark(#29b5e8, #29b5e8);
+  }
+  h3 { font-size: clamp(1.02rem, 2.4vw, 1.15rem); margin-top: 28px; }
+  h1, h2, h3 { color: light-dark(#0f172a, #f1f5f9); }
+  a { color: light-dark(#2563eb, #60a5fa); }
+  img, svg { max-width: 100%; height: auto; }
+  .sub { color: light-dark(#64748b, #94a3b8); font-size: 0.95rem; margin-top: 0; }
+  .svg-scroll { overflow-x: auto; margin: 14px 0 6px; }
+  .svg-scroll svg { width: 100%; height: auto; display: block; }
+  .caption { font-size: 0.86rem; color: light-dark(#64748b, #94a3b8); margin: 0 0 22px; }
+  .table-wrap { overflow-x: auto; margin: 16px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+  th, td { border: 1px solid light-dark(#d1d5db, #374151); padding: 7px 10px; text-align: left; }
+  th { background: light-dark(#f1f5f9, #1e293b); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 20px 0; }
+  .card {
+    border: 1px solid light-dark(#e2e8f0, #334155); border-radius: 10px;
+    padding: 14px 16px; background: light-dark(#f8fafc, #16202e);
+  }
+  .card .label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: light-dark(#64748b, #94a3b8); }
+  .card .value { font-size: 1.5rem; font-weight: 650; margin: 4px 0 2px; }
+  .card .note { font-size: 0.82rem; color: light-dark(#64748b, #94a3b8); }
+  .callout {
+    border-left: 4px solid #29b5e8; border-radius: 0 8px 8px 0;
+    background: light-dark(#eff9fe, #10242e); padding: 12px 16px; margin: 20px 0;
+  }
+  .callout.warn { border-left-color: #f59e0b; background: light-dark(#fffbeb, #2a2011); }
+  .callout.good { border-left-color: #10b981; background: light-dark(#ecfdf5, #0d2620); }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+  .tag {
+    display: inline-block; font-size: 0.74rem; font-weight: 600; padding: 2px 8px;
+    border-radius: 999px; vertical-align: middle;
+  }
+  .tag.sig { background: #10b981; color: #fff; }
+  .tag.ns { background: light-dark(#94a3b8, #475569); color: #fff; }
+  code {
+    background: light-dark(#f1f5f9, #1e293b); padding: 1px 5px;
+    border-radius: 4px; font-size: 0.88em;
+  }
+  footer {
+    margin-top: 52px; padding-top: 18px; font-size: 0.85rem;
+    border-top: 1px solid light-dark(#e2e8f0, #334155); color: light-dark(#64748b, #94a3b8);
+  }
+</style>
+</head>
+<body>
+
+<h1>Interactive Warehouses: Zero-Copy vs Interactive Tables</h1>
+<p class="sub">
+  Benchmark study on <code>SFSENORTHAMERICA-RGOLDIN_AWS1</code> &middot; 18 fixed-concurrency runs
+  plus 4 concurrency ramps &middot; TPCH SF100 orders, 150M rows &middot; September 2026
+</p>
+
+<div class="callout good">
+  <p><strong>Headline.</strong> Querying a <em>standard</em> table directly on an interactive warehouse
+  performs the same as a dedicated <em>interactive</em> table — the 3.4&nbsp;% gap we measured is
+  indistinguishable from noise. What actually matters is <strong>clustering</strong>: a clustered
+  standard table delivered <strong>+19&nbsp;% throughput</strong> and <strong>30&nbsp;% lower median
+  latency</strong> than the same table unclustered.</p>
+  <p>Practical read: adopt zero-copy freely, and spend your effort on the clustering key instead of
+  on converting tables.</p>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Interactive table</div>
+    <div class="value" style="color:#29b5e8">499.5 QPS</div>
+    <div class="note">p50 72.2 ms &middot; median of 6</div>
+  </div>
+  <div class="card">
+    <div class="label">Standard, clustered</div>
+    <div class="value" style="color:#10b981">478.3 QPS</div>
+    <div class="note">p50 70.9 ms &middot; median of 6</div>
+  </div>
+  <div class="card">
+    <div class="label">Standard, unclustered</div>
+    <div class="value" style="color:#f59e0b">401.3 QPS</div>
+    <div class="note">p50 101.1 ms &middot; median of 6</div>
+  </div>
+  <div class="card">
+    <div class="label">Errors, all 18 runs</div>
+    <div class="value">0</div>
+    <div class="note">225k+ queries per run</div>
+  </div>
+</div>
+
+<h2 id="background">Background</h2>
+
+<p>On <strong>14 September 2026</strong>, zero-copy support for all table formats in interactive
+warehouses reached general availability. Interactive warehouses can now query standard, dynamic,
+Iceberg, and hybrid tables directly, with no copy into a dedicated interactive table. The
+documentation goes further than "supported" and calls standard tables the
+<em>"best default, same performance as Interactive tables."</em></p>
+
+<p>This study tests that claim, and answers three practical questions that came up while setting it
+up.</p>
+
+<h3>1. Do tables need to be attached to the warehouse?</h3>
+
+<p>No — attachment is optional. <code>ALTER WAREHOUSE &hellip; ADD TABLES</code> is a
+<em>cache-warming hint</em>; unattached tables are still queryable and cached on demand. Attaching
+is nonetheless recommended, because it lets Snowflake populate the cache proactively.</p>
+
+<div class="callout warn">
+  <p><strong>Tooling gap worth knowing.</strong> The Snowsight dialog is titled "Attach interactive
+  tables" and its object picker filters to interactive tables only, so a standard table appears
+  impossible to attach. That is a UI limitation, not a server one — the SQL works:</p>
+  <p><code>ALTER WAREHOUSE my_iwh ADD TABLES (db.schema.my_standard_table);</code></p>
+  <p>The picker predates the GA and hasn't caught up. Use SQL.</p>
+</div>
+
+<h3>2. Will automatic clustering fix a badly laid-out table on its own?</h3>
+
+<p>No. Automatic Clustering — both Classic and the newer Optima Clustering — <strong>only operates on
+tables that already have a user-defined clustering key</strong>. There is no auto-discovery. An
+unclustered table stays unclustered indefinitely.</p>
+
+<p>The other Optima features that <em>do</em> work without a clustering key — Optima Indexing,
+Optima Metadata, Optima Planning — are documented as available on Snowflake generation&nbsp;2
+standard warehouses and Adaptive Warehouses. Interactive warehouses are not in that list. On an
+interactive warehouse there is no automatic rescue for poor data layout.</p>
+
+<h3>3. Does a running warehouse mean a warm warehouse?</h3>
+
+<p>No, and this one bit us. Two caches warm independently of warehouse state: the <strong>data
+cache</strong> (per table, per micro-partition) and the <strong>compile/metadata cache</strong> (per
+query shape). Both were measured cold on a warehouse that had been running for eight hours — see
+<a href="#single-query">single-query measurements</a>.</p>
+
+<h2 id="table-layout">Test subjects and table layout</h2>
+
+<p>Three variants of the same 150,001,854-row TPCH SF100 orders table. The benchmark query filters on
+<code>O_ORDERDATE</code> and <code>O_CUSTKEY</code>, so those are the columns that matter for
+pruning.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Table</th><th>Type</th><th>Clustering key</th><th class="num">Avg depth</th><th class="num">Partitions</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>TPCH_SF100_ORDERS</code></td><td>Standard</td><td><em>none</em></td><td class="num">54.33</td><td class="num">1,825</td></tr>
+    <tr><td><code>TPCH_SF100_ORDERS_STD_CLUSTERED</code></td><td>Standard</td><td><code>LINEAR(O_ORDERDATE, O_CUSTKEY)</code></td><td class="num">1.00</td><td class="num">256</td></tr>
+    <tr><td><code>TPCH_SF100_ORDERS_INT</code></td><td>Interactive</td><td><code>LINEAR(O_ORDERDATE, O_CUSTKEY)</code></td><td class="num">1.00</td><td class="num">295</td></tr>
+  </tbody>
+</table>
+</div>
+
+{{depth}}
+<p class="caption">Clustering depth on <code>(O_ORDERDATE, O_CUSTKEY)</code>. Depth 1.0 is perfect —
+no overlapping micro-partitions. Note the clustered standard copy is marginally <em>better</em> laid
+out than the interactive table (256 vs 295 partitions), which rules out layout as an explanation for
+any table-type difference.</p>
+
+<div class="callout">
+  <p><strong>Building the clustered copy.</strong> Two gotchas. CTAS cannot run on an interactive
+  warehouse (<code>Cannot run statement type 'CREATE_TABLE_AS_SELECT'</code>) — use a standard
+  warehouse. And because background reclustering does not start immediately, we sorted on insert so
+  the table landed at depth&nbsp;1 straight away rather than converging over hours:</p>
+  <p><code>CREATE TABLE &hellip; CLUSTER BY (O_ORDERDATE, O_CUSTKEY) AS SELECT * FROM &hellip; ORDER BY O_ORDERDATE, O_CUSTKEY;</code></p>
+</div>
+
+<h2 id="single-query">Single-query measurements</h2>
+
+<p>Before any load testing, the benchmark query was run in isolation with
+<code>USE_CACHED_RESULT = FALSE</code>. This establishes where the difference comes from — and
+demonstrates the warm-up problem.</p>
+
+{{single_query}}
+<p class="caption">Query time decomposition, same query and same already-running warehouse. The
+unclustered table's <em>first</em> execution paid 649&nbsp;ms of compile plus 342&nbsp;ms of
+execution; the identical second execution paid 129&nbsp;ms and 28&nbsp;ms. Compile time fell 5&times;
+on a warehouse that had been up for hours — that is the compile/metadata cache, not the warehouse.</p>
+
+{{prune}}
+<p class="caption">Micro-partitions scanned to answer the same query. Both clustered tables scan a
+<strong>single partition</strong> (1 of 256 and 1 of 295); the unclustered standard table scans
+<strong>53 of 1,825</strong>. Caching cannot fix this — pruning is decided before any read happens.
+The "1 partition" bars are drawn at a 2&nbsp;px minimum height so they stay visible, so they are not
+to scale.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Run</th><th class="num">Total</th><th class="num">Execution</th><th class="num">Compile</th><th class="num">Bytes scanned</th><th class="num">Partitions</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Unclustered standard, cold</td><td class="num">991 ms</td><td class="num">342 ms</td><td class="num">649 ms</td><td class="num">2.68 GB</td><td class="num">53 / 1,825</td></tr>
+    <tr><td>Unclustered standard, warm</td><td class="num">157 ms</td><td class="num">28 ms</td><td class="num">129 ms</td><td class="num">2.92 GB</td><td class="num">53 / 1,825</td></tr>
+    <tr><td>Interactive table, warm</td><td class="num">42 ms</td><td class="num">10 ms</td><td class="num">32 ms</td><td class="num">13.4 MB</td><td class="num">1 / 295</td></tr>
+    <tr><td>Standard clustered, cold</td><td class="num">613 ms</td><td class="num">260 ms</td><td class="num">239 ms</td><td class="num">6.4 MB</td><td class="num">1 / 256</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The lesson for test design: a 5-second warm-up is not enough. We raised
+<code>warmup</code> to 30&nbsp;seconds for every run in this study.</p>
+
+<h2 id="find-max">Exploratory phase: concurrency ramps</h2>
+
+<p>Four <code>FIND_MAX_CONCURRENCY</code> ramps were run first to locate each configuration's
+saturation point. These are useful for <em>finding the knee</em> but, as shown below, unreliable as a
+head-to-head comparison.</p>
+
+{{ramp_qps}}
+<p class="caption">Throughput vs concurrency. All configurations are identical below ~20 workers
+because nothing is contended. The unclustered table's knee arrives around 26 workers; clustered and
+interactive keep scaling to ~36–41. Two interactive-table runs are shown to illustrate run-to-run
+variability.</p>
+
+{{ramp_p95}}
+<p class="caption">p95 latency vs concurrency. Curves are tightly bunched at low concurrency and
+diverge only as each configuration saturates.</p>
+
+<div class="callout warn">
+  <p><strong>Why we abandoned ramp mode for the comparison.</strong> The ramp stops when p95 exceeds a
+  percentage of the <em>step-1 baseline</em> — and step 1 is a single cold worker. Two runs of the
+  <em>identical</em> interactive-table configuration stopped at 41 and 66 workers respectively, purely
+  because one baseline was a cold 112&nbsp;ms and the other a clean 71&nbsp;ms.</p>
+  <p>A <em>worse</em> baseline buys a run more headroom, which inverts the metric's meaning. Peak QPS
+  from a ramp is trustworthy; maximum concurrency is not comparable across runs. Everything that
+  follows uses <strong>fixed concurrency</strong>.</p>
+</div>
+
+<h2 id="methodology">Test methodology</h2>
+
+<p>Final design: fixed concurrency, long windows, replicated trials, rotated order.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Parameter</th><th>Value</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Warehouse</td><td>Medium interactive, single cluster</td><td>Held constant; never suspended mid-matrix (suspending resets the cache and starts a new 1-hour billing period)</td></tr>
+    <tr><td>Concurrency</td><td>45 (3 workers &times; 15 connections)</td><td>Just past the weakest configuration's knee, so differences are visible</td></tr>
+    <tr><td>Duration</td><td>720 s measurement + 30 s warm-up</td><td>~225k–375k queries per run; long enough to average over drift</td></tr>
+    <tr><td>Trials</td><td>6 per configuration (2 matrices &times; 3)</td><td>Compare medians, not single runs</td></tr>
+    <tr><td>Order</td><td>Latin square</td><td>Prevents cache warmth aliasing onto one configuration</td></tr>
+    <tr><td>Query</td><td>Identical across all three tables</td><td>Filters <code>O_ORDERDATE = ?</code> and <code>O_CUSTKEY BETWEEN ? AND ? + 2399</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Execution flow</h3>
+
+{{flow}}
+<p class="caption">The decision point that mattered: Matrix 1 showed a clean 7.8&nbsp;% interactive
+advantage, but one configuration declined monotonically across trials. That symptom triggered the
+rotated re-run.</p>
+
+<h3>Latin-square ordering</h3>
+
+<p>Each configuration occupies each within-cycle position exactly once, so the uncontended-cache
+advantage of running first is shared evenly rather than concentrated on one table.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Cycle</th><th>1st slot</th><th>2nd slot</th><th>3rd slot</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Unclustered</td><td>Clustered</td><td>Interactive</td></tr>
+    <tr><td>2</td><td>Clustered</td><td>Interactive</td><td>Unclustered</td></tr>
+    <tr><td>3</td><td>Interactive</td><td>Unclustered</td><td>Clustered</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Runs were driven unattended through the SPCS-hosted application's REST API. Because FlakeBench
+executes load <em>client-side</em> — worker subprocesses run inside whichever host serves the API —
+targeting SPCS keeps load generation in SPCS. Mixing a local server into the matrix would change
+network latency to Snowflake and invalidate the comparison.</p>
+
+<h2 id="results">Results</h2>
+
+<h3>Pooled across all 18 runs</h3>
+
+{{pooled}}
+<p class="caption">Median throughput, 6 trials per configuration.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Configuration</th><th class="num">Median QPS</th><th class="num">Mean &plusmn; SD</th>
+      <th class="num">Range</th><th class="num">p50</th><th class="num">p95</th><th class="num">p99</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Interactive table</td><td class="num">499.5</td><td class="num">492.1 &plusmn; 30.9</td><td class="num">438.8–519.7</td><td class="num">72.2 ms</td><td class="num">151.1 ms</td><td class="num">225.3 ms</td></tr>
+    <tr><td>Standard, clustered</td><td class="num">478.3</td><td class="num">476.0 &plusmn; 29.6</td><td class="num">432.9–517.8</td><td class="num">70.9 ms</td><td class="num">147.0 ms</td><td class="num">209.7 ms</td></tr>
+    <tr><td>Standard, unclustered</td><td class="num">401.3</td><td class="num">401.2 &plusmn; 26.5</td><td class="num">367.4–431.0</td><td class="num">101.1 ms</td><td class="num">152.9 ms</td><td class="num">211.5 ms</td></tr>
+  </tbody>
+</table>
+</div>
+
+{{range}}
+<p class="caption">Observed throughput range per configuration (min to max, marker at median). The
+interactive and clustered-standard ranges overlap across almost their entire span — that overlap is
+the finding. The unclustered range sits clear of both.</p>
+
+<h3>The ordering artifact</h3>
+
+{{flip}}
+<p class="caption">Median QPS per matrix. In Matrix 1 the interactive table led by 7.8&nbsp;%; after
+rotating the run order in Matrix 2, the clustered standard table led by 3.1&nbsp;%. The verdict
+<strong>reversed sign</strong> — the strongest evidence that the original advantage was cache-warmth
+ordering, not table type.</p>
+
+<div class="callout warn">
+  <p><strong>What went wrong in Matrix 1.</strong> The clustered table declined monotonically across
+  its three trials — 489.8 → 466.8 → 432.9 QPS. Its best number came from the very first run of the
+  night, before the other two tables had been driven under load, so it had the warehouse data cache
+  largely to itself. The interactive table, already warm for days, was the only configuration that
+  did not decline.</p>
+  <p>The within-configuration spread (13.1&nbsp;%) was larger than the 7.8&nbsp;% gap being
+  attributed to table type. That alone should stop a conclusion.</p>
+</div>
+
+<h3>Every individual run</h3>
+
+{{all_runs}}
+<p class="caption">All 18 runs in execution order within each matrix. The unclustered series sits
+consistently below the other two; the interactive and clustered series interleave.</p>
+
+{{scatter}}
+<p class="caption">Throughput vs median latency, one point per run. Interactive and clustered-standard
+runs form a single indistinguishable cloud; unclustered runs separate cleanly on the latency axis.</p>
+
+<h3>Latency profile</h3>
+
+{{latency}}
+<p class="caption">Median p50, p95, and p99 per configuration. Note that <strong>p95 is nearly
+identical across all three</strong> (147–153 ms) while p50 differs by 42&nbsp;%. At 45 connections the
+warehouse is saturated, so the tail is pinned by queueing regardless of table layout.</p>
+
+<div class="callout">
+  <p><strong>Metric selection matters.</strong> Reporting p95 from a saturated run would have shown
+  "no difference between any configuration" — including between clustered and unclustered, which
+  differ by 19&nbsp;% in throughput. Use QPS and p50 for capacity comparisons; drop to roughly
+  20 connections if you want to compare latency. The server-side view in the next section recovers
+  the signal that end-to-end p95 hides.</p>
+</div>
+
+<h2 id="server-latency">Server-side execution time</h2>
+
+<p>Every number above is <strong>end-to-end</strong>: the elapsed time the driver observed, which
+includes client-side scheduling, network round trip, Snowflake query compilation, and finally the
+query execution itself. That is the right metric for "what will my application feel", but it buries
+the engine's contribution under transport and compile cost.</p>
+
+<p>FlakeBench enriches each recorded query with the values Snowflake itself reports, so the
+execution phase can be isolated. The figures below come from
+<code>QUERY_EXECUTIONS.SF_EXECUTION_MS</code>, which is
+<code>QUERY_HISTORY.EXECUTION_TIME</code> — pure server-side execution, with no client, network, or
+compilation time in it. They are pooled over <strong>6,006,727</strong> enriched, non-warmup,
+successful query rows across all 18 runs (99.99&nbsp;% enrichment coverage).</p>
+
+<div class="callout">
+  <p><strong>Why the three worker rows matter.</strong> Each run is executed by three SPCS workers,
+  and <code>QUERY_EXECUTIONS</code> is keyed by the per-worker <code>TEST_ID</code>, not the
+  aggregate one. The per-query rows are reached by joining the aggregate run
+  (<code>CONCURRENT_CONNECTIONS = 45</code>) to its three worker rows
+  (<code>CONCURRENT_CONNECTIONS = 15</code>) on <code>RUN_ID</code>. Filtering
+  <code>QUERY_EXECUTIONS</code> on the aggregate <code>TEST_ID</code> returns nothing.</p>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Configuration</th>
+        <th>Server p50</th><th>Server p95</th><th>Server p99</th>
+        <th>End-to-end p50</th><th>End-to-end p95</th><th>End-to-end p99</th>
+        <th>p50 ratio</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Interactive table</td>
+        <td>7&nbsp;ms</td><td>9&nbsp;ms</td><td>13&nbsp;ms</td>
+        <td>72.2&nbsp;ms</td><td>151.1&nbsp;ms</td><td>225.3&nbsp;ms</td><td>10.3&times;</td></tr>
+    <tr><td>Standard clustered</td>
+        <td>7&nbsp;ms</td><td>10&nbsp;ms</td><td>15&nbsp;ms</td>
+        <td>70.9&nbsp;ms</td><td>147.0&nbsp;ms</td><td>209.7&nbsp;ms</td><td>10.1&times;</td></tr>
+    <tr><td>Standard unclustered</td>
+        <td>47&nbsp;ms</td><td>77&nbsp;ms</td><td>94&nbsp;ms</td>
+        <td>101.1&nbsp;ms</td><td>152.9&nbsp;ms</td><td>211.5&nbsp;ms</td><td>2.2&times;</td></tr>
+  </tbody>
+</table>
+</div>
+
+{{srv_exec}}
+<p class="caption">Server-side SQL execution only. The unclustered table is <strong>6.7&times;
+slower at p50 and 7.7&times; slower at p95</strong> — a gap that end-to-end timings compress to
+1.4&times; and 1.0&times; respectively.</p>
+
+<div class="callout">
+  <p><strong>The headline result.</strong> On an interactive warehouse, a well-clustered table —
+  interactive or standard — executes this point lookup in <strong>7&nbsp;ms at the median and
+  under 15&nbsp;ms at p99</strong>. The same query against the unclustered copy takes 47&nbsp;ms.
+  The engine difference is nearly seven-fold; the application only sees 1.4&times; because
+  transport and compilation dominate what it measures.</p>
+</div>
+
+<h3>Where the rest of the time goes</h3>
+
+{{decomp}}
+<p class="caption">Median latency decomposition. For the fast configurations, actual query execution
+is the <em>smallest</em> component: 7&nbsp;ms of execution behind 27&nbsp;ms of compilation and
+roughly 37&nbsp;ms of client and network time. Each segment is its own pooled median, so the
+segments do not sum exactly to the end-to-end median.</p>
+
+{{srv_share}}
+<p class="caption">Server execution as a share of end-to-end median latency. On the tuned
+configurations less than a tenth of what the application waits for is the database executing the
+query.</p>
+
+<p>This decomposition explains the earlier p95 result. At 45 connections, end-to-end p95 was pinned
+at 147–153&nbsp;ms for all three configurations, which looked like "table layout does not matter".
+It actually meant the queueing and transport terms were large enough to swamp a real 7-vs-77&nbsp;ms
+difference in the engine. Two further consequences are worth noting:</p>
+
+<ul>
+  <li><strong>Client overhead scales with throughput, not with table quality.</strong> The
+  client-plus-network median was ~37&nbsp;ms for the fast configurations but only ~10&nbsp;ms for
+  the unclustered one, because the unclustered runs pushed 20&nbsp;% less traffic and so queued
+  less on the client side. This <em>works against</em> the good configurations in end-to-end
+  numbers, understating their true advantage.</li>
+  <li><strong>Compilation is the dominant Snowflake cost here.</strong> 27&nbsp;ms of compile
+  against 7&nbsp;ms of execution. For a workload of this shape, prepared or parameterised
+  statements would cut more latency than any further table tuning.</li>
+</ul>
+
+<h3>Stability and the ordering artifact</h3>
+
+{{srv_runs}}
+<p class="caption">Server p95 execution time per run, in matrix order. Unlike the QPS series, these
+show no monotonic drift across the matrix — the clustered configuration sits flat at 10&nbsp;ms
+after its first run, so the cache-warmth effect that reversed the throughput verdict does not
+appear in server execution times.</p>
+
+<p>Because the transport and queueing noise is stripped out, server-side percentiles separate
+interactive tables from clustered standard tables where end-to-end metrics could not. Across the six
+trials per configuration:</p>
+
+<ul>
+  <li><strong>p95:</strong> 9.2&nbsp;ms (interactive) vs 10.3&nbsp;ms (clustered standard) —
+  Welch <em>t</em>&nbsp;&approx;&nbsp;3.13, <em>p</em>&nbsp;&approx;&nbsp;0.017.</li>
+  <li><strong>p99:</strong> 13.3&nbsp;ms vs 15.2&nbsp;ms —
+  Welch <em>t</em>&nbsp;&approx;&nbsp;4.04, <em>p</em>&nbsp;&approx;&nbsp;0.005.</li>
+  <li><strong>p50:</strong> 7&nbsp;ms in every interactive run; 7&nbsp;ms in five of six clustered
+  runs. Indistinguishable.</li>
+</ul>
+
+<div class="callout">
+  <p><strong>Read this carefully.</strong> <code>SF_EXECUTION_MS</code> has integer-millisecond
+  resolution, so a 1–2&nbsp;ms tail difference sits close to the measurement floor. The result is
+  statistically detectable and consistent in sign — interactive tables have a slightly tighter tail —
+  but it is a <strong>~1&nbsp;ms</strong> effect on a ~72&nbsp;ms end-to-end request. It does not
+  change the practical conclusion that the two are interchangeable for this workload; it only
+  changes it from "no measurable difference" to "a measurable difference too small to act on".</p>
+</div>
+
+<h2 id="statistics">Statistical assessment</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Comparison</th><th class="num">Mean diff</th><th class="num">Welch t</th><th class="num">p</th><th>Verdict</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Interactive vs standard clustered</td>
+      <td class="num">16.1 QPS (3.4 %)</td><td class="num">0.92</td><td class="num">≈ 0.38</td>
+      <td><span class="tag ns">Not significant</span></td>
+    </tr>
+    <tr>
+      <td>Standard clustered vs unclustered</td>
+      <td class="num">74.8 QPS (18.6 %)</td><td class="num">4.61</td><td class="num">&lt; 0.001</td>
+      <td><span class="tag sig">Significant</span></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>Detecting a 3.4&nbsp;% difference at 80&nbsp;% power against a standard deviation of ~30 QPS would
+require roughly <strong>55 runs per configuration</strong> — about 12 hours of warehouse time each.
+An effect that small is not practically measurable at this scale, which is itself the answer: treat
+interactive tables and clustered standard tables as equivalent.</p>
+
+{{effect}}
+<p class="caption">Effect sizes against the measurement noise floor. The clustering effect clears the
+noise band comfortably; the table-type effect sits inside it.</p>
+
+<h2 id="learnings">Learnings</h2>
+
+<h3>About the feature</h3>
+
+<ol>
+  <li><strong>Zero-copy is real and costs nothing measurable.</strong> A clustered standard table on an
+  interactive warehouse matched a dedicated interactive table. There is no throughput or latency
+  penalty for skipping the conversion.</li>
+  <li><strong>Clustering is the lever, not table type.</strong> +19&nbsp;% throughput and
+  &minus;30&nbsp;% p50 from clustering alone. Every clustered run beat every unclustered run.</li>
+  <li><strong>Nothing clusters itself.</strong> Automatic and Optima Clustering require a
+  user-defined key. The Optima features that work without one are not available on interactive
+  warehouses.</li>
+  <li><strong>Attachment is optional but worthwhile</strong>, and must be done in SQL — the Snowsight
+  picker still filters to interactive tables only.</li>
+  <li><strong>A running warehouse is not a warm warehouse.</strong> Per-query-shape compile cache and
+  per-table data cache both warm independently of warehouse uptime.</li>
+</ol>
+
+<h3>About benchmarking</h3>
+
+<ol>
+  <li><strong>Rotate run order, always.</strong> Fixed ordering produced a clean, plausible, and
+  wrong result. Rotation reversed it.</li>
+  <li><strong>Watch for monotonic drift within a configuration</strong> — it is the tell-tale sign of
+  an ordering artifact.</li>
+  <li><strong>Know the noise floor before believing a difference.</strong> Ours was ~6&nbsp;% CV even
+  with 720-second runs and warm caches. Treat sub-10&nbsp;% differences as unresolved.</li>
+  <li><strong>Match the metric to the load point.</strong> p95 is meaningless as a discriminator from
+  a saturated run.</li>
+  <li><strong>Avoid baseline-relative stop conditions.</strong> A ramp that stops at "p95 &gt; N&nbsp;%
+  of a cold baseline" is not comparable across runs.</li>
+  <li><strong>Hold data layout constant when comparing table types</strong> — otherwise you are
+  measuring layout and calling it type.</li>
+</ol>
+
+<h2 id="recommendations">Recommendations</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Situation</th><th>Recommendation</th></tr></thead>
+  <tbody>
+    <tr><td>Existing table, already clustered on your filter columns</td><td>Use zero-copy. Attach it for proactive warming. No conversion needed.</td></tr>
+    <tr><td>Existing table, not clustered</td><td>Add a clustering key matching your WHERE predicates. This is where the gain is — not in converting to an interactive table.</td></tr>
+    <tr><td>Cannot modify the source table (shared, or owned by another team)</td><td>Interactive table with the clustering you need, refreshed via <code>TARGET_LAG</code>.</td></tr>
+    <tr><td>Need auto-refresh or streaming ingestion</td><td>Interactive table with <code>TARGET_LAG</code>.</td></tr>
+    <tr><td>Mixed workload with occasional slow queries</td><td>Set a <code>FALLBACK_WAREHOUSE</code>. Without one, queries over 5 s fail rather than transparently retrying.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="caveats">Caveats</h2>
+
+<ul>
+  <li><strong>Single query shape.</strong> One selective two-predicate lookup on one table. Results
+  may differ for joins, aggregations, or wider scans.</li>
+  <li><strong>Single warehouse size.</strong> Medium, single cluster. Not a scaling study.</li>
+  <li><strong>Small working set.</strong> The table is ~4 GB and fits comfortably in a Medium cache.
+  A working set that exceeds cache would likely widen the clustering gap further.</li>
+  <li><strong>One account, one region.</strong> No cross-region or cross-cloud comparison.</li>
+  <li><strong>Saturated operating point.</strong> Conclusions about p95 apply to 45 connections on
+  this warehouse; a lower load point would separate latency differently.</li>
+  <li><strong>Equivalence is bounded, not proven.</strong> The study shows any interactive-vs-clustered
+  difference is below ~10 %; it does not prove the difference is exactly zero.</li>
+</ul>
+
+<footer>
+  Generated 18 September 2026 from <code>FLAKEBENCH.TEST_RESULTS</code>.
+  Feature behaviour verified against
+  <a href="https://docs.snowflake.com/en/user-guide/interactive">Snowflake interactive analytics documentation</a>,
+  <a href="https://docs.snowflake.com/en/user-guide/tables-auto-reclustering">Automatic Clustering</a>, and
+  <a href="https://docs.snowflake.com/en/user-guide/snowflake-optima">Snowflake Optima</a>.
+  Methodology is reproducible via the <code>spcs-benchmark-runner</code> skill.
+</footer>
+
+</body>
+</html>

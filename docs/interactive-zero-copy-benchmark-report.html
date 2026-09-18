@@ -1,0 +1,1403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="snowflake-source" content="cortex-agent-authored" />
+<title>Interactive Warehouses: Zero-Copy vs Interactive Tables</title>
+<script type="application/json" id="snowflake-report-metadata">
+{
+  "generated": "2026-09-18",
+  "intent": "Determine whether zero-copy interactive analytics (standard tables on an interactive warehouse) matches dedicated interactive tables, and isolate the contribution of clustering.",
+  "dataSources": [
+    { "type": "table", "name": "FLAKEBENCH.TEST_RESULTS.TEST_RESULTS",
+      "notes": "FlakeBench aggregate run results. Filter CONCURRENT_CONNECTIONS = 45 for the aggregate row; lower values are per-worker rows." },
+    { "type": "table", "name": "FLAKEBENCH.TEST_RESULTS.CONTROLLER_STEP_HISTORY",
+      "notes": "Per-step ramp detail for FIND_MAX_CONCURRENCY runs." },
+    { "type": "table", "name": "UNISTORE_BENCHMARK.PUBLIC.TPCH_SF100_ORDERS",
+      "notes": "150,001,854-row TPCH SF100 orders table. Variants: _INT (interactive), _STD_CLUSTERED (clustered standard)." }
+  ],
+  "sections": [
+    { "id": "background", "title": "Background",
+      "dataSources": [{ "type": "doc", "url": "https://docs.snowflake.com/en/user-guide/interactive" }],
+      "producerNotes": "Feature behaviour verified against Snowflake docs and by direct SQL probing of the account." },
+    { "id": "table-layout", "title": "Table layout",
+      "dataSources": [{ "type": "query", "sql": "SELECT SYSTEM$CLUSTERING_INFORMATION('UNISTORE_BENCHMARK.PUBLIC.TPCH_SF100_ORDERS','(O_ORDERDATE, O_CUSTKEY)')" }],
+      "producerNotes": "Clustering depth and partition counts inlined from SYSTEM$CLUSTERING_INFORMATION per table." },
+    { "id": "single-query", "title": "Single-query measurements",
+      "dataSources": [{ "type": "query", "sql": "SELECT total_elapsed_time, execution_time, compilation_time, bytes_scanned FROM TABLE(UNISTORE_BENCHMARK.INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION(RESULT_LIMIT => 30))" }, { "type": "query", "sql": "SELECT operator_statistics:pruning FROM TABLE(GET_QUERY_OPERATOR_STATS('<query_id>')) WHERE operator_type='TableScan'" }],
+      "producerNotes": "USE_CACHED_RESULT = FALSE. Cold vs warm measured by running the identical query twice." },
+    { "id": "find-max", "title": "Ramp results",
+      "dataSources": [{ "type": "query", "sql": "SELECT TARGET_WORKERS, QPS, P95_LATENCY_MS, OUTCOME, STOP_REASON FROM FLAKEBENCH.TEST_RESULTS.CONTROLLER_STEP_HISTORY WHERE RUN_ID IN (...) ORDER BY STEP_NUMBER" }],
+      "producerNotes": "Best QPS per worker count where a step was repeated after back-off." },
+    { "id": "results", "title": "Fixed-concurrency results",
+      "dataSources": [{ "type": "query", "sql": "SELECT TABLE_NAME, START_TIME, QPS, P50_LATENCY_MS, P95_LATENCY_MS, P99_LATENCY_MS FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS WHERE START_TIME >= '2026-09-17 22:50:00' AND CONCURRENT_CONNECTIONS = 45 AND TEST_NAME ILIKE 'Interactive%' ORDER BY TABLE_NAME, START_TIME" }],
+      "producerNotes": "18 runs: two 9-run matrices, second one in rotated Latin-square order. Re-run the query to refresh all chart values." },
+    { "id": "server-latency", "title": "Server-side execution time",
+      "dataSources": [{ "type": "query", "sql": "WITH runs AS (SELECT TEST_ID AS run_id, TABLE_NAME FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS WHERE START_TIME >= '2026-09-17 22:50:00' AND CONCURRENT_CONNECTIONS = 45 AND TEST_NAME ILIKE 'Interactive%'), workers AS (SELECT w.TEST_ID AS worker_id, r.TABLE_NAME FROM FLAKEBENCH.TEST_RESULTS.TEST_RESULTS w JOIN runs r ON r.run_id = w.RUN_ID WHERE w.CONCURRENT_CONNECTIONS = 15) SELECT w.TABLE_NAME, PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY e.SF_EXECUTION_MS), PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY e.SF_EXECUTION_MS), PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY e.SF_EXECUTION_MS), PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY e.SF_COMPILATION_MS), PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY e.APP_ELAPSED_MS - e.SF_TOTAL_ELAPSED_MS) FROM workers w JOIN FLAKEBENCH.TEST_RESULTS.QUERY_EXECUTIONS e ON e.TEST_ID = w.worker_id WHERE COALESCE(e.WARMUP, FALSE) = FALSE AND e.SUCCESS = TRUE GROUP BY w.TABLE_NAME" }],
+      "producerNotes": "SF_EXECUTION_MS is QUERY_HISTORY.EXECUTION_TIME. QUERY_EXECUTIONS is keyed by the per-worker TEST_ID, so the aggregate run must be joined to its three CONCURRENT_CONNECTIONS = 15 worker rows on RUN_ID. Integer-millisecond resolution." },
+    { "id": "methodology", "title": "Methodology",
+      "producerNotes": "Constraints derived from the measurements in this report; mirrors skills/spcs-benchmark-runner/references/methodology.md." }
+  ]
+}
+</script>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
+    max-width: 1000px; width: 100%; box-sizing: border-box;
+    margin: 0 auto; padding: clamp(16px, 4vw, 28px);
+    color: light-dark(#1f2937, #e5e7eb);
+    line-height: 1.6;
+  }
+  h1 { font-size: clamp(1.6rem, 4.5vw, 2.2rem); margin-bottom: 4px; }
+  h2 {
+    font-size: clamp(1.2rem, 3.2vw, 1.5rem); margin-top: 44px;
+    padding-bottom: 6px; border-bottom: 2px solid light-dark(#29b5e8, #29b5e8);
+  }
+  h3 { font-size: clamp(1.02rem, 2.4vw, 1.15rem); margin-top: 28px; }
+  h1, h2, h3 { color: light-dark(#0f172a, #f1f5f9); }
+  a { color: light-dark(#2563eb, #60a5fa); }
+  img, svg { max-width: 100%; height: auto; }
+  .sub { color: light-dark(#64748b, #94a3b8); font-size: 0.95rem; margin-top: 0; }
+  .svg-scroll { overflow-x: auto; margin: 14px 0 6px; }
+  .svg-scroll svg { width: 100%; height: auto; display: block; }
+  .caption { font-size: 0.86rem; color: light-dark(#64748b, #94a3b8); margin: 0 0 22px; }
+  .table-wrap { overflow-x: auto; margin: 16px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; }
+  th, td { border: 1px solid light-dark(#d1d5db, #374151); padding: 7px 10px; text-align: left; }
+  th { background: light-dark(#f1f5f9, #1e293b); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 20px 0; }
+  .card {
+    border: 1px solid light-dark(#e2e8f0, #334155); border-radius: 10px;
+    padding: 14px 16px; background: light-dark(#f8fafc, #16202e);
+  }
+  .card .label { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: light-dark(#64748b, #94a3b8); }
+  .card .value { font-size: 1.5rem; font-weight: 650; margin: 4px 0 2px; }
+  .card .note { font-size: 0.82rem; color: light-dark(#64748b, #94a3b8); }
+  .callout {
+    border-left: 4px solid #29b5e8; border-radius: 0 8px 8px 0;
+    background: light-dark(#eff9fe, #10242e); padding: 12px 16px; margin: 20px 0;
+  }
+  .callout.warn { border-left-color: #f59e0b; background: light-dark(#fffbeb, #2a2011); }
+  .callout.good { border-left-color: #10b981; background: light-dark(#ecfdf5, #0d2620); }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+  .tag {
+    display: inline-block; font-size: 0.74rem; font-weight: 600; padding: 2px 8px;
+    border-radius: 999px; vertical-align: middle;
+  }
+  .tag.sig { background: #10b981; color: #fff; }
+  .tag.ns { background: light-dark(#94a3b8, #475569); color: #fff; }
+  code {
+    background: light-dark(#f1f5f9, #1e293b); padding: 1px 5px;
+    border-radius: 4px; font-size: 0.88em;
+  }
+  footer {
+    margin-top: 52px; padding-top: 18px; font-size: 0.85rem;
+    border-top: 1px solid light-dark(#e2e8f0, #334155); color: light-dark(#64748b, #94a3b8);
+  }
+</style>
+</head>
+<body>
+
+<h1>Interactive Warehouses: Zero-Copy vs Interactive Tables</h1>
+<p class="sub">
+  Benchmark study on <code>SFSENORTHAMERICA-RGOLDIN_AWS1</code> &middot; 18 fixed-concurrency runs
+  plus 4 concurrency ramps &middot; TPCH SF100 orders, 150M rows &middot; September 2026
+</p>
+
+<div class="callout good">
+  <p><strong>Headline.</strong> Querying a <em>standard</em> table directly on an interactive warehouse
+  performs the same as a dedicated <em>interactive</em> table — the 3.4&nbsp;% gap we measured is
+  indistinguishable from noise. What actually matters is <strong>clustering</strong>: a clustered
+  standard table delivered <strong>+19&nbsp;% throughput</strong> and <strong>30&nbsp;% lower median
+  latency</strong> than the same table unclustered.</p>
+  <p>Practical read: adopt zero-copy freely, and spend your effort on the clustering key instead of
+  on converting tables.</p>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Interactive table</div>
+    <div class="value" style="color:#29b5e8">499.5 QPS</div>
+    <div class="note">p50 72.2 ms &middot; median of 6</div>
+  </div>
+  <div class="card">
+    <div class="label">Standard, clustered</div>
+    <div class="value" style="color:#10b981">478.3 QPS</div>
+    <div class="note">p50 70.9 ms &middot; median of 6</div>
+  </div>
+  <div class="card">
+    <div class="label">Standard, unclustered</div>
+    <div class="value" style="color:#f59e0b">401.3 QPS</div>
+    <div class="note">p50 101.1 ms &middot; median of 6</div>
+  </div>
+  <div class="card">
+    <div class="label">Errors, all 18 runs</div>
+    <div class="value">0</div>
+    <div class="note">225k+ queries per run</div>
+  </div>
+</div>
+
+<h2 id="background">Background</h2>
+
+<p>On <strong>14 September 2026</strong>, zero-copy support for all table formats in interactive
+warehouses reached general availability. Interactive warehouses can now query standard, dynamic,
+Iceberg, and hybrid tables directly, with no copy into a dedicated interactive table. The
+documentation goes further than "supported" and calls standard tables the
+<em>"best default, same performance as Interactive tables."</em></p>
+
+<p>This study tests that claim, and answers three practical questions that came up while setting it
+up.</p>
+
+<h3>1. Do tables need to be attached to the warehouse?</h3>
+
+<p>No — attachment is optional. <code>ALTER WAREHOUSE &hellip; ADD TABLES</code> is a
+<em>cache-warming hint</em>; unattached tables are still queryable and cached on demand. Attaching
+is nonetheless recommended, because it lets Snowflake populate the cache proactively.</p>
+
+<div class="callout warn">
+  <p><strong>Tooling gap worth knowing.</strong> The Snowsight dialog is titled "Attach interactive
+  tables" and its object picker filters to interactive tables only, so a standard table appears
+  impossible to attach. That is a UI limitation, not a server one — the SQL works:</p>
+  <p><code>ALTER WAREHOUSE my_iwh ADD TABLES (db.schema.my_standard_table);</code></p>
+  <p>The picker predates the GA and hasn't caught up. Use SQL.</p>
+</div>
+
+<h3>2. Will automatic clustering fix a badly laid-out table on its own?</h3>
+
+<p>No. Automatic Clustering — both Classic and the newer Optima Clustering — <strong>only operates on
+tables that already have a user-defined clustering key</strong>. There is no auto-discovery. An
+unclustered table stays unclustered indefinitely.</p>
+
+<p>The other Optima features that <em>do</em> work without a clustering key — Optima Indexing,
+Optima Metadata, Optima Planning — are documented as available on Snowflake generation&nbsp;2
+standard warehouses and Adaptive Warehouses. Interactive warehouses are not in that list. On an
+interactive warehouse there is no automatic rescue for poor data layout.</p>
+
+<h3>3. Does a running warehouse mean a warm warehouse?</h3>
+
+<p>No, and this one bit us. Two caches warm independently of warehouse state: the <strong>data
+cache</strong> (per table, per micro-partition) and the <strong>compile/metadata cache</strong> (per
+query shape). Both were measured cold on a warehouse that had been running for eight hours — see
+<a href="#single-query">single-query measurements</a>.</p>
+
+<h2 id="table-layout">Test subjects and table layout</h2>
+
+<p>Three variants of the same 150,001,854-row TPCH SF100 orders table. The benchmark query filters on
+<code>O_ORDERDATE</code> and <code>O_CUSTKEY</code>, so those are the columns that matter for
+pruning.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Table</th><th>Type</th><th>Clustering key</th><th class="num">Avg depth</th><th class="num">Partitions</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>TPCH_SF100_ORDERS</code></td><td>Standard</td><td><em>none</em></td><td class="num">54.33</td><td class="num">1,825</td></tr>
+    <tr><td><code>TPCH_SF100_ORDERS_STD_CLUSTERED</code></td><td>Standard</td><td><code>LINEAR(O_ORDERDATE, O_CUSTKEY)</code></td><td class="num">1.00</td><td class="num">256</td></tr>
+    <tr><td><code>TPCH_SF100_ORDERS_INT</code></td><td>Interactive</td><td><code>LINEAR(O_ORDERDATE, O_CUSTKEY)</code></td><td class="num">1.00</td><td class="num">295</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 260" role="img" aria-label="Average clustering depth (lower is better)" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<line x1="176.0" y1="26" x2="176.0" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="176.0" y="230" text-anchor="middle">0</text>
+<line x1="281.2" y1="26" x2="281.2" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="281.2" y="230" text-anchor="middle">20</text>
+<line x1="386.4" y1="26" x2="386.4" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="386.4" y="230" text-anchor="middle">40</text>
+<line x1="491.6" y1="26" x2="491.6" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="491.6" y="230" text-anchor="middle">60</text>
+<line x1="596.8" y1="26" x2="596.8" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="596.8" y="230" text-anchor="middle">80</text>
+<line x1="702.0" y1="26" x2="702.0" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="702.0" y="230" text-anchor="middle">100</text>
+<rect x="176" y="40.0" width="285.8" height="34.0" fill="#f59e0b"/>
+<text class="tb" x="469.8" y="61.0">54.33</text>
+<text class="t" x="166" y="61.0" text-anchor="end">Standard unclustered</text>
+<rect x="176" y="102.0" width="5.3" height="34.0" fill="#10b981"/>
+<text class="tb" x="189.3" y="123.0">1.00</text>
+<text class="t" x="166" y="123.0" text-anchor="end">Standard clustered</text>
+<rect x="176" y="164.0" width="5.3" height="34.0" fill="#29b5e8"/>
+<text class="tb" x="189.3" y="185.0">1.00</text>
+<text class="t" x="166" y="185.0" text-anchor="end">Interactive table</text>
+<text class="ts" x="439" y="252" text-anchor="middle">Average clustering depth (lower is better)</text>
+</svg></div>
+<p class="caption">Clustering depth on <code>(O_ORDERDATE, O_CUSTKEY)</code>. Depth 1.0 is perfect —
+no overlapping micro-partitions. Note the clustered standard copy is marginally <em>better</em> laid
+out than the interactive table (256 vs 295 partitions), which rules out layout as an explanation for
+any table-type difference.</p>
+
+<div class="callout">
+  <p><strong>Building the clustered copy.</strong> Two gotchas. CTAS cannot run on an interactive
+  warehouse (<code>Cannot run statement type 'CREATE_TABLE_AS_SELECT'</code>) — use a standard
+  warehouse. And because background reclustering does not start immediately, we sorted on insert so
+  the table landed at depth&nbsp;1 straight away rather than converging over hours:</p>
+  <p><code>CREATE TABLE &hellip; CLUSTER BY (O_ORDERDATE, O_CUSTKEY) AS SELECT * FROM &hellip; ORDER BY O_ORDERDATE, O_CUSTKEY;</code></p>
+</div>
+
+<h2 id="single-query">Single-query measurements</h2>
+
+<p>Before any load testing, the benchmark query was run in isolation with
+<code>USE_CACHED_RESULT = FALSE</code>. This establishes where the difference comes from — and
+demonstrates the warm-up problem.</p>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 360" role="img" aria-label="Milliseconds" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="90.0" y="16">Compile (ms)</text>
+<rect x="410.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="426.0" y="16">Execution (ms)</text>
+<line x1="74" y1="316.0" x2="746" y2="316.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="320.0" text-anchor="end">0</text>
+<line x1="74" y1="261.2" x2="746" y2="261.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="265.2" text-anchor="end">200</text>
+<line x1="74" y1="206.4" x2="746" y2="206.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="210.4" text-anchor="end">400</text>
+<line x1="74" y1="151.6" x2="746" y2="151.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="155.6" text-anchor="end">600</text>
+<line x1="74" y1="96.8" x2="746" y2="96.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="100.8" text-anchor="end">800</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">1000</text>
+<text class="ts" x="14" y="179" transform="rotate(-90 14 179)" text-anchor="middle">Milliseconds</text>
+<line x1="74" y1="316" x2="746" y2="316" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="163.0" y="138.2" width="46.0" height="177.8" fill="#f59e0b"/>
+<text class="ts" x="186.0" y="231.1" text-anchor="middle" fill="#0b1220">649</text>
+<rect x="163.0" y="44.5" width="46.0" height="93.7" fill="#29b5e8"/>
+<text class="ts" x="186.0" y="95.3" text-anchor="middle" fill="#0b1220">342</text>
+<text class="ts" x="186.0" y="38.5" text-anchor="middle">991</text>
+<text class="t" x="186.0" y="335" text-anchor="middle">Unclustered</text>
+<text class="t" x="186.0" y="349" text-anchor="middle">(cold)</text>
+<rect x="387.0" y="280.7" width="46.0" height="35.3" fill="#f59e0b"/>
+<text class="ts" x="410.0" y="302.3" text-anchor="middle" fill="#0b1220">129</text>
+<rect x="387.0" y="273.0" width="46.0" height="7.7" fill="#29b5e8"/>
+<text class="ts" x="410.0" y="267.0" text-anchor="middle">157</text>
+<text class="t" x="410.0" y="335" text-anchor="middle">Unclustered</text>
+<text class="t" x="410.0" y="349" text-anchor="middle">(warm)</text>
+<rect x="611.0" y="307.2" width="46.0" height="8.8" fill="#f59e0b"/>
+<rect x="611.0" y="304.5" width="46.0" height="2.7" fill="#29b5e8"/>
+<text class="ts" x="634.0" y="298.5" text-anchor="middle">42</text>
+<text class="t" x="634.0" y="335" text-anchor="middle">Interactive</text>
+<text class="t" x="634.0" y="349" text-anchor="middle">(warm)</text>
+</svg></div>
+<p class="caption">Query time decomposition, same query and same already-running warehouse. The
+unclustered table's <em>first</em> execution paid 649&nbsp;ms of compile plus 342&nbsp;ms of
+execution; the identical second execution paid 129&nbsp;ms and 28&nbsp;ms. Compile time fell 5&times;
+on a warehouse that had been up for hours — that is the compile/metadata cache, not the warehouse.</p>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 340" role="img" aria-label="Micro-partitions" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="90.0" y="16">Partitions scanned</text>
+<rect x="410.0" y="7" width="11" height="11" rx="2" fill="#94a3b8"/>
+<text class="ts" x="426.0" y="16">Partitions in table</text>
+<line x1="74" y1="296.0" x2="746" y2="296.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="300.0" text-anchor="end">0</text>
+<line x1="74" y1="245.2" x2="746" y2="245.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="249.2" text-anchor="end">500</text>
+<line x1="74" y1="194.4" x2="746" y2="194.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="198.4" text-anchor="end">1000</text>
+<line x1="74" y1="143.6" x2="746" y2="143.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="147.6" text-anchor="end">1500</text>
+<line x1="74" y1="92.8" x2="746" y2="92.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="96.8" text-anchor="end">2000</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">2500</text>
+<text class="ts" x="14" y="169" transform="rotate(-90 14 169)" text-anchor="middle">Micro-partitions</text>
+<line x1="74" y1="296" x2="746" y2="296" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="140.0" y="290.6" width="43.0" height="5.4" fill="#f59e0b"/>
+<text class="ts" x="161.5" y="285.6" text-anchor="middle">53</text>
+<rect x="186.0" y="110.6" width="43.0" height="185.4" fill="#94a3b8"/>
+<text class="ts" x="207.5" y="105.6" text-anchor="middle">1825</text>
+<text class="t" x="186.0" y="315" text-anchor="middle">Standard</text>
+<text class="t" x="186.0" y="329" text-anchor="middle">unclustered</text>
+<rect x="364.0" y="294.0" width="43.0" height="2.0" fill="#f59e0b"/>
+<text class="ts" x="385.5" y="289.0" text-anchor="middle">1</text>
+<rect x="410.0" y="270.0" width="43.0" height="26.0" fill="#94a3b8"/>
+<text class="ts" x="431.5" y="265.0" text-anchor="middle">256</text>
+<text class="t" x="410.0" y="315" text-anchor="middle">Standard</text>
+<text class="t" x="410.0" y="329" text-anchor="middle">clustered</text>
+<rect x="588.0" y="294.0" width="43.0" height="2.0" fill="#f59e0b"/>
+<text class="ts" x="609.5" y="289.0" text-anchor="middle">1</text>
+<rect x="634.0" y="266.0" width="43.0" height="30.0" fill="#94a3b8"/>
+<text class="ts" x="655.5" y="261.0" text-anchor="middle">295</text>
+<text class="t" x="634.0" y="315" text-anchor="middle">Interactive</text>
+<text class="t" x="634.0" y="329" text-anchor="middle">table</text>
+</svg></div>
+<p class="caption">Micro-partitions scanned to answer the same query. Both clustered tables scan a
+<strong>single partition</strong> (1 of 256 and 1 of 295); the unclustered standard table scans
+<strong>53 of 1,825</strong>. Caching cannot fix this — pruning is decided before any read happens.
+The "1 partition" bars are drawn at a 2&nbsp;px minimum height so they stay visible, so they are not
+to scale.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Run</th><th class="num">Total</th><th class="num">Execution</th><th class="num">Compile</th><th class="num">Bytes scanned</th><th class="num">Partitions</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Unclustered standard, cold</td><td class="num">991 ms</td><td class="num">342 ms</td><td class="num">649 ms</td><td class="num">2.68 GB</td><td class="num">53 / 1,825</td></tr>
+    <tr><td>Unclustered standard, warm</td><td class="num">157 ms</td><td class="num">28 ms</td><td class="num">129 ms</td><td class="num">2.92 GB</td><td class="num">53 / 1,825</td></tr>
+    <tr><td>Interactive table, warm</td><td class="num">42 ms</td><td class="num">10 ms</td><td class="num">32 ms</td><td class="num">13.4 MB</td><td class="num">1 / 295</td></tr>
+    <tr><td>Standard clustered, cold</td><td class="num">613 ms</td><td class="num">260 ms</td><td class="num">239 ms</td><td class="num">6.4 MB</td><td class="num">1 / 256</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The lesson for test design: a 5-second warm-up is not enough. We raised
+<code>warmup</code> to 30&nbsp;seconds for every run in this study.</p>
+
+<h2 id="find-max">Exploratory phase: concurrency ramps</h2>
+
+<p>Four <code>FIND_MAX_CONCURRENCY</code> ramps were run first to locate each configuration's
+saturation point. These are useful for <em>finding the knee</em> but, as shown below, unreliable as a
+head-to-head comparison.</p>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 420" role="img" aria-label="QPS" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="90.0" y="16">Standard clustered</text>
+<rect x="410.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="426.0" y="16">Interactive table (run A)</text>
+<rect x="74.0" y="25" width="11" height="11" rx="2" fill="#7dd3fc"/>
+<text class="ts" x="90.0" y="34">Interactive table (run B)</text>
+<rect x="410.0" y="25" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="426.0" y="34">Standard unclustered</text>
+<line x1="74" y1="372.0" x2="746" y2="372.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="376.0" text-anchor="end">0</text>
+<line x1="74" y1="309.6" x2="746" y2="309.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="313.6" text-anchor="end">200</text>
+<line x1="74" y1="247.2" x2="746" y2="247.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="251.2" text-anchor="end">400</text>
+<line x1="74" y1="184.8" x2="746" y2="184.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="188.8" text-anchor="end">600</text>
+<line x1="74" y1="122.4" x2="746" y2="122.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="126.4" text-anchor="end">800</text>
+<line x1="74" y1="60.0" x2="746" y2="60.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="64.0" text-anchor="end">1000</text>
+<text class="ts" x="14" y="216" transform="rotate(-90 14 216)" text-anchor="middle">QPS</text>
+<line x1="74" y1="372" x2="746" y2="372" stroke="currentColor" stroke-opacity="0.45"/>
+<text class="ts" x="74.0" y="390" text-anchor="middle">1</text>
+<text class="ts" x="122.0" y="390" text-anchor="middle">6</text>
+<text class="ts" x="170.0" y="390" text-anchor="middle">11</text>
+<text class="ts" x="218.0" y="390" text-anchor="middle">16</text>
+<text class="ts" x="266.0" y="390" text-anchor="middle">21</text>
+<text class="ts" x="314.0" y="390" text-anchor="middle">26</text>
+<text class="ts" x="362.0" y="390" text-anchor="middle">31</text>
+<text class="ts" x="410.0" y="390" text-anchor="middle">36</text>
+<text class="ts" x="458.0" y="390" text-anchor="middle">41</text>
+<text class="ts" x="506.0" y="390" text-anchor="middle">46</text>
+<text class="ts" x="554.0" y="390" text-anchor="middle">51</text>
+<text class="ts" x="602.0" y="390" text-anchor="middle">56</text>
+<text class="ts" x="650.0" y="390" text-anchor="middle">61</text>
+<text class="ts" x="698.0" y="390" text-anchor="middle">66</text>
+<text class="ts" x="746.0" y="390" text-anchor="middle">71</text>
+<circle cx="74.0" cy="367.5" r="3.2" fill="#10b981"/>
+<circle cx="122.0" cy="343.2" r="3.2" fill="#10b981"/>
+<circle cx="170.0" cy="320.9" r="3.2" fill="#10b981"/>
+<circle cx="218.0" cy="307.9" r="3.2" fill="#10b981"/>
+<circle cx="266.0" cy="272.3" r="3.2" fill="#10b981"/>
+<circle cx="314.0" cy="245.8" r="3.2" fill="#10b981"/>
+<circle cx="362.0" cy="240.9" r="3.2" fill="#10b981"/>
+<circle cx="410.0" cy="200.1" r="3.2" fill="#10b981"/>
+<circle cx="458.0" cy="201.4" r="3.2" fill="#10b981"/>
+<circle cx="506.0" cy="216.9" r="3.2" fill="#10b981"/>
+<circle cx="554.0" cy="204.8" r="3.2" fill="#10b981"/>
+<circle cx="602.0" cy="208.3" r="3.2" fill="#10b981"/>
+<polyline points="74.0,367.5 122.0,343.2 170.0,320.9 218.0,307.9 266.0,272.3 314.0,245.8 362.0,240.9 410.0,200.1 458.0,201.4 506.0,216.9 554.0,204.8 602.0,208.3" fill="none" stroke="#10b981" stroke-width="2.2"/>
+<circle cx="74.0" cy="367.3" r="3.2" fill="#29b5e8"/>
+<circle cx="122.0" cy="344.7" r="3.2" fill="#29b5e8"/>
+<circle cx="170.0" cy="319.5" r="3.2" fill="#29b5e8"/>
+<circle cx="218.0" cy="307.2" r="3.2" fill="#29b5e8"/>
+<circle cx="266.0" cy="272.4" r="3.2" fill="#29b5e8"/>
+<circle cx="314.0" cy="243.8" r="3.2" fill="#29b5e8"/>
+<circle cx="362.0" cy="242.9" r="3.2" fill="#29b5e8"/>
+<circle cx="410.0" cy="211.3" r="3.2" fill="#29b5e8"/>
+<circle cx="458.0" cy="202.4" r="3.2" fill="#29b5e8"/>
+<circle cx="506.0" cy="215.0" r="3.2" fill="#29b5e8"/>
+<circle cx="554.0" cy="207.9" r="3.2" fill="#29b5e8"/>
+<circle cx="602.0" cy="206.0" r="3.2" fill="#29b5e8"/>
+<circle cx="650.0" cy="226.3" r="3.2" fill="#29b5e8"/>
+<circle cx="698.0" cy="217.3" r="3.2" fill="#29b5e8"/>
+<circle cx="746.0" cy="222.3" r="3.2" fill="#29b5e8"/>
+<polyline points="74.0,367.3 122.0,344.7 170.0,319.5 218.0,307.2 266.0,272.4 314.0,243.8 362.0,242.9 410.0,211.3 458.0,202.4 506.0,215.0 554.0,207.9 602.0,206.0 650.0,226.3 698.0,217.3 746.0,222.3" fill="none" stroke="#29b5e8" stroke-width="2.2"/>
+<circle cx="74.0" cy="366.8" r="3.2" fill="#7dd3fc"/>
+<circle cx="122.0" cy="341.6" r="3.2" fill="#7dd3fc"/>
+<circle cx="170.0" cy="316.7" r="3.2" fill="#7dd3fc"/>
+<circle cx="218.0" cy="304.8" r="3.2" fill="#7dd3fc"/>
+<circle cx="266.0" cy="275.9" r="3.2" fill="#7dd3fc"/>
+<circle cx="314.0" cy="262.6" r="3.2" fill="#7dd3fc"/>
+<circle cx="362.0" cy="260.6" r="3.2" fill="#7dd3fc"/>
+<circle cx="410.0" cy="243.9" r="3.2" fill="#7dd3fc"/>
+<circle cx="458.0" cy="208.0" r="3.2" fill="#7dd3fc"/>
+<circle cx="506.0" cy="210.6" r="3.2" fill="#7dd3fc"/>
+<circle cx="554.0" cy="210.8" r="3.2" fill="#7dd3fc"/>
+<polyline points="74.0,366.8 122.0,341.6 170.0,316.7 218.0,304.8 266.0,275.9 314.0,262.6 362.0,260.6 410.0,243.9 458.0,208.0 506.0,210.6 554.0,210.8" fill="none" stroke="#7dd3fc" stroke-width="2.2" stroke-dasharray="6 4"/>
+<circle cx="74.0" cy="367.3" r="3.2" fill="#f59e0b"/>
+<circle cx="122.0" cy="344.5" r="3.2" fill="#f59e0b"/>
+<circle cx="170.0" cy="323.4" r="3.2" fill="#f59e0b"/>
+<circle cx="218.0" cy="307.3" r="3.2" fill="#f59e0b"/>
+<circle cx="266.0" cy="282.3" r="3.2" fill="#f59e0b"/>
+<circle cx="314.0" cy="267.6" r="3.2" fill="#f59e0b"/>
+<circle cx="362.0" cy="267.5" r="3.2" fill="#f59e0b"/>
+<circle cx="410.0" cy="255.9" r="3.2" fill="#f59e0b"/>
+<circle cx="458.0" cy="253.9" r="3.2" fill="#f59e0b"/>
+<circle cx="506.0" cy="249.8" r="3.2" fill="#f59e0b"/>
+<circle cx="554.0" cy="243.7" r="3.2" fill="#f59e0b"/>
+<polyline points="74.0,367.3 122.0,344.5 170.0,323.4 218.0,307.3 266.0,282.3 314.0,267.6 362.0,267.5 410.0,255.9 458.0,253.9 506.0,249.8 554.0,243.7" fill="none" stroke="#f59e0b" stroke-width="2.2"/>
+<text class="ts" x="410" y="412" text-anchor="middle">Concurrent workers</text>
+</svg></div>
+<p class="caption">Throughput vs concurrency. All configurations are identical below ~20 workers
+because nothing is contended. The unclustered table's knee arrives around 26 workers; clustered and
+interactive keep scaling to ~36–41. Two interactive-table runs are shown to illustrate run-to-run
+variability.</p>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 420" role="img" aria-label="p95 latency (ms)" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="90.0" y="16">Standard clustered</text>
+<rect x="410.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="426.0" y="16">Interactive table (run A)</text>
+<rect x="74.0" y="25" width="11" height="11" rx="2" fill="#7dd3fc"/>
+<text class="ts" x="90.0" y="34">Interactive table (run B)</text>
+<rect x="410.0" y="25" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="426.0" y="34">Standard unclustered</text>
+<line x1="74" y1="372.0" x2="746" y2="372.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="376.0" text-anchor="end">0</text>
+<line x1="74" y1="309.6" x2="746" y2="309.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="313.6" text-anchor="end">100</text>
+<line x1="74" y1="247.2" x2="746" y2="247.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="251.2" text-anchor="end">200</text>
+<line x1="74" y1="184.8" x2="746" y2="184.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="188.8" text-anchor="end">300</text>
+<line x1="74" y1="122.4" x2="746" y2="122.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="126.4" text-anchor="end">400</text>
+<line x1="74" y1="60.0" x2="746" y2="60.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="64.0" text-anchor="end">500</text>
+<text class="ts" x="14" y="216" transform="rotate(-90 14 216)" text-anchor="middle">p95 latency (ms)</text>
+<line x1="74" y1="372" x2="746" y2="372" stroke="currentColor" stroke-opacity="0.45"/>
+<text class="ts" x="74.0" y="390" text-anchor="middle">1</text>
+<text class="ts" x="122.0" y="390" text-anchor="middle">6</text>
+<text class="ts" x="170.0" y="390" text-anchor="middle">11</text>
+<text class="ts" x="218.0" y="390" text-anchor="middle">16</text>
+<text class="ts" x="266.0" y="390" text-anchor="middle">21</text>
+<text class="ts" x="314.0" y="390" text-anchor="middle">26</text>
+<text class="ts" x="362.0" y="390" text-anchor="middle">31</text>
+<text class="ts" x="410.0" y="390" text-anchor="middle">36</text>
+<text class="ts" x="458.0" y="390" text-anchor="middle">41</text>
+<text class="ts" x="506.0" y="390" text-anchor="middle">46</text>
+<text class="ts" x="554.0" y="390" text-anchor="middle">51</text>
+<text class="ts" x="602.0" y="390" text-anchor="middle">56</text>
+<text class="ts" x="650.0" y="390" text-anchor="middle">61</text>
+<text class="ts" x="698.0" y="390" text-anchor="middle">66</text>
+<text class="ts" x="746.0" y="390" text-anchor="middle">71</text>
+<circle cx="74.0" cy="319.1" r="3.2" fill="#10b981"/>
+<circle cx="122.0" cy="319.5" r="3.2" fill="#10b981"/>
+<circle cx="170.0" cy="318.4" r="3.2" fill="#10b981"/>
+<circle cx="218.0" cy="315.4" r="3.2" fill="#10b981"/>
+<circle cx="266.0" cy="313.3" r="3.2" fill="#10b981"/>
+<circle cx="314.0" cy="313.9" r="3.2" fill="#10b981"/>
+<circle cx="362.0" cy="310.2" r="3.2" fill="#10b981"/>
+<circle cx="410.0" cy="311.1" r="3.2" fill="#10b981"/>
+<circle cx="458.0" cy="305.3" r="3.2" fill="#10b981"/>
+<circle cx="506.0" cy="292.1" r="3.2" fill="#10b981"/>
+<circle cx="554.0" cy="277.5" r="3.2" fill="#10b981"/>
+<circle cx="602.0" cy="260.6" r="3.2" fill="#10b981"/>
+<polyline points="74.0,319.1 122.0,319.5 170.0,318.4 218.0,315.4 266.0,313.3 314.0,313.9 362.0,310.2 410.0,311.1 458.0,305.3 506.0,292.1 554.0,277.5 602.0,260.6" fill="none" stroke="#10b981" stroke-width="2.2"/>
+<circle cx="74.0" cy="301.9" r="3.2" fill="#29b5e8"/>
+<circle cx="122.0" cy="317.2" r="3.2" fill="#29b5e8"/>
+<circle cx="170.0" cy="319.3" r="3.2" fill="#29b5e8"/>
+<circle cx="218.0" cy="316.3" r="3.2" fill="#29b5e8"/>
+<circle cx="266.0" cy="313.3" r="3.2" fill="#29b5e8"/>
+<circle cx="314.0" cy="314.2" r="3.2" fill="#29b5e8"/>
+<circle cx="362.0" cy="307.7" r="3.2" fill="#29b5e8"/>
+<circle cx="410.0" cy="306.4" r="3.2" fill="#29b5e8"/>
+<circle cx="458.0" cy="301.4" r="3.2" fill="#29b5e8"/>
+<circle cx="506.0" cy="289.1" r="3.2" fill="#29b5e8"/>
+<circle cx="554.0" cy="278.5" r="3.2" fill="#29b5e8"/>
+<circle cx="602.0" cy="262.9" r="3.2" fill="#29b5e8"/>
+<circle cx="650.0" cy="246.3" r="3.2" fill="#29b5e8"/>
+<circle cx="698.0" cy="240.1" r="3.2" fill="#29b5e8"/>
+<circle cx="746.0" cy="197.0" r="3.2" fill="#29b5e8"/>
+<polyline points="74.0,301.9 122.0,317.2 170.0,319.3 218.0,316.3 266.0,313.3 314.0,314.2 362.0,307.7 410.0,306.4 458.0,301.4 506.0,289.1 554.0,278.5 602.0,262.9 650.0,246.3 698.0,240.1 746.0,197.0" fill="none" stroke="#29b5e8" stroke-width="2.2"/>
+<circle cx="74.0" cy="327.9" r="3.2" fill="#7dd3fc"/>
+<circle cx="122.0" cy="324.0" r="3.2" fill="#7dd3fc"/>
+<circle cx="170.0" cy="321.8" r="3.2" fill="#7dd3fc"/>
+<circle cx="218.0" cy="317.8" r="3.2" fill="#7dd3fc"/>
+<circle cx="266.0" cy="310.2" r="3.2" fill="#7dd3fc"/>
+<circle cx="314.0" cy="306.7" r="3.2" fill="#7dd3fc"/>
+<circle cx="362.0" cy="301.0" r="3.2" fill="#7dd3fc"/>
+<circle cx="410.0" cy="297.2" r="3.2" fill="#7dd3fc"/>
+<circle cx="458.0" cy="286.0" r="3.2" fill="#7dd3fc"/>
+<circle cx="506.0" cy="285.5" r="3.2" fill="#7dd3fc"/>
+<circle cx="554.0" cy="272.0" r="3.2" fill="#7dd3fc"/>
+<polyline points="74.0,327.9 122.0,324.0 170.0,321.8 218.0,317.8 266.0,310.2 314.0,306.7 362.0,301.0 410.0,297.2 458.0,286.0 506.0,285.5 554.0,272.0" fill="none" stroke="#7dd3fc" stroke-width="2.2" stroke-dasharray="6 4"/>
+<circle cx="74.0" cy="318.8" r="3.2" fill="#f59e0b"/>
+<circle cx="122.0" cy="320.0" r="3.2" fill="#f59e0b"/>
+<circle cx="170.0" cy="318.5" r="3.2" fill="#f59e0b"/>
+<circle cx="218.0" cy="314.2" r="3.2" fill="#f59e0b"/>
+<circle cx="266.0" cy="311.6" r="3.2" fill="#f59e0b"/>
+<circle cx="314.0" cy="307.6" r="3.2" fill="#f59e0b"/>
+<circle cx="362.0" cy="300.2" r="3.2" fill="#f59e0b"/>
+<circle cx="410.0" cy="290.9" r="3.2" fill="#f59e0b"/>
+<circle cx="458.0" cy="281.8" r="3.2" fill="#f59e0b"/>
+<circle cx="506.0" cy="275.1" r="3.2" fill="#f59e0b"/>
+<circle cx="554.0" cy="263.5" r="3.2" fill="#f59e0b"/>
+<polyline points="74.0,318.8 122.0,320.0 170.0,318.5 218.0,314.2 266.0,311.6 314.0,307.6 362.0,300.2 410.0,290.9 458.0,281.8 506.0,275.1 554.0,263.5" fill="none" stroke="#f59e0b" stroke-width="2.2"/>
+<text class="ts" x="410" y="412" text-anchor="middle">Concurrent workers</text>
+</svg></div>
+<p class="caption">p95 latency vs concurrency. Curves are tightly bunched at low concurrency and
+diverge only as each configuration saturates.</p>
+
+<div class="callout warn">
+  <p><strong>Why we abandoned ramp mode for the comparison.</strong> The ramp stops when p95 exceeds a
+  percentage of the <em>step-1 baseline</em> — and step 1 is a single cold worker. Two runs of the
+  <em>identical</em> interactive-table configuration stopped at 41 and 66 workers respectively, purely
+  because one baseline was a cold 112&nbsp;ms and the other a clean 71&nbsp;ms.</p>
+  <p>A <em>worse</em> baseline buys a run more headroom, which inverts the metric's meaning. Peak QPS
+  from a ramp is trustworthy; maximum concurrency is not comparable across runs. Everything that
+  follows uses <strong>fixed concurrency</strong>.</p>
+</div>
+
+<h2 id="methodology">Test methodology</h2>
+
+<p>Final design: fixed concurrency, long windows, replicated trials, rotated order.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Parameter</th><th>Value</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Warehouse</td><td>Medium interactive, single cluster</td><td>Held constant; never suspended mid-matrix (suspending resets the cache and starts a new 1-hour billing period)</td></tr>
+    <tr><td>Concurrency</td><td>45 (3 workers &times; 15 connections)</td><td>Just past the weakest configuration's knee, so differences are visible</td></tr>
+    <tr><td>Duration</td><td>720 s measurement + 30 s warm-up</td><td>~225k–375k queries per run; long enough to average over drift</td></tr>
+    <tr><td>Trials</td><td>6 per configuration (2 matrices &times; 3)</td><td>Compare medians, not single runs</td></tr>
+    <tr><td>Order</td><td>Latin square</td><td>Prevents cache warmth aliasing onto one configuration</td></tr>
+    <tr><td>Query</td><td>Identical across all three tables</td><td>Filters <code>O_ORDERDATE = ?</code> and <code>O_CUSTKEY BETWEEN ? AND ? + 2399</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Execution flow</h3>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 520" role="img" aria-label="Test methodology flow" style="min-width:640px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<defs><marker id="ar" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto"><path d="M0,0 L9,3.5 L0,7 z" fill="currentColor" fill-opacity="0.6"/></marker></defs>
+<path d="M380,242 L520,286 L380,330 L240,286 z" fill="none" stroke="currentColor" stroke-opacity="0.5" stroke-width="1.6"/>
+<text class="t" x="380" y="282" text-anchor="middle">Declining trend</text>
+<text class="t" x="380" y="298" text-anchor="middle">within a config?</text>
+<path d="M380,48 L380,66" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+<path d="M380,108 L380,126" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+<path d="M380,168 L380,186" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+<path d="M380,228 L380,240" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+<path d="M380,330 L380,354" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+<text class="ts" x="390" y="346">yes</text>
+<path d="M520,286 L564,286" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+<text class="ts" x="528" y="278">no</text>
+<path d="M380,398 L380,440" stroke="currentColor" stroke-opacity="0.55" stroke-width="1.6" fill="none" marker-end="url(#ar)"/>
+<rect x="250" y="8" width="260" height="40" rx="7" fill="#94a3b8" fill-opacity="0.15" stroke="#94a3b8" stroke-width="1.6"/>
+<text class="tb" x="380.0" y="27" text-anchor="middle">Probe single query</text>
+<text class="ts" x="380.0" y="42" text-anchor="middle">USE_CACHED_RESULT = FALSE</text>
+<rect x="250" y="68" width="260" height="40" rx="7" fill="#94a3b8" fill-opacity="0.15" stroke="#94a3b8" stroke-width="1.6"/>
+<text class="tb" x="380.0" y="87" text-anchor="middle">Ramp to find saturation knee</text>
+<text class="ts" x="380.0" y="102" text-anchor="middle">FIND_MAX_CONCURRENCY</text>
+<rect x="250" y="128" width="260" height="40" rx="7" fill="#94a3b8" fill-opacity="0.15" stroke="#94a3b8" stroke-width="1.6"/>
+<text class="tb" x="380.0" y="147" text-anchor="middle">Fix concurrency past the knee</text>
+<text class="ts" x="380.0" y="162" text-anchor="middle">45 connections</text>
+<rect x="250" y="188" width="260" height="40" rx="7" fill="#29b5e8" fill-opacity="0.15" stroke="#29b5e8" stroke-width="1.6"/>
+<text class="tb" x="380.0" y="207" text-anchor="middle">Matrix 1 - fixed order</text>
+<text class="ts" x="380.0" y="222" text-anchor="middle">9 runs</text>
+<rect x="566" y="264" width="180" height="44" rx="7" fill="#10b981" fill-opacity="0.15" stroke="#10b981" stroke-width="1.6"/>
+<text class="tb" x="656.0" y="283" text-anchor="middle">Pool and compare medians</text>
+<text class="ts" x="656.0" y="298" text-anchor="middle">6 trials per config</text>
+<rect x="238" y="356" width="284" height="42" rx="7" fill="#10b981" fill-opacity="0.15" stroke="#10b981" stroke-width="1.6"/>
+<text class="tb" x="380.0" y="375" text-anchor="middle">Matrix 2 - rotated order</text>
+<text class="ts" x="380.0" y="390" text-anchor="middle">Latin square, 9 runs</text>
+<rect x="150" y="442" width="460" height="50" rx="7" fill="#f59e0b" fill-opacity="0.15" stroke="#f59e0b" stroke-width="1.6"/>
+<text class="tb" x="380.0" y="461" text-anchor="middle">Verdict reversed - ordering artifact</text>
+<text class="ts" x="380.0" y="476" text-anchor="middle">report no measurable difference</text>
+</svg></div>
+<p class="caption">The decision point that mattered: Matrix 1 showed a clean 7.8&nbsp;% interactive
+advantage, but one configuration declined monotonically across trials. That symptom triggered the
+rotated re-run.</p>
+
+<h3>Latin-square ordering</h3>
+
+<p>Each configuration occupies each within-cycle position exactly once, so the uncontended-cache
+advantage of running first is shared evenly rather than concentrated on one table.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Cycle</th><th>1st slot</th><th>2nd slot</th><th>3rd slot</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Unclustered</td><td>Clustered</td><td>Interactive</td></tr>
+    <tr><td>2</td><td>Clustered</td><td>Interactive</td><td>Unclustered</td></tr>
+    <tr><td>3</td><td>Interactive</td><td>Unclustered</td><td>Clustered</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Runs were driven unattended through the SPCS-hosted application's REST API. Because FlakeBench
+executes load <em>client-side</em> — worker subprocesses run inside whichever host serves the API —
+targeting SPCS keeps load generation in SPCS. Mixing a local server into the matrix would change
+network latency to Snowflake and invalidate the comparison.</p>
+
+<h2 id="results">Results</h2>
+
+<h3>Pooled across all 18 runs</h3>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 330" role="img" aria-label="QPS" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Median QPS (6 trials)</text>
+<line x1="74" y1="286.0" x2="746" y2="286.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="290.0" text-anchor="end">0.0</text>
+<line x1="74" y1="237.2" x2="746" y2="237.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="241.2" text-anchor="end">100.0</text>
+<line x1="74" y1="188.4" x2="746" y2="188.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="192.4" text-anchor="end">200.0</text>
+<line x1="74" y1="139.6" x2="746" y2="139.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="143.6" text-anchor="end">300.0</text>
+<line x1="74" y1="90.8" x2="746" y2="90.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="94.8" text-anchor="end">400.0</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">500.0</text>
+<text class="ts" x="14" y="164" transform="rotate(-90 14 164)" text-anchor="middle">QPS</text>
+<line x1="74" y1="286" x2="746" y2="286" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="163.0" y="42.2" width="43.0" height="243.8" fill="#29b5e8"/>
+<text class="ts" x="184.5" y="37.2" text-anchor="middle">499.5</text>
+<text class="t" x="186.0" y="305" text-anchor="middle">Interactive table</text>
+<rect x="387.0" y="52.6" width="43.0" height="233.4" fill="#29b5e8"/>
+<text class="ts" x="408.5" y="47.6" text-anchor="middle">478.3</text>
+<text class="t" x="410.0" y="305" text-anchor="middle">Standard clustered</text>
+<rect x="611.0" y="90.2" width="43.0" height="195.8" fill="#29b5e8"/>
+<text class="ts" x="632.5" y="85.2" text-anchor="middle">401.3</text>
+<text class="t" x="634.0" y="305" text-anchor="middle">Standard unclustered</text>
+</svg></div>
+<p class="caption">Median throughput, 6 trials per configuration.</p>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Configuration</th><th class="num">Median QPS</th><th class="num">Mean &plusmn; SD</th>
+      <th class="num">Range</th><th class="num">p50</th><th class="num">p95</th><th class="num">p99</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td>Interactive table</td><td class="num">499.5</td><td class="num">492.1 &plusmn; 30.9</td><td class="num">438.8–519.7</td><td class="num">72.2 ms</td><td class="num">151.1 ms</td><td class="num">225.3 ms</td></tr>
+    <tr><td>Standard, clustered</td><td class="num">478.3</td><td class="num">476.0 &plusmn; 29.6</td><td class="num">432.9–517.8</td><td class="num">70.9 ms</td><td class="num">147.0 ms</td><td class="num">209.7 ms</td></tr>
+    <tr><td>Standard, unclustered</td><td class="num">401.3</td><td class="num">401.2 &plusmn; 26.5</td><td class="num">367.4–431.0</td><td class="num">101.1 ms</td><td class="num">152.9 ms</td><td class="num">211.5 ms</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 250" role="img" aria-label="QPS" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<line x1="176.0" y1="30" x2="176.0" y2="210" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="176.0" y="228" text-anchor="middle">340</text>
+<line x1="288.0" y1="30" x2="288.0" y2="210" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="288.0" y="228" text-anchor="middle">380</text>
+<line x1="400.0" y1="30" x2="400.0" y2="210" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="400.0" y="228" text-anchor="middle">420</text>
+<line x1="512.0" y1="30" x2="512.0" y2="210" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="512.0" y="228" text-anchor="middle">460</text>
+<line x1="624.0" y1="30" x2="624.0" y2="210" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="624.0" y="228" text-anchor="middle">500</text>
+<line x1="736.0" y1="30" x2="736.0" y2="210" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="736.0" y="228" text-anchor="middle">540</text>
+<rect x="452.6" y="45.0" width="226.5" height="30.0" rx="3" fill="#29b5e8" fill-opacity="0.55"/>
+<line x1="622.6" y1="41.0" x2="622.6" y2="79.0" stroke="#29b5e8" stroke-width="3"/>
+<text class="ts" x="446.6" y="64.0" text-anchor="end">438.8</text>
+<text class="ts" x="685.2" y="64.0">519.7</text>
+<text class="t" x="166" y="57.0" text-anchor="end">Interactive table</text>
+<text class="ts" x="166" y="72.0" text-anchor="end">median 499.5</text>
+<rect x="436.1" y="105.0" width="237.7" height="30.0" rx="3" fill="#10b981" fill-opacity="0.55"/>
+<line x1="563.2" y1="101.0" x2="563.2" y2="139.0" stroke="#10b981" stroke-width="3"/>
+<text class="ts" x="430.1" y="124.0" text-anchor="end">432.9</text>
+<text class="ts" x="679.8" y="124.0">517.8</text>
+<text class="t" x="166" y="117.0" text-anchor="end">Standard clustered</text>
+<text class="ts" x="166" y="132.0" text-anchor="end">median 478.3</text>
+<rect x="252.7" y="165.0" width="178.1" height="30.0" rx="3" fill="#f59e0b" fill-opacity="0.55"/>
+<line x1="347.6" y1="161.0" x2="347.6" y2="199.0" stroke="#f59e0b" stroke-width="3"/>
+<text class="ts" x="246.7" y="184.0" text-anchor="end">367.4</text>
+<text class="ts" x="436.8" y="184.0">431.0</text>
+<text class="t" x="166" y="177.0" text-anchor="end">Standard unclustered</text>
+<text class="ts" x="166" y="192.0" text-anchor="end">median 401.3</text>
+<text class="ts" x="456" y="244" text-anchor="middle">QPS (bar = observed min to max, tick = median)</text>
+</svg></div>
+<p class="caption">Observed throughput range per configuration (min to max, marker at median). The
+interactive and clustered-standard ranges overlap across almost their entire span — that overlap is
+the finding. The unclustered range sits clear of both.</p>
+
+<h3>The ordering artifact</h3>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 360" role="img" aria-label="Median QPS" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Interactive table</text>
+<rect x="298.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="314.0" y="16">Standard clustered</text>
+<rect x="522.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="538.0" y="16">Standard unclustered</text>
+<line x1="74" y1="316.0" x2="746" y2="316.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="320.0" text-anchor="end">0.0</text>
+<line x1="74" y1="261.2" x2="746" y2="261.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="265.2" text-anchor="end">200.0</text>
+<line x1="74" y1="206.4" x2="746" y2="206.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="210.4" text-anchor="end">400.0</text>
+<line x1="74" y1="151.6" x2="746" y2="151.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="155.6" text-anchor="end">600.0</text>
+<line x1="74" y1="96.8" x2="746" y2="96.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="100.8" text-anchor="end">800.0</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">1000.0</text>
+<text class="ts" x="14" y="179" transform="rotate(-90 14 179)" text-anchor="middle">Median QPS</text>
+<line x1="74" y1="316" x2="746" y2="316" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="173.0" y="178.2" width="43.0" height="137.8" fill="#29b5e8"/>
+<text class="ts" x="194.5" y="173.2" text-anchor="middle">503.1</text>
+<rect x="219.0" y="188.1" width="43.0" height="127.9" fill="#10b981"/>
+<text class="ts" x="240.5" y="183.1" text-anchor="middle">466.8</text>
+<rect x="265.0" y="209.9" width="43.0" height="106.1" fill="#f59e0b"/>
+<text class="ts" x="286.5" y="204.9" text-anchor="middle">387.4</text>
+<text class="t" x="242.0" y="335" text-anchor="middle">Matrix 1 - fixed order</text>
+<rect x="509.0" y="185.7" width="43.0" height="130.3" fill="#29b5e8"/>
+<text class="ts" x="530.5" y="180.7" text-anchor="middle">475.5</text>
+<rect x="555.0" y="181.7" width="43.0" height="134.3" fill="#10b981"/>
+<text class="ts" x="576.5" y="176.7" text-anchor="middle">490.2</text>
+<rect x="601.0" y="202.2" width="43.0" height="113.8" fill="#f59e0b"/>
+<text class="ts" x="622.5" y="197.2" text-anchor="middle">415.2</text>
+<text class="t" x="578.0" y="335" text-anchor="middle">Matrix 2 - rotated order</text>
+</svg></div>
+<p class="caption">Median QPS per matrix. In Matrix 1 the interactive table led by 7.8&nbsp;%; after
+rotating the run order in Matrix 2, the clustered standard table led by 3.1&nbsp;%. The verdict
+<strong>reversed sign</strong> — the strongest evidence that the original advantage was cache-warmth
+ordering, not table type.</p>
+
+<div class="callout warn">
+  <p><strong>What went wrong in Matrix 1.</strong> The clustered table declined monotonically across
+  its three trials — 489.8 → 466.8 → 432.9 QPS. Its best number came from the very first run of the
+  night, before the other two tables had been driven under load, so it had the warehouse data cache
+  largely to itself. The interactive table, already warm for days, was the only configuration that
+  did not decline.</p>
+  <p>The within-configuration spread (13.1&nbsp;%) was larger than the 7.8&nbsp;% gap being
+  attributed to table type. That alone should stop a conclusion.</p>
+</div>
+
+<h3>Every individual run</h3>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 400" role="img" aria-label="QPS" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Interactive table</text>
+<rect x="298.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="314.0" y="16">Standard clustered</text>
+<rect x="522.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="538.0" y="16">Standard unclustered</text>
+<line x1="74" y1="356.0" x2="746" y2="356.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="360.0" text-anchor="end">0</text>
+<line x1="74" y1="293.2" x2="746" y2="293.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="297.2" text-anchor="end">200</text>
+<line x1="74" y1="230.4" x2="746" y2="230.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="234.4" text-anchor="end">400</text>
+<line x1="74" y1="167.6" x2="746" y2="167.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="171.6" text-anchor="end">600</text>
+<line x1="74" y1="104.8" x2="746" y2="104.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="108.8" text-anchor="end">800</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">1000</text>
+<text class="ts" x="14" y="199" transform="rotate(-90 14 199)" text-anchor="middle">QPS</text>
+<line x1="74" y1="356" x2="746" y2="356" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="88.6" y="198.0" width="24.6" height="158.0" fill="#29b5e8"/>
+<text class="ts" x="100.9" y="193.0" text-anchor="middle">503</text>
+<rect x="116.2" y="202.2" width="24.6" height="153.8" fill="#10b981"/>
+<text class="ts" x="128.5" y="197.2" text-anchor="middle">490</text>
+<rect x="143.8" y="222.1" width="24.6" height="133.9" fill="#f59e0b"/>
+<text class="ts" x="156.1" y="217.1" text-anchor="middle">426</text>
+<text class="t" x="130.0" y="375" text-anchor="middle">M1-1</text>
+<rect x="200.6" y="200.3" width="24.6" height="155.7" fill="#29b5e8"/>
+<text class="ts" x="212.9" y="195.3" text-anchor="middle">496</text>
+<rect x="228.2" y="209.4" width="24.6" height="146.6" fill="#10b981"/>
+<text class="ts" x="240.5" y="204.4" text-anchor="middle">467</text>
+<rect x="255.8" y="236.7" width="24.6" height="119.3" fill="#f59e0b"/>
+<text class="ts" x="268.1" y="231.7" text-anchor="middle">380</text>
+<text class="t" x="242.0" y="375" text-anchor="middle">M1-2</text>
+<rect x="312.6" y="192.8" width="24.6" height="163.2" fill="#29b5e8"/>
+<text class="ts" x="324.9" y="187.8" text-anchor="middle">520</text>
+<rect x="340.2" y="220.1" width="24.6" height="135.9" fill="#10b981"/>
+<text class="ts" x="352.5" y="215.1" text-anchor="middle">433</text>
+<rect x="367.8" y="234.4" width="24.6" height="121.6" fill="#f59e0b"/>
+<text class="ts" x="380.1" y="229.4" text-anchor="middle">387</text>
+<text class="t" x="354.0" y="375" text-anchor="middle">M1-3</text>
+<rect x="424.6" y="206.7" width="24.6" height="149.3" fill="#29b5e8"/>
+<text class="ts" x="436.9" y="201.7" text-anchor="middle">476</text>
+<rect x="452.2" y="193.4" width="24.6" height="162.6" fill="#10b981"/>
+<text class="ts" x="464.5" y="188.4" text-anchor="middle">518</text>
+<rect x="479.8" y="225.6" width="24.6" height="130.4" fill="#f59e0b"/>
+<text class="ts" x="492.1" y="220.6" text-anchor="middle">415</text>
+<text class="t" x="466.0" y="375" text-anchor="middle">M2-1</text>
+<rect x="536.6" y="192.8" width="24.6" height="163.2" fill="#29b5e8"/>
+<text class="ts" x="548.9" y="187.8" text-anchor="middle">520</text>
+<rect x="564.2" y="202.1" width="24.6" height="153.9" fill="#10b981"/>
+<text class="ts" x="576.5" y="197.1" text-anchor="middle">490</text>
+<rect x="591.8" y="220.7" width="24.6" height="135.3" fill="#f59e0b"/>
+<text class="ts" x="604.1" y="215.7" text-anchor="middle">431</text>
+<text class="t" x="578.0" y="375" text-anchor="middle">M2-2</text>
+<rect x="648.6" y="218.2" width="24.6" height="137.8" fill="#29b5e8"/>
+<text class="ts" x="660.9" y="213.2" text-anchor="middle">439</text>
+<rect x="676.2" y="212.0" width="24.6" height="144.0" fill="#10b981"/>
+<text class="ts" x="688.5" y="207.0" text-anchor="middle">458</text>
+<rect x="703.8" y="240.6" width="24.6" height="115.4" fill="#f59e0b"/>
+<text class="ts" x="716.1" y="235.6" text-anchor="middle">367</text>
+<text class="t" x="690.0" y="375" text-anchor="middle">M2-3</text>
+</svg></div>
+<p class="caption">All 18 runs in execution order within each matrix. The unclustered series sits
+consistently below the other two; the interactive and clustered series interleave.</p>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 400" role="img" aria-label="QPS vs p50 latency (ms)" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Interactive table</text>
+<rect x="298.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="314.0" y="16">Standard clustered</text>
+<rect x="522.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="538.0" y="16">Standard unclustered</text>
+<line x1="74" y1="352.0" x2="746" y2="352.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="356.0" text-anchor="end">350</text>
+<line x1="74" y1="274.5" x2="746" y2="274.5" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="278.5" text-anchor="end">400</text>
+<line x1="74" y1="197.0" x2="746" y2="197.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="201.0" text-anchor="end">450</text>
+<line x1="74" y1="119.5" x2="746" y2="119.5" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="123.5" text-anchor="end">500</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">550</text>
+<line x1="74.0" y1="42" x2="74.0" y2="352" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="74.0" y="370" text-anchor="middle">60</text>
+<line x1="208.4" y1="42" x2="208.4" y2="352" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="208.4" y="370" text-anchor="middle">70</text>
+<line x1="342.8" y1="42" x2="342.8" y2="352" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="342.8" y="370" text-anchor="middle">80</text>
+<line x1="477.2" y1="42" x2="477.2" y2="352" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="477.2" y="370" text-anchor="middle">90</text>
+<line x1="611.6" y1="42" x2="611.6" y2="352" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="611.6" y="370" text-anchor="middle">100</text>
+<line x1="746.0" y1="42" x2="746.0" y2="352" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="746.0" y="370" text-anchor="middle">110</text>
+<circle cx="231.2" cy="114.7" r="5.5" fill="#29b5e8" fill-opacity="0.85"/>
+<circle cx="244.7" cy="125.9" r="5.5" fill="#29b5e8" fill-opacity="0.85"/>
+<circle cx="224.5" cy="89.0" r="5.5" fill="#29b5e8" fill-opacity="0.85"/>
+<circle cx="299.8" cy="157.5" r="5.5" fill="#29b5e8" fill-opacity="0.85"/>
+<circle cx="216.5" cy="89.1" r="5.5" fill="#29b5e8" fill-opacity="0.85"/>
+<circle cx="420.8" cy="214.4" r="5.5" fill="#29b5e8" fill-opacity="0.85"/>
+<circle cx="207.1" cy="135.3" r="5.5" fill="#10b981" fill-opacity="0.85"/>
+<circle cx="276.9" cy="171.0" r="5.5" fill="#10b981" fill-opacity="0.85"/>
+<circle cx="220.5" cy="223.5" r="5.5" fill="#10b981" fill-opacity="0.85"/>
+<circle cx="287.7" cy="91.9" r="5.5" fill="#10b981" fill-opacity="0.85"/>
+<circle cx="212.4" cy="134.7" r="5.5" fill="#10b981" fill-opacity="0.85"/>
+<circle cx="221.8" cy="183.8" r="5.5" fill="#10b981" fill-opacity="0.85"/>
+<circle cx="608.9" cy="233.7" r="5.5" fill="#f59e0b" fill-opacity="0.85"/>
+<circle cx="646.5" cy="305.7" r="5.5" fill="#f59e0b" fill-opacity="0.85"/>
+<circle cx="630.4" cy="294.0" r="5.5" fill="#f59e0b" fill-opacity="0.85"/>
+<circle cx="617.0" cy="250.9" r="5.5" fill="#f59e0b" fill-opacity="0.85"/>
+<circle cx="622.4" cy="226.4" r="5.5" fill="#f59e0b" fill-opacity="0.85"/>
+<circle cx="643.9" cy="325.0" r="5.5" fill="#f59e0b" fill-opacity="0.85"/>
+<text class="ts" x="410" y="392" text-anchor="middle">p50 latency (ms)</text>
+<text class="ts" x="14" y="197" transform="rotate(-90 14 197)" text-anchor="middle">QPS</text>
+</svg></div>
+<p class="caption">Throughput vs median latency, one point per run. Interactive and clustered-standard
+runs form a single indistinguishable cloud; unclustered runs separate cleanly on the latency axis.</p>
+
+<h3>Latency profile</h3>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 360" role="img" aria-label="Milliseconds (median of 6 trials)" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Interactive table</text>
+<rect x="298.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="314.0" y="16">Standard clustered</text>
+<rect x="522.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="538.0" y="16">Standard unclustered</text>
+<line x1="74" y1="316.0" x2="746" y2="316.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="320.0" text-anchor="end">0.0</text>
+<line x1="74" y1="261.2" x2="746" y2="261.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="265.2" text-anchor="end">50.0</text>
+<line x1="74" y1="206.4" x2="746" y2="206.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="210.4" text-anchor="end">100.0</text>
+<line x1="74" y1="151.6" x2="746" y2="151.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="155.6" text-anchor="end">150.0</text>
+<line x1="74" y1="96.8" x2="746" y2="96.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="100.8" text-anchor="end">200.0</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">250.0</text>
+<text class="ts" x="14" y="179" transform="rotate(-90 14 179)" text-anchor="middle">Milliseconds (median of 6 trials)</text>
+<line x1="74" y1="316" x2="746" y2="316" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="117.0" y="236.9" width="43.0" height="79.1" fill="#29b5e8"/>
+<text class="ts" x="138.5" y="231.9" text-anchor="middle">72.2</text>
+<rect x="163.0" y="238.3" width="43.0" height="77.7" fill="#10b981"/>
+<text class="ts" x="184.5" y="233.3" text-anchor="middle">70.9</text>
+<rect x="209.0" y="205.2" width="43.0" height="110.8" fill="#f59e0b"/>
+<text class="ts" x="230.5" y="200.2" text-anchor="middle">101.1</text>
+<text class="t" x="186.0" y="335" text-anchor="middle">p50</text>
+<rect x="341.0" y="150.4" width="43.0" height="165.6" fill="#29b5e8"/>
+<text class="ts" x="362.5" y="145.4" text-anchor="middle">151.1</text>
+<rect x="387.0" y="154.9" width="43.0" height="161.1" fill="#10b981"/>
+<text class="ts" x="408.5" y="149.9" text-anchor="middle">147.0</text>
+<rect x="433.0" y="148.4" width="43.0" height="167.6" fill="#f59e0b"/>
+<text class="ts" x="454.5" y="143.4" text-anchor="middle">152.9</text>
+<text class="t" x="410.0" y="335" text-anchor="middle">p95</text>
+<rect x="565.0" y="69.1" width="43.0" height="246.9" fill="#29b5e8"/>
+<text class="ts" x="586.5" y="64.1" text-anchor="middle">225.3</text>
+<rect x="611.0" y="86.2" width="43.0" height="229.8" fill="#10b981"/>
+<text class="ts" x="632.5" y="81.2" text-anchor="middle">209.7</text>
+<rect x="657.0" y="84.2" width="43.0" height="231.8" fill="#f59e0b"/>
+<text class="ts" x="678.5" y="79.2" text-anchor="middle">211.5</text>
+<text class="t" x="634.0" y="335" text-anchor="middle">p99</text>
+</svg></div>
+<p class="caption">Median p50, p95, and p99 per configuration. Note that <strong>p95 is nearly
+identical across all three</strong> (147–153 ms) while p50 differs by 42&nbsp;%. At 45 connections the
+warehouse is saturated, so the tail is pinned by queueing regardless of table layout.</p>
+
+<div class="callout">
+  <p><strong>Metric selection matters.</strong> Reporting p95 from a saturated run would have shown
+  "no difference between any configuration" — including between clustered and unclustered, which
+  differ by 19&nbsp;% in throughput. Use QPS and p50 for capacity comparisons; drop to roughly
+  20 connections if you want to compare latency. The server-side view in the next section recovers
+  the signal that end-to-end p95 hides.</p>
+</div>
+
+<h2 id="server-latency">Server-side execution time</h2>
+
+<p>Every number above is <strong>end-to-end</strong>: the elapsed time the driver observed, which
+includes client-side scheduling, network round trip, Snowflake query compilation, and finally the
+query execution itself. That is the right metric for "what will my application feel", but it buries
+the engine's contribution under transport and compile cost.</p>
+
+<p>FlakeBench enriches each recorded query with the values Snowflake itself reports, so the
+execution phase can be isolated. The figures below come from
+<code>QUERY_EXECUTIONS.SF_EXECUTION_MS</code>, which is
+<code>QUERY_HISTORY.EXECUTION_TIME</code> — pure server-side execution, with no client, network, or
+compilation time in it. They are pooled over <strong>6,006,727</strong> enriched, non-warmup,
+successful query rows across all 18 runs (99.99&nbsp;% enrichment coverage).</p>
+
+<div class="callout">
+  <p><strong>Why the three worker rows matter.</strong> Each run is executed by three SPCS workers,
+  and <code>QUERY_EXECUTIONS</code> is keyed by the per-worker <code>TEST_ID</code>, not the
+  aggregate one. The per-query rows are reached by joining the aggregate run
+  (<code>CONCURRENT_CONNECTIONS = 45</code>) to its three worker rows
+  (<code>CONCURRENT_CONNECTIONS = 15</code>) on <code>RUN_ID</code>. Filtering
+  <code>QUERY_EXECUTIONS</code> on the aggregate <code>TEST_ID</code> returns nothing.</p>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr><th>Configuration</th>
+        <th>Server p50</th><th>Server p95</th><th>Server p99</th>
+        <th>End-to-end p50</th><th>End-to-end p95</th><th>End-to-end p99</th>
+        <th>p50 ratio</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Interactive table</td>
+        <td>7&nbsp;ms</td><td>9&nbsp;ms</td><td>13&nbsp;ms</td>
+        <td>72.2&nbsp;ms</td><td>151.1&nbsp;ms</td><td>225.3&nbsp;ms</td><td>10.3&times;</td></tr>
+    <tr><td>Standard clustered</td>
+        <td>7&nbsp;ms</td><td>10&nbsp;ms</td><td>15&nbsp;ms</td>
+        <td>70.9&nbsp;ms</td><td>147.0&nbsp;ms</td><td>209.7&nbsp;ms</td><td>10.1&times;</td></tr>
+    <tr><td>Standard unclustered</td>
+        <td>47&nbsp;ms</td><td>77&nbsp;ms</td><td>94&nbsp;ms</td>
+        <td>101.1&nbsp;ms</td><td>152.9&nbsp;ms</td><td>211.5&nbsp;ms</td><td>2.2&times;</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 360" role="img" aria-label="Server SQL execution (ms, pooled over 6.0M queries)" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Interactive table</text>
+<rect x="298.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="314.0" y="16">Standard clustered</text>
+<rect x="522.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="538.0" y="16">Standard unclustered</text>
+<line x1="74" y1="316.0" x2="746" y2="316.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="320.0" text-anchor="end">0</text>
+<line x1="74" y1="261.2" x2="746" y2="261.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="265.2" text-anchor="end">20</text>
+<line x1="74" y1="206.4" x2="746" y2="206.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="210.4" text-anchor="end">40</text>
+<line x1="74" y1="151.6" x2="746" y2="151.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="155.6" text-anchor="end">60</text>
+<line x1="74" y1="96.8" x2="746" y2="96.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="100.8" text-anchor="end">80</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">100</text>
+<text class="ts" x="14" y="179" transform="rotate(-90 14 179)" text-anchor="middle">Server SQL execution (ms, pooled over 6.0M queries)</text>
+<line x1="74" y1="316" x2="746" y2="316" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="117.0" y="296.8" width="43.0" height="19.2" fill="#29b5e8"/>
+<text class="ts" x="138.5" y="291.8" text-anchor="middle">7</text>
+<rect x="163.0" y="296.8" width="43.0" height="19.2" fill="#10b981"/>
+<text class="ts" x="184.5" y="291.8" text-anchor="middle">7</text>
+<rect x="209.0" y="187.2" width="43.0" height="128.8" fill="#f59e0b"/>
+<text class="ts" x="230.5" y="182.2" text-anchor="middle">47</text>
+<text class="t" x="186.0" y="335" text-anchor="middle">p50</text>
+<rect x="341.0" y="291.3" width="43.0" height="24.7" fill="#29b5e8"/>
+<text class="ts" x="362.5" y="286.3" text-anchor="middle">9</text>
+<rect x="387.0" y="288.6" width="43.0" height="27.4" fill="#10b981"/>
+<text class="ts" x="408.5" y="283.6" text-anchor="middle">10</text>
+<rect x="433.0" y="105.0" width="43.0" height="211.0" fill="#f59e0b"/>
+<text class="ts" x="454.5" y="100.0" text-anchor="middle">77</text>
+<text class="t" x="410.0" y="335" text-anchor="middle">p95</text>
+<rect x="565.0" y="280.4" width="43.0" height="35.6" fill="#29b5e8"/>
+<text class="ts" x="586.5" y="275.4" text-anchor="middle">13</text>
+<rect x="611.0" y="274.9" width="43.0" height="41.1" fill="#10b981"/>
+<text class="ts" x="632.5" y="269.9" text-anchor="middle">15</text>
+<rect x="657.0" y="58.4" width="43.0" height="257.6" fill="#f59e0b"/>
+<text class="ts" x="678.5" y="53.4" text-anchor="middle">94</text>
+<text class="t" x="634.0" y="335" text-anchor="middle">p99</text>
+</svg></div>
+<p class="caption">Server-side SQL execution only. The unclustered table is <strong>6.7&times;
+slower at p50 and 7.7&times; slower at p95</strong> — a gap that end-to-end timings compress to
+1.4&times; and 1.0&times; respectively.</p>
+
+<div class="callout">
+  <p><strong>The headline result.</strong> On an interactive warehouse, a well-clustered table —
+  interactive or standard — executes this point lookup in <strong>7&nbsp;ms at the median and
+  under 15&nbsp;ms at p99</strong>. The same query against the unclustered copy takes 47&nbsp;ms.
+  The engine difference is nearly seven-fold; the application only sees 1.4&times; because
+  transport and compilation dominate what it measures.</p>
+</div>
+
+<h3>Where the rest of the time goes</h3>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 380" role="img" aria-label="Milliseconds (component medians)" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Server SQL execution</text>
+<rect x="298.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="314.0" y="16">Compilation</text>
+<rect x="522.0" y="7" width="11" height="11" rx="2" fill="#94a3b8"/>
+<text class="ts" x="538.0" y="16">Client + network</text>
+<line x1="74" y1="336.0" x2="746" y2="336.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="340.0" text-anchor="end">0.0</text>
+<line x1="74" y1="277.2" x2="746" y2="277.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="281.2" text-anchor="end">20.0</text>
+<line x1="74" y1="218.4" x2="746" y2="218.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="222.4" text-anchor="end">40.0</text>
+<line x1="74" y1="159.6" x2="746" y2="159.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="163.6" text-anchor="end">60.0</text>
+<line x1="74" y1="100.8" x2="746" y2="100.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="104.8" text-anchor="end">80.0</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">100.0</text>
+<text class="ts" x="14" y="189" transform="rotate(-90 14 189)" text-anchor="middle">Milliseconds (component medians)</text>
+<line x1="74" y1="336" x2="746" y2="336" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="163.0" y="315.4" width="46.0" height="20.6" fill="#29b5e8"/>
+<text class="ts" x="186.0" y="329.7" text-anchor="middle" fill="#0b1220">7.0</text>
+<rect x="163.0" y="236.0" width="46.0" height="79.4" fill="#10b981"/>
+<text class="ts" x="186.0" y="279.7" text-anchor="middle" fill="#0b1220">27.0</text>
+<rect x="163.0" y="127.8" width="46.0" height="108.2" fill="#94a3b8"/>
+<text class="ts" x="186.0" y="185.9" text-anchor="middle" fill="#0b1220">36.8</text>
+<text class="ts" x="186.0" y="121.8" text-anchor="middle">70.8</text>
+<text class="t" x="186.0" y="355" text-anchor="middle">Interactive</text>
+<text class="t" x="186.0" y="369" text-anchor="middle">table</text>
+<rect x="387.0" y="315.4" width="46.0" height="20.6" fill="#29b5e8"/>
+<text class="ts" x="410.0" y="329.7" text-anchor="middle" fill="#0b1220">7.0</text>
+<rect x="387.0" y="236.0" width="46.0" height="79.4" fill="#10b981"/>
+<text class="ts" x="410.0" y="279.7" text-anchor="middle" fill="#0b1220">27.0</text>
+<rect x="387.0" y="126.7" width="46.0" height="109.4" fill="#94a3b8"/>
+<text class="ts" x="410.0" y="185.4" text-anchor="middle" fill="#0b1220">37.2</text>
+<text class="ts" x="410.0" y="120.7" text-anchor="middle">71.2</text>
+<text class="t" x="410.0" y="355" text-anchor="middle">Standard</text>
+<text class="t" x="410.0" y="369" text-anchor="middle">clustered</text>
+<rect x="611.0" y="197.8" width="46.0" height="138.2" fill="#29b5e8"/>
+<text class="ts" x="634.0" y="270.9" text-anchor="middle" fill="#0b1220">47.0</text>
+<rect x="611.0" y="80.2" width="46.0" height="117.6" fill="#10b981"/>
+<text class="ts" x="634.0" y="143.0" text-anchor="middle" fill="#0b1220">40.0</text>
+<rect x="611.0" y="50.8" width="46.0" height="29.4" fill="#94a3b8"/>
+<text class="ts" x="634.0" y="69.5" text-anchor="middle" fill="#0b1220">10.0</text>
+<text class="ts" x="634.0" y="44.8" text-anchor="middle">97.0</text>
+<text class="t" x="634.0" y="355" text-anchor="middle">Standard</text>
+<text class="t" x="634.0" y="369" text-anchor="middle">unclustered</text>
+</svg></div>
+<p class="caption">Median latency decomposition. For the fast configurations, actual query execution
+is the <em>smallest</em> component: 7&nbsp;ms of execution behind 27&nbsp;ms of compilation and
+roughly 37&nbsp;ms of client and network time. Each segment is its own pooled median, so the
+segments do not sum exactly to the end-to-end median.</p>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 260" role="img" aria-label="Server execution as % of end-to-end median latency" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<line x1="176.0" y1="26" x2="176.0" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="176.0" y="230" text-anchor="middle">0</text>
+<line x1="281.2" y1="26" x2="281.2" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="281.2" y="230" text-anchor="middle">10</text>
+<line x1="386.4" y1="26" x2="386.4" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="386.4" y="230" text-anchor="middle">20</text>
+<line x1="491.6" y1="26" x2="491.6" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="491.6" y="230" text-anchor="middle">30</text>
+<line x1="596.8" y1="26" x2="596.8" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="596.8" y="230" text-anchor="middle">40</text>
+<line x1="702.0" y1="26" x2="702.0" y2="212" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="702.0" y="230" text-anchor="middle">50</text>
+<rect x="176" y="40.0" width="487.1" height="34.0" fill="#f59e0b"/>
+<text class="tb" x="671.1" y="61.0">46.3</text>
+<text class="t" x="166" y="61.0" text-anchor="end">Standard unclustered</text>
+<rect x="176" y="102.0" width="99.9" height="34.0" fill="#10b981"/>
+<text class="tb" x="283.9" y="123.0">9.5</text>
+<text class="t" x="166" y="123.0" text-anchor="end">Standard clustered</text>
+<rect x="176" y="164.0" width="102.0" height="34.0" fill="#29b5e8"/>
+<text class="tb" x="286.0" y="185.0">9.7</text>
+<text class="t" x="166" y="185.0" text-anchor="end">Interactive table</text>
+<text class="ts" x="439" y="252" text-anchor="middle">Server execution as % of end-to-end median latency</text>
+</svg></div>
+<p class="caption">Server execution as a share of end-to-end median latency. On the tuned
+configurations less than a tenth of what the application waits for is the database executing the
+query.</p>
+
+<p>This decomposition explains the earlier p95 result. At 45 connections, end-to-end p95 was pinned
+at 147–153&nbsp;ms for all three configurations, which looked like "table layout does not matter".
+It actually meant the queueing and transport terms were large enough to swamp a real 7-vs-77&nbsp;ms
+difference in the engine. Two further consequences are worth noting:</p>
+
+<ul>
+  <li><strong>Client overhead scales with throughput, not with table quality.</strong> The
+  client-plus-network median was ~37&nbsp;ms for the fast configurations but only ~10&nbsp;ms for
+  the unclustered one, because the unclustered runs pushed 20&nbsp;% less traffic and so queued
+  less on the client side. This <em>works against</em> the good configurations in end-to-end
+  numbers, understating their true advantage.</li>
+  <li><strong>Compilation is the dominant Snowflake cost here.</strong> 27&nbsp;ms of compile
+  against 7&nbsp;ms of execution. For a workload of this shape, prepared or parameterised
+  statements would cut more latency than any further table tuning.</li>
+</ul>
+
+<h3>Stability and the ordering artifact</h3>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 400" role="img" aria-label="Server p95 execution (ms)" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<rect x="74.0" y="7" width="11" height="11" rx="2" fill="#29b5e8"/>
+<text class="ts" x="90.0" y="16">Interactive table</text>
+<rect x="298.0" y="7" width="11" height="11" rx="2" fill="#10b981"/>
+<text class="ts" x="314.0" y="16">Standard clustered</text>
+<rect x="522.0" y="7" width="11" height="11" rx="2" fill="#f59e0b"/>
+<text class="ts" x="538.0" y="16">Standard unclustered</text>
+<line x1="74" y1="356.0" x2="746" y2="356.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="360.0" text-anchor="end">0</text>
+<line x1="74" y1="293.2" x2="746" y2="293.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="297.2" text-anchor="end">20</text>
+<line x1="74" y1="230.4" x2="746" y2="230.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="234.4" text-anchor="end">40</text>
+<line x1="74" y1="167.6" x2="746" y2="167.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="171.6" text-anchor="end">60</text>
+<line x1="74" y1="104.8" x2="746" y2="104.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="108.8" text-anchor="end">80</text>
+<line x1="74" y1="42.0" x2="746" y2="42.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="46.0" text-anchor="end">100</text>
+<text class="ts" x="14" y="199" transform="rotate(-90 14 199)" text-anchor="middle">Server p95 execution (ms)</text>
+<line x1="74" y1="356" x2="746" y2="356" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="88.6" y="327.7" width="24.6" height="28.3" fill="#29b5e8"/>
+<text class="ts" x="100.9" y="322.7" text-anchor="middle">9</text>
+<rect x="116.2" y="318.3" width="24.6" height="37.7" fill="#10b981"/>
+<text class="ts" x="128.5" y="313.3" text-anchor="middle">12</text>
+<rect x="143.8" y="123.6" width="24.6" height="232.4" fill="#f59e0b"/>
+<text class="ts" x="156.1" y="118.6" text-anchor="middle">74</text>
+<text class="t" x="130.0" y="375" text-anchor="middle">M1-1</text>
+<rect x="200.6" y="324.6" width="24.6" height="31.4" fill="#29b5e8"/>
+<text class="ts" x="212.9" y="319.6" text-anchor="middle">10</text>
+<rect x="228.2" y="324.6" width="24.6" height="31.4" fill="#10b981"/>
+<text class="ts" x="240.5" y="319.6" text-anchor="middle">10</text>
+<rect x="255.8" y="114.2" width="24.6" height="241.8" fill="#f59e0b"/>
+<text class="ts" x="268.1" y="109.2" text-anchor="middle">77</text>
+<text class="t" x="242.0" y="375" text-anchor="middle">M1-2</text>
+<rect x="312.6" y="327.7" width="24.6" height="28.3" fill="#29b5e8"/>
+<text class="ts" x="324.9" y="322.7" text-anchor="middle">9</text>
+<rect x="340.2" y="324.6" width="24.6" height="31.4" fill="#10b981"/>
+<text class="ts" x="352.5" y="319.6" text-anchor="middle">10</text>
+<rect x="367.8" y="111.1" width="24.6" height="244.9" fill="#f59e0b"/>
+<text class="ts" x="380.1" y="106.1" text-anchor="middle">78</text>
+<text class="t" x="354.0" y="375" text-anchor="middle">M1-3</text>
+<rect x="424.6" y="327.7" width="24.6" height="28.3" fill="#29b5e8"/>
+<text class="ts" x="436.9" y="322.7" text-anchor="middle">9</text>
+<rect x="452.2" y="324.6" width="24.6" height="31.4" fill="#10b981"/>
+<text class="ts" x="464.5" y="319.6" text-anchor="middle">10</text>
+<rect x="479.8" y="117.4" width="24.6" height="238.6" fill="#f59e0b"/>
+<text class="ts" x="492.1" y="112.4" text-anchor="middle">76</text>
+<text class="t" x="466.0" y="375" text-anchor="middle">M2-1</text>
+<rect x="536.6" y="327.7" width="24.6" height="28.3" fill="#29b5e8"/>
+<text class="ts" x="548.9" y="322.7" text-anchor="middle">9</text>
+<rect x="564.2" y="324.6" width="24.6" height="31.4" fill="#10b981"/>
+<text class="ts" x="576.5" y="319.6" text-anchor="middle">10</text>
+<rect x="591.8" y="111.1" width="24.6" height="244.9" fill="#f59e0b"/>
+<text class="ts" x="604.1" y="106.1" text-anchor="middle">78</text>
+<text class="t" x="578.0" y="375" text-anchor="middle">M2-2</text>
+<rect x="648.6" y="327.7" width="24.6" height="28.3" fill="#29b5e8"/>
+<text class="ts" x="660.9" y="322.7" text-anchor="middle">9</text>
+<rect x="676.2" y="324.6" width="24.6" height="31.4" fill="#10b981"/>
+<text class="ts" x="688.5" y="319.6" text-anchor="middle">10</text>
+<rect x="703.8" y="120.5" width="24.6" height="235.5" fill="#f59e0b"/>
+<text class="ts" x="716.1" y="115.5" text-anchor="middle">75</text>
+<text class="t" x="690.0" y="375" text-anchor="middle">M2-3</text>
+</svg></div>
+<p class="caption">Server p95 execution time per run, in matrix order. Unlike the QPS series, these
+show no monotonic drift across the matrix — the clustered configuration sits flat at 10&nbsp;ms
+after its first run, so the cache-warmth effect that reversed the throughput verdict does not
+appear in server execution times.</p>
+
+<p>Because the transport and queueing noise is stripped out, server-side percentiles separate
+interactive tables from clustered standard tables where end-to-end metrics could not. Across the six
+trials per configuration:</p>
+
+<ul>
+  <li><strong>p95:</strong> 9.2&nbsp;ms (interactive) vs 10.3&nbsp;ms (clustered standard) —
+  Welch <em>t</em>&nbsp;&approx;&nbsp;3.13, <em>p</em>&nbsp;&approx;&nbsp;0.017.</li>
+  <li><strong>p99:</strong> 13.3&nbsp;ms vs 15.2&nbsp;ms —
+  Welch <em>t</em>&nbsp;&approx;&nbsp;4.04, <em>p</em>&nbsp;&approx;&nbsp;0.005.</li>
+  <li><strong>p50:</strong> 7&nbsp;ms in every interactive run; 7&nbsp;ms in five of six clustered
+  runs. Indistinguishable.</li>
+</ul>
+
+<div class="callout">
+  <p><strong>Read this carefully.</strong> <code>SF_EXECUTION_MS</code> has integer-millisecond
+  resolution, so a 1–2&nbsp;ms tail difference sits close to the measurement floor. The result is
+  statistically detectable and consistent in sign — interactive tables have a slightly tighter tail —
+  but it is a <strong>~1&nbsp;ms</strong> effect on a ~72&nbsp;ms end-to-end request. It does not
+  change the practical conclusion that the two are interchangeable for this workload; it only
+  changes it from "no measurable difference" to "a measurable difference too small to act on".</p>
+</div>
+
+<h2 id="statistics">Statistical assessment</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Comparison</th><th class="num">Mean diff</th><th class="num">Welch t</th><th class="num">p</th><th>Verdict</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Interactive vs standard clustered</td>
+      <td class="num">16.1 QPS (3.4 %)</td><td class="num">0.92</td><td class="num">≈ 0.38</td>
+      <td><span class="tag ns">Not significant</span></td>
+    </tr>
+    <tr>
+      <td>Standard clustered vs unclustered</td>
+      <td class="num">74.8 QPS (18.6 %)</td><td class="num">4.61</td><td class="num">&lt; 0.001</td>
+      <td><span class="tag sig">Significant</span></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>Detecting a 3.4&nbsp;% difference at 80&nbsp;% power against a standard deviation of ~30 QPS would
+require roughly <strong>55 runs per configuration</strong> — about 12 hours of warehouse time each.
+An effect that small is not practically measurable at this scale, which is itself the answer: treat
+interactive tables and clustered standard tables as equivalent.</p>
+
+<div class="svg-scroll"><svg viewBox="0 0 760 320" role="img" aria-label="Effect size vs noise floor" style="min-width:540px">
+<style>.t{font:13px -apple-system,system-ui,sans-serif;fill:currentColor}.tb{font:600 13px -apple-system,system-ui,sans-serif;fill:currentColor}.ts{font:11px -apple-system,system-ui,sans-serif;fill:currentColor;opacity:.72}</style>
+<line x1="74" y1="268.0" x2="746" y2="268.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="272.0" text-anchor="end">0</text>
+<line x1="74" y1="222.4" x2="746" y2="222.4" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="226.4" text-anchor="end">4</text>
+<line x1="74" y1="176.8" x2="746" y2="176.8" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="180.8" text-anchor="end">8</text>
+<line x1="74" y1="131.2" x2="746" y2="131.2" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="135.2" text-anchor="end">12</text>
+<line x1="74" y1="85.6" x2="746" y2="85.6" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="89.6" text-anchor="end">16</text>
+<line x1="74" y1="40.0" x2="746" y2="40.0" stroke="currentColor" stroke-opacity="0.16"/>
+<text class="ts" x="66" y="44.0" text-anchor="end">20</text>
+<line x1="74" y1="268" x2="746" y2="268" stroke="currentColor" stroke-opacity="0.45"/>
+<rect x="74" y="199.6" width="672" height="68.4" fill="#f59e0b" fill-opacity="0.10"/>
+<line x1="74" y1="199.6" x2="746" y2="199.6" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6 4"/>
+<text class="ts" x="740" y="192.6" text-anchor="end" fill="#f59e0b">noise floor ~6% CV</text>
+<rect x="196.0" y="229.2" width="92" height="38.8" fill="#29b5e8"/>
+<text class="tb" x="242.0" y="221.2" text-anchor="middle">3.4%</text>
+<text class="t" x="242.0" y="287" text-anchor="middle">Table type</text>
+<text class="t" x="242.0" y="301" text-anchor="middle">(interactive vs clustered)</text>
+<rect x="532.0" y="56.0" width="92" height="212.0" fill="#10b981"/>
+<text class="tb" x="578.0" y="48.0" text-anchor="middle">18.6%</text>
+<text class="t" x="578.0" y="287" text-anchor="middle">Clustering</text>
+<text class="t" x="578.0" y="301" text-anchor="middle">(clustered vs unclustered)</text>
+<text class="ts" x="14" y="154" transform="rotate(-90 14 154)" text-anchor="middle">% difference in mean QPS</text>
+</svg></div>
+<p class="caption">Effect sizes against the measurement noise floor. The clustering effect clears the
+noise band comfortably; the table-type effect sits inside it.</p>
+
+<h2 id="learnings">Learnings</h2>
+
+<h3>About the feature</h3>
+
+<ol>
+  <li><strong>Zero-copy is real and costs nothing measurable.</strong> A clustered standard table on an
+  interactive warehouse matched a dedicated interactive table. There is no throughput or latency
+  penalty for skipping the conversion.</li>
+  <li><strong>Clustering is the lever, not table type.</strong> +19&nbsp;% throughput and
+  &minus;30&nbsp;% p50 from clustering alone. Every clustered run beat every unclustered run.</li>
+  <li><strong>Nothing clusters itself.</strong> Automatic and Optima Clustering require a
+  user-defined key. The Optima features that work without one are not available on interactive
+  warehouses.</li>
+  <li><strong>Attachment is optional but worthwhile</strong>, and must be done in SQL — the Snowsight
+  picker still filters to interactive tables only.</li>
+  <li><strong>A running warehouse is not a warm warehouse.</strong> Per-query-shape compile cache and
+  per-table data cache both warm independently of warehouse uptime.</li>
+</ol>
+
+<h3>About benchmarking</h3>
+
+<ol>
+  <li><strong>Rotate run order, always.</strong> Fixed ordering produced a clean, plausible, and
+  wrong result. Rotation reversed it.</li>
+  <li><strong>Watch for monotonic drift within a configuration</strong> — it is the tell-tale sign of
+  an ordering artifact.</li>
+  <li><strong>Know the noise floor before believing a difference.</strong> Ours was ~6&nbsp;% CV even
+  with 720-second runs and warm caches. Treat sub-10&nbsp;% differences as unresolved.</li>
+  <li><strong>Match the metric to the load point.</strong> p95 is meaningless as a discriminator from
+  a saturated run.</li>
+  <li><strong>Avoid baseline-relative stop conditions.</strong> A ramp that stops at "p95 &gt; N&nbsp;%
+  of a cold baseline" is not comparable across runs.</li>
+  <li><strong>Hold data layout constant when comparing table types</strong> — otherwise you are
+  measuring layout and calling it type.</li>
+</ol>
+
+<h2 id="recommendations">Recommendations</h2>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Situation</th><th>Recommendation</th></tr></thead>
+  <tbody>
+    <tr><td>Existing table, already clustered on your filter columns</td><td>Use zero-copy. Attach it for proactive warming. No conversion needed.</td></tr>
+    <tr><td>Existing table, not clustered</td><td>Add a clustering key matching your WHERE predicates. This is where the gain is — not in converting to an interactive table.</td></tr>
+    <tr><td>Cannot modify the source table (shared, or owned by another team)</td><td>Interactive table with the clustering you need, refreshed via <code>TARGET_LAG</code>.</td></tr>
+    <tr><td>Need auto-refresh or streaming ingestion</td><td>Interactive table with <code>TARGET_LAG</code>.</td></tr>
+    <tr><td>Mixed workload with occasional slow queries</td><td>Set a <code>FALLBACK_WAREHOUSE</code>. Without one, queries over 5 s fail rather than transparently retrying.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="caveats">Caveats</h2>
+
+<ul>
+  <li><strong>Single query shape.</strong> One selective two-predicate lookup on one table. Results
+  may differ for joins, aggregations, or wider scans.</li>
+  <li><strong>Single warehouse size.</strong> Medium, single cluster. Not a scaling study.</li>
+  <li><strong>Small working set.</strong> The table is ~4 GB and fits comfortably in a Medium cache.
+  A working set that exceeds cache would likely widen the clustering gap further.</li>
+  <li><strong>One account, one region.</strong> No cross-region or cross-cloud comparison.</li>
+  <li><strong>Saturated operating point.</strong> Conclusions about p95 apply to 45 connections on
+  this warehouse; a lower load point would separate latency differently.</li>
+  <li><strong>Equivalence is bounded, not proven.</strong> The study shows any interactive-vs-clustered
+  difference is below ~10 %; it does not prove the difference is exactly zero.</li>
+</ul>
+
+<footer>
+  Generated 18 September 2026 from <code>FLAKEBENCH.TEST_RESULTS</code>.
+  Feature behaviour verified against
+  <a href="https://docs.snowflake.com/en/user-guide/interactive">Snowflake interactive analytics documentation</a>,
+  <a href="https://docs.snowflake.com/en/user-guide/tables-auto-reclustering">Automatic Clustering</a>, and
+  <a href="https://docs.snowflake.com/en/user-guide/snowflake-optima">Snowflake Optima</a>.
+  Methodology is reproducible via the <code>spcs-benchmark-runner</code> skill.
+</footer>
+
+</body>
+</html>

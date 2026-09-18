@@ -6,6 +6,7 @@ This package provides:
 - Utils: Identifier validation, quoting, type coercion
 - Models: Pydantic request/response models
 - Config normalizer: Template configuration validation
+- SQL shape: Fixed-arity validation for POINT_LOOKUP and RANGE_SCAN queries
 
 All symbols are re-exported for backward compatibility.
 """
@@ -40,6 +41,13 @@ from .utils import (
 
 # Config normalization
 from .config_normalizer import _normalize_template_config
+
+# SQL shape validation
+from .sql_shape import (
+    VALIDATED_KINDS,
+    count_placeholders,
+    validate_query_shape,
+)
 
 # Pydantic models
 from .models import (
@@ -77,6 +85,10 @@ __all__ = [
     "_row_to_dict",
     # Config normalizer
     "_normalize_template_config",
+    # SQL shape validation
+    "VALIDATED_KINDS",
+    "count_placeholders",
+    "validate_query_shape",
     # Models
     "TemplateConfig",
     "TemplateCreate",

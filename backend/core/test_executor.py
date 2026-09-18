@@ -3730,7 +3730,9 @@ class TestExecutor:
             except Exception:
                 return None
 
-        def _sample_column_value(column_name: Any) -> Any:
+        def _sample_column_value(
+            column_name: Any, fallback_pool_kind: Any = None
+        ) -> Any:
             col_u = str(column_name or "").strip().upper()
             if not col_u:
                 return None
@@ -3739,6 +3741,17 @@ class TestExecutor:
             pooled = self._next_from_pool(worker_id, "ROW", col_u)
             if pooled is not None:
                 return pooled
+
+            # When prepare declared no fallback pool, it sampled a dedicated
+            # GENERIC_SQL pool for this placeholder and that pool is the correct
+            # source. Checking KEY/RANGE first would override it -- and the RANGE
+            # pool is recency-biased for ">= ?" cutoffs, so an equality predicate
+            # resolved from it matches only the newest values.
+            declared_fallback = str(fallback_pool_kind or "").strip().upper()
+            if not declared_fallback:
+                pooled = self._next_from_pool(worker_id, "GENERIC_SQL", col_u)
+                if pooled is not None:
+                    return pooled
 
             # Key/time pools are authoritative for discovered key/time columns.
             if profile and profile.id_column and col_u == str(profile.id_column).strip().upper():
@@ -3850,7 +3863,9 @@ class TestExecutor:
                         else random.uniform(min_n, max_n)
                     )
                 elif strategy == "sample_from_table":
-                    value = _sample_column_value(spec.get("column"))
+                    value = _sample_column_value(
+                        spec.get("column"), spec.get("fallback_pool_kind")
+                    )
                     if value is None:
                         raise ValueError(
                             f"GENERIC_SQL sample_from_table could not sample column {spec.get('column')!r}"
@@ -3866,7 +3881,9 @@ class TestExecutor:
                     ):
                         value = random.choices(values, weights=weights_cfg, k=1)[0]
                     else:
-                        value = _sample_column_value(spec.get("column"))
+                        value = _sample_column_value(
+                            spec.get("column"), spec.get("fallback_pool_kind")
+                        )
                         if value is None:
                             raise ValueError(
                                 "GENERIC_SQL weighted_sample requires values+weights or a sampleable column"

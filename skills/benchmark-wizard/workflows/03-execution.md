@@ -4,6 +4,36 @@
 
 Submit the test configuration to the backend API, monitor execution progress, and collect run IDs for analysis.
 
+## CRITICAL: Execution target must be SPCS
+
+Benchmark runs execute **client-side**: the orchestrator spawns worker
+subprocesses inside whichever host serves the API. The API target therefore
+determines where load is generated from.
+
+**All runs must go through the SPCS-hosted deployment.** Driving a local server
+moves load generation onto the local machine, changing network latency to
+Snowflake and making results incomparable with SPCS-executed runs. Never mix
+SPCS and local runs in one comparison.
+
+Set up the target and credentials before any call below:
+
+```bash
+# SHOW ENDPOINTS IN SERVICE <service>  ->  ingress_url
+export ENDPOINT="<endpoint-id>-<org>-<account>.snowflakecomputing.app"
+export BASE_URL="https://${ENDPOINT}"
+
+# SPCS ingress requires a Snowflake OAuth token, not a bare request
+TOKEN=$(python skills/spcs-benchmark-runner/scripts/spcs_auth.py \
+  --endpoint "$ENDPOINT" --connection default)
+export AUTH="Authorization: Snowflake Token=\"${TOKEN}\""
+```
+
+Every `curl` in this workflow uses `${BASE_URL}` and `-H "$AUTH"`. A response
+that redirects to `sfc-endpoint-login` means the token is missing or expired.
+
+For multi-trial matrices, prefer `skills/spcs-benchmark-runner` over hand-rolled
+polling loops — it re-mints tokens per run and applies Latin-square ordering.
+
 ## CRITICAL: Pre-Execution Confirmation Required
 
 **Before starting ANY test, the agent MUST ask for explicit user confirmation.**
@@ -198,23 +228,17 @@ The test is now running. You can:
 
 Poll status periodically while test runs. For FIND_MAX_CONCURRENCY tests, the test creates multiple test steps that must be tracked individually.
 
-#### Get Test ID from Run
-```bash
-curl -sL "http://127.0.0.1:8000/api/runs/{run_id}/"
-```
+#### Test ID and Run ID are the same value
 
-Response includes `test_id` for detailed monitoring:
-```json
-{
-  "run_id": "run-789xyz",
-  "test_id": "test-abc123",
-  "status": "RUNNING"
-}
-```
+`test_id` and `run_id` are the same UUID. There is **no** `GET /api/runs/{run_id}/`
+route — `backend/api/routes/runs.py` registers only `GET /cache-status`,
+`POST /`, `POST /{run_id}/start`, `POST /{run_id}/stop`,
+`POST /{run_id}/metrics/live`, and `GET /{run_id}/preflight`. Do not attempt a
+lookup to translate one into the other; poll `/api/tests/{run_id}` directly.
 
 #### Monitor Test Progress
 ```bash
-curl -sL "http://127.0.0.1:8000/api/tests/{test_id}/"
+curl -sL "${BASE_URL}/api/tests/{test_id}/" -H "$AUTH"
 ```
 
 For FIND_MAX_CONCURRENCY tests, response includes step-by-step progress:
@@ -240,7 +264,7 @@ For long-running tests, use background polling:
 ```bash
 # Start background monitoring loop
 while true; do
-  curl -sL "http://127.0.0.1:8000/api/tests/{test_id}/" | jq '.status, .current_step, .metrics.qps'
+  curl -sL "${BASE_URL}/api/tests/{test_id}/" | jq '.status, .current_step, .metrics.qps'
   sleep 5
 done
 ```
@@ -249,7 +273,7 @@ Use `run_in_background: true` with bash tool, then check with `bash_output` peri
 
 #### Check for Errors
 ```bash
-curl -sL "http://127.0.0.1:8000/api/tests/{test_id}/error-summary/"
+curl -sL "${BASE_URL}/api/tests/{test_id}/error-summary/"
 ```
 
 **Status values:**
@@ -499,14 +523,14 @@ For comparison tests:
 
 | Action | Command |
 |--------|---------|
-| Create run | `curl -sL -X POST "http://127.0.0.1:8000/api/runs/" -d '{"template_id":"..."}' -H 'Content-Type: application/json'` |
-| Start run | `curl -sL -X POST "http://127.0.0.1:8000/api/runs/{id}/start"` |
-| Check preflight | `curl -sL "http://127.0.0.1:8000/api/runs/{id}/preflight"` |
-| Get test status | `curl -sL "http://127.0.0.1:8000/api/tests/{test_id}/"` |
-| Get error summary | `curl -sL "http://127.0.0.1:8000/api/tests/{test_id}/error-summary/"` |
-| Stop run | `curl -sL -X POST "http://127.0.0.1:8000/api/runs/{id}/stop"` |
-| List templates | `curl -sL "http://127.0.0.1:8000/api/templates/"` |
-| List connections | `curl -sL "http://127.0.0.1:8000/api/connections/"` |
+| Create run | `curl -sL -X POST "${BASE_URL}/api/runs/" -d '{"template_id":"..."}' -H 'Content-Type: application/json'` |
+| Start run | `curl -sL -X POST "${BASE_URL}/api/runs/{id}/start"` |
+| Check preflight | `curl -sL "${BASE_URL}/api/runs/{id}/preflight"` |
+| Get test status | `curl -sL "${BASE_URL}/api/tests/{test_id}/"` |
+| Get error summary | `curl -sL "${BASE_URL}/api/tests/{test_id}/error-summary/"` |
+| Stop run | `curl -sL -X POST "${BASE_URL}/api/runs/{id}/stop"` |
+| List templates | `curl -sL "${BASE_URL}/api/templates/"` |
+| List connections | `curl -sL "${BASE_URL}/api/connections/"` |
 
 ## Next Phase
 

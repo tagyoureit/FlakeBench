@@ -491,8 +491,12 @@
                     <template x-if="!selectedWarehouseDetails?.is_adaptive">
                         <span>
                             <strong>Size:</strong> <span x-text="selectedWarehouseDetails?.size"></span><br>
-                            <strong>Generation:</strong>
-                            <span x-text="selectedWarehouseDetails?.resource_constraint === 'STANDARD_GEN_2' ? 'Gen 2' : 'Gen 1'"></span><br>
+                            <!-- Generation applies only to standard warehouses (per CREATE
+                                 INTERACTIVE WAREHOUSE, GENERATION is not a valid property). -->
+                            <span x-show="!selectedWarehouseDetails?.is_interactive">
+                                <strong>Generation:</strong>
+                                <span x-text="warehouseGenerationLabel(selectedWarehouseDetails) || 'Not set (account default)'"></span><br>
+                            </span>
 
                             <!-- Multi-Cluster Warehouse Details -->
                             <span x-show="selectedWarehouseDetails?.max_cluster_count > 1">
@@ -509,13 +513,16 @@
                                 <strong>Multi-Cluster:</strong> <span class="text-muted">Not Enabled (Single Cluster)</span><br>
                             </span>
 
-                            <!-- Query Acceleration Service (QAS) -->
-                            <hr class="my-2">
-                            <strong>Query Acceleration Service (QAS):</strong>
-                            <span x-text="selectedWarehouseDetails?.enable_query_acceleration ? 'Enabled' : 'Disabled'"></span>
-                            <span x-show="selectedWarehouseDetails?.enable_query_acceleration">
-                                (Max Scale Factor: <span x-text="selectedWarehouseDetails?.query_acceleration_max_scale_factor"></span>)
-                            </span><br>
+                            <!-- Query Acceleration Service (QAS) — not applicable to
+                                 interactive warehouses. -->
+                            <span x-show="!selectedWarehouseDetails?.is_interactive">
+                                <hr class="my-2">
+                                <strong>Query Acceleration Service (QAS):</strong>
+                                <span x-text="selectedWarehouseDetails?.enable_query_acceleration ? 'Enabled' : 'Disabled'"></span>
+                                <span x-show="selectedWarehouseDetails?.enable_query_acceleration">
+                                    (Max Scale Factor: <span x-text="selectedWarehouseDetails?.query_acceleration_max_scale_factor"></span>)
+                                </span><br>
+                            </span>
 
                             <!-- Auto-Suspend/Resume Settings -->
                             <hr class="my-2">
@@ -657,6 +664,10 @@
                                 <template x-if="editingSql === 'point_lookup'">
                                     <div>
                                         <textarea class="form-textarea font-mono text-xs" rows="4" style="min-width: 28rem;" x-model="config.custom_point_lookup_query"></textarea>
+                                        <div class="text-xs mt-1" :class="validateQueryShape('POINT_LOOKUP', config.custom_point_lookup_query) ? 'text-red-600' : 'text-gray-500'">
+                                            <span>Requires exactly one <code>?</code> with an equality predicate (e.g. <code>WHERE col = ?</code>). Placeholders found: <span x-text="countPlaceholders(config.custom_point_lookup_query)"></span>.</span>
+                                            <span x-show="validateQueryShape('POINT_LOOKUP', config.custom_point_lookup_query)" class="block mt-1" x-text="validateQueryShape('POINT_LOOKUP', config.custom_point_lookup_query)"></span>
+                                        </div>
                                         <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('point_lookup')">Done</button>
                                     </div>
                                 </template>
@@ -686,6 +697,10 @@
                                 <template x-if="editingSql === 'range_scan'">
                                     <div>
                                         <textarea class="form-textarea font-mono text-xs" rows="4" style="min-width: 28rem;" x-model="config.custom_range_scan_query"></textarea>
+                                        <div class="text-xs mt-1" :class="validateQueryShape('RANGE_SCAN', config.custom_range_scan_query) ? 'text-red-600' : 'text-gray-500'">
+                                            <span>Requires one or two <code>?</code> with a range predicate (<code>BETWEEN</code>, <code>&gt;</code>, <code>&gt;=</code>, <code>&lt;</code>, <code>&lt;=</code>). Placeholders found: <span x-text="countPlaceholders(config.custom_range_scan_query)"></span>.</span>
+                                            <span x-show="validateQueryShape('RANGE_SCAN', config.custom_range_scan_query)" class="block mt-1" x-text="validateQueryShape('RANGE_SCAN', config.custom_range_scan_query)"></span>
+                                        </div>
                                         <button type="button" class="btn btn-primary btn-sm mt-1" @click="toggleSqlEdit('range_scan')">Done</button>
                                     </div>
                                 </template>
@@ -1391,6 +1406,9 @@
                         key column (auto-detected) and stores them for the benchmark. During execution, 
                         the <code class="bg-gray-100 px-1 rounded">?</code> parameters are bound from these sampled values, ensuring 
                         queries hit actual rows in your table.
+                        Point Lookup takes exactly one <code class="bg-gray-100 px-1 rounded">?</code> and Range Scan one or two;
+                        for other shapes, use a <strong>Generic SQL</strong> entry, which binds each placeholder from its own
+                        configured strategy.
                     </p>
                 </div>
 
@@ -1710,6 +1728,84 @@ function testConfiguration() {
             return Math.round((shortcutTotal + genericTotal) * 100) / 100;
         },
 
+        // --- SQL shape validation -------------------------------------------
+        // Mirrors backend/api/routes/templates_modules/sql_shape.py. Keep the
+        // normalization, regexes, and messages in sync with that module; the
+        // shared cases in tests/fixtures/query_shape_cases.json cover both.
+
+        // Strip comments and single-quoted literals so a literal containing '?'
+        // does not inflate the placeholder count and a comment mentioning
+        // BETWEEN does not trigger a false range-predicate match.
+        stripSqlNoise(sql) {
+            return String(sql || '')
+                .replace(/\/\*[\s\S]*?\*\//g, ' ')
+                .replace(/--[^\n]*/g, ' ')
+                .replace(/'(?:[^']|'')*'/g, "''");
+        },
+
+        countPlaceholders(sql) {
+            const normalized = this.stripSqlNoise(sql);
+            const qCount = (normalized.match(/\?/g) || []).length;
+            if (qCount > 0) return qCount;
+            return (normalized.match(/\$\d+/g) || []).length;
+        },
+
+        describeRangeOperator(upperSql) {
+            if (/\bBETWEEN\b/.test(upperSql)) return 'BETWEEN';
+            const match = upperSql.match(/(>=|<=|>|<)\s*(?:\?|\$\d+)/);
+            return match ? match[1] : null;
+        },
+
+        validateQueryShape(kind, sql) {
+            const kindU = String(kind || '').trim().toUpperCase();
+            const labels = { POINT_LOOKUP: 'Point Lookup', RANGE_SCAN: 'Range Scan' };
+            if (!labels[kindU]) return null;
+
+            const text = String(sql || '').trim();
+            if (!text) return null;
+
+            const label = labels[kindU];
+            const genericHint = 'or switch to a Generic SQL query, which accepts any '
+                + 'number of placeholders with per-placeholder types';
+            const normalized = this.stripSqlNoise(text);
+            const upper = normalized.toUpperCase();
+            const placeholders = this.countPlaceholders(text);
+            const rangeOp = this.describeRangeOperator(upper);
+
+            if (kindU === 'POINT_LOOKUP') {
+                if (placeholders !== 1) {
+                    const suffix = rangeOp
+                        ? `This looks like a Range Scan (found ${rangeOp}) — use the `
+                          + `Range Scan query instead, ${genericHint}.`
+                        : `Use a single-placeholder equality predicate, ${genericHint}.`;
+                    return `${label} requires exactly 1 bind placeholder; found `
+                        + `${placeholders}. ${suffix}`;
+                }
+                if (rangeOp) {
+                    return `${label} must not use a range predicate (found ${rangeOp}). `
+                        + `Use the Range Scan query instead, ${genericHint}.`;
+                }
+                if (!/(?<![<>!])=\s*(?:\?|\$\d+)/.test(normalized)) {
+                    return `${label} requires an equality predicate bound to a `
+                        + 'placeholder (e.g. WHERE col = ?).';
+                }
+                return null;
+            }
+
+            // RANGE_SCAN
+            if (placeholders !== 1 && placeholders !== 2) {
+                return `${label} requires 1 or 2 bind placeholders; found `
+                    + `${placeholders}. Reduce the predicate to a single range, `
+                    + `${genericHint}.`;
+            }
+            if (!rangeOp) {
+                return `${label} requires a range predicate (BETWEEN, >, >=, <, <=). `
+                    + `This looks like a Point Lookup — use the Point Lookup query `
+                    + `instead, ${genericHint}.`;
+            }
+            return null;
+        },
+
         editingSql: null, // tracks which SQL field is being edited: 'point_lookup', 'range_scan', 'insert', 'update', or null
         showQueryHelp: false, // controls visibility of query help modal
 
@@ -1765,6 +1861,14 @@ function testConfiguration() {
                 this.normalizeGenericQuery(q, idx),
             );
         },
+
+        // --- Generic SQL parameter specs -------------------------------------
+        // `parameters` is generated by POST /{template_id}/ai/prepare ("Update
+        // Table Metadata"), which extracts each placeholder's column, samples it
+        // into TEMPLATE_VALUE_POOLS under POOL_KIND='GENERIC_SQL', and writes
+        // sample_from_table specs back into the config. It is not hand-authored,
+        // so there is deliberately no editor for it here - only the count check
+        // in _saveTemplate, which mirrors config_normalizer.py.
 
         addGenericQuery() {
             this.normalizeGenericQueries();
@@ -2220,6 +2324,21 @@ function testConfiguration() {
             el.value = String(value || '');
         },
 
+        // Generation applies only to standard warehouses. Adaptive and interactive
+        // warehouses have no generation, and a blank column on a standard warehouse
+        // means "not set" -- never infer Gen1 from an empty value (the account
+        // default is Gen2 per BCR-2250).
+        warehouseGenerationLabel(wh) {
+            if (!wh) return '';
+            if (wh.is_adaptive || wh.is_interactive) return '';
+            if (wh.generation === '2') return 'Gen 2';
+            if (wh.generation === '1') return 'Gen 1';
+            const constraint = wh.resource_constraint || '';
+            if (constraint === 'STANDARD_GEN_2') return 'Gen 2';
+            if (constraint === 'STANDARD_GEN_1') return 'Gen 1';
+            return constraint || '';
+        },
+
         formatWarehouseOption(wh) {
             // Adaptive: show MXPL + QTM instead of Gen/Size/MCW/QAS
             if (wh.is_adaptive) {
@@ -2228,21 +2347,26 @@ function testConfiguration() {
                 return `${wh.name} (Adaptive, MXPL: ${mxpl}, QTM: ${qtm})`;
             }
 
-            // Standard: Format: WH_NAME (Gen1/2, Size, MCW 1-X?, QAS?)
-            const gen = wh.resource_constraint === 'STANDARD_GEN_2' ? 'Gen2' : 'Gen1';
-            let parts = [gen, wh.size];
+            // Format: WH_NAME (Gen1/2|Interactive, Size, MCW 1-X?, QAS?)
+            let parts = [];
+            if (wh.is_interactive) {
+                parts.push('Interactive');
+            } else {
+                parts.push(this.warehouseGenerationLabel(wh));
+            }
+            parts.push(wh.size);
 
             // Add MCW only if multi-cluster is enabled (max > 1)
             if (wh.max_cluster_count > 1) {
                 parts.push(`MCW ${wh.min_cluster_count}-${wh.max_cluster_count}`);
             }
-            
+
             // Add QAS only if enabled
             if (wh.enable_query_acceleration) {
                 parts.push('QAS');
             }
-            
-            return `${wh.name} (${parts.join(', ')})`;
+
+            return `${wh.name} (${parts.filter(Boolean).join(', ')})`;
         },
 
         async onTableTypeChanged() {
@@ -3110,6 +3234,22 @@ function testConfiguration() {
                 }
             }
 
+            // Match server validation: POINT_LOOKUP and RANGE_SCAN bind a fixed
+            // number of parameters, so mismatched SQL fails at run time with an
+            // opaque driver error. See templates_modules/sql_shape.py.
+            const shapePairs = [
+                ['custom_point_lookup_pct', 'custom_point_lookup_query', 'POINT_LOOKUP'],
+                ['custom_range_scan_pct', 'custom_range_scan_query', 'RANGE_SCAN'],
+            ];
+            for (const [pctK, sqlK, kind] of shapePairs) {
+                if (Number(this.config[pctK] || 0) <= 0) continue;
+                const shapeError = this.validateQueryShape(kind, this.config[sqlK]);
+                if (shapeError) {
+                    window.toast.warning(shapeError);
+                    return;
+                }
+            }
+
             // Validate GENERIC_SQL entries.
             this.normalizeGenericQueries();
             const seenGenericIds = new Set();
@@ -3143,6 +3283,24 @@ function testConfiguration() {
                 if (this.isInteractiveTable(this.config.table_type) && op === 'WRITE' && weight > 0) {
                     window.toast.warning(`Generic SQL '${id}': WRITE operations are not supported for interactive tables.`);
                     return;
+                }
+                // Match server validation: a non-empty parameters list must have one
+                // entry per placeholder. An EMPTY list is the legitimate pre-prepare
+                // state - "Update Table Metadata" generates the specs and needs a
+                // saved template to run against, so it must stay saveable.
+                if (weight > 0 && sql) {
+                    const params = Array.isArray(q.parameters) ? q.parameters : [];
+                    if (params.length) {
+                        const placeholders = this.countPlaceholders(sql);
+                        if (placeholders !== params.length) {
+                            window.toast.warning(
+                                `Generic SQL '${id}': SQL has ${placeholders} placeholder(s) `
+                                + `but ${params.length} parameter(s) are configured. Re-run `
+                                + 'Update Table Metadata to regenerate them.',
+                            );
+                            return;
+                        }
+                    }
                 }
             }
 
@@ -3570,13 +3728,18 @@ function testConfiguration() {
                 this.ensureCanonicalWorkloadConfig();
                 this.config.template_name = template.template_name;
                 this.config.description = template.description;
-                        this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
-                        this.aiPrepError = null;
-                        
-                        // Load analytics if template has runs
-                        if (this.hasResults) {
-                            this.loadTemplateAnalytics(templateId);
-                        }
+                this.aiPrepResult = this.aiPrepStatusFromConfig('Loaded from template');
+                this.aiPrepError = null;
+
+                // Config now mirrors persisted server state, so re-baseline the
+                // dirty snapshot. Without this, Run reports "unsaved changes"
+                // immediately after a successful Save/Update.
+                this.snapshotConfig();
+
+                // Load analytics if template has runs
+                if (this.hasResults) {
+                    this.loadTemplateAnalytics(template.template_id);
+                }
             } catch (e) {
                 console.warn('Failed to reload template:', e);
             }
@@ -3662,7 +3825,14 @@ function testConfiguration() {
                 }
                 // Reload the template to get fresh data
                 await this.reloadTemplate();
-                window.toast.success('Table metadata updated successfully.');
+                const prepWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+                if (prepWarnings.length) {
+                    // Placeholders that yielded no parameters would otherwise fail
+                    // the next run at warmup with no explanation here.
+                    window.toast.warning(prepWarnings.join(' '));
+                } else {
+                    window.toast.success('Table metadata updated successfully.');
+                }
             } catch (e) {
                 console.error('Failed to update table metadata:', e);
                 this.aiPrepError = e.message || String(e);

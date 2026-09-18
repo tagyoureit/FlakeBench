@@ -31,6 +31,7 @@ _COL_ENABLE_QAS = 22    # enable_query_acceleration
 _COL_QAS_SCALE = 23     # query_acceleration_max_scale_factor
 _COL_SCALING_POLICY = 30
 _COL_RESOURCE_CONSTRAINT = 32   # STANDARD_GEN_1, STANDARD_GEN_2, or empty
+_COL_GENERATION = 33    # '1', '2', or empty. Authoritative; standard warehouses only.
 _COL_QUERY_THROUGHPUT_MULTIPLIER = 34   # adaptive only
 _COL_MAX_QUERY_PERFORMANCE_LEVEL = 35   # adaptive only
 _COL_DISABLED_REASONS = 36             # adaptive only
@@ -44,13 +45,19 @@ def _parse_warehouse_row(row: tuple) -> Dict[str, Any]:
         return row[idx] if n > idx else default
 
     wh_type = _get(_COL_TYPE) or ""
-    is_adaptive = wh_type.upper() == "ADAPTIVE"
+    wh_type_upper = wh_type.upper()
+    is_adaptive = wh_type_upper == "ADAPTIVE"
+    # Interactive warehouses have no generation and no QAS. Per CREATE INTERACTIVE
+    # WAREHOUSE, GENERATION/RESOURCE_CONSTRAINT/ENABLE_QUERY_ACCELERATION are not
+    # valid properties, and SHOW WAREHOUSES returns empty for those columns.
+    is_interactive = wh_type_upper == "INTERACTIVE"
 
     wh: Dict[str, Any] = {
         "name": _get(_COL_NAME),
         "state": _get(_COL_STATE),
         "type": wh_type,
         "is_adaptive": is_adaptive,
+        "is_interactive": is_interactive,
         "running": int(_get(_COL_RUNNING) or 0),
         "queued": int(_get(_COL_QUEUED) or 0),
         "is_default": _get(_COL_IS_DEFAULT) == "Y",
@@ -70,6 +77,7 @@ def _parse_warehouse_row(row: tuple) -> Dict[str, Any]:
             "enable_query_acceleration": None,
             "query_acceleration_max_scale_factor": None,
             "resource_constraint": None,
+            "generation": None,
             "max_query_performance_level": _get(_COL_MAX_QUERY_PERFORMANCE_LEVEL),
             "query_throughput_multiplier": (
                 int(_get(_COL_QUERY_THROUGHPUT_MULTIPLIER))
@@ -77,6 +85,23 @@ def _parse_warehouse_row(row: tuple) -> Dict[str, Any]:
                 else None
             ),
             "disabled_reasons": _get(_COL_DISABLED_REASONS) or None,
+        })
+    elif is_interactive:
+        # Interactive warehouses: size and clustering apply, but generation and QAS
+        # do not. Report those as None rather than inferring a default.
+        wh.update({
+            "size": _get(_COL_SIZE),
+            "min_cluster_count": int(_get(_COL_MIN_CLUSTER) or 1),
+            "max_cluster_count": int(_get(_COL_MAX_CLUSTER) or 1),
+            "started_clusters": int(_get(_COL_STARTED_CLUSTERS) or 0),
+            "scaling_policy": _get(_COL_SCALING_POLICY) or "STANDARD",
+            "enable_query_acceleration": None,
+            "query_acceleration_max_scale_factor": None,
+            "resource_constraint": None,
+            "generation": None,
+            "max_query_performance_level": None,
+            "query_throughput_multiplier": None,
+            "disabled_reasons": None,
         })
     else:
         wh.update({
@@ -93,8 +118,17 @@ def _parse_warehouse_row(row: tuple) -> Dict[str, Any]:
                 if _get(_COL_QAS_SCALE) is not None
                 else 0
             ),
-            # STANDARD_GEN_1, STANDARD_GEN_2, or None (treated as Gen1)
+            # STANDARD_GEN_1, STANDARD_GEN_2, or empty. Empty means the warehouse
+            # has no explicit setting -- do NOT infer a generation from it. The
+            # account default changed to Gen2 (BCR-2250), so a blank value is not
+            # evidence of Gen1.
             "resource_constraint": _get(_COL_RESOURCE_CONSTRAINT) or None,
+            # Authoritative generation column ('1' / '2'), empty when unset.
+            "generation": (
+                str(_get(_COL_GENERATION)).strip()
+                if str(_get(_COL_GENERATION) or "").strip()
+                else None
+            ),
             "max_query_performance_level": None,
             "query_throughput_multiplier": None,
             "disabled_reasons": None,

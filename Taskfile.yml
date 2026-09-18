@@ -18,27 +18,36 @@ tasks:
     cmds:
       - task --list
 
-  css:build:
-    desc: "Build Tailwind CSS (minified)"
+  css:ensure-tailwind:
+    desc: "Verify the tailwindcss binary is runnable, repairing a stale console script"
+    internal: true
     preconditions:
       - sh: command -v uv
         msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    cmds:
+      - |
+        if ! uv run tailwindcss --help >/dev/null 2>&1; then
+          echo "tailwindcss is not runnable — repairing (stale console script or missing binary)..."
+          uv pip install --force-reinstall --quiet pytailwindcss
+          uv run tailwindcss --help >/dev/null
+          echo "tailwindcss repaired."
+        fi
+
+  css:build:
+    desc: "Build Tailwind CSS (minified)"
+    deps: [css:ensure-tailwind]
     cmds:
       - uv run tailwindcss -i backend/static/css/input.css -o backend/static/css/tailwind.css --minify
 
   css:watch:
     desc: "Watch and rebuild Tailwind CSS on changes"
-    preconditions:
-      - sh: command -v uv
-        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    deps: [css:ensure-tailwind]
     cmds:
       - uv run tailwindcss -i backend/static/css/input.css -o backend/static/css/tailwind.css --watch
 
   css:dev:
     desc: "Build Tailwind CSS (unminified, for debugging)"
-    preconditions:
-      - sh: command -v uv
-        msg: "uv not found. Install from https://docs.astral.sh/uv/"
+    deps: [css:ensure-tailwind]
     cmds:
       - uv run tailwindcss -i backend/static/css/input.css -o backend/static/css/tailwind.css
 
@@ -85,6 +94,14 @@ tasks:
         msg: "uv not found. Install from https://docs.astral.sh/uv/"
     cmds:
       - uv run pytest tests/ -v --ignore=tests/e2e -m "not e2e"
+
+  test:js:
+    desc: "Run frontend regression checks (no browser required)"
+    preconditions:
+      - sh: command -v node
+        msg: "node not found. Install Node.js to run frontend checks."
+    cmds:
+      - node tests/js/verify_warehouse_labels.mjs
 
   test:e2e:
     desc: "Run all E2E tests (requires E2E schema setup + running server)"
